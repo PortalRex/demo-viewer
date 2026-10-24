@@ -52,13 +52,13 @@ export class HttpFS implements GameFS {
 	async read(path: string, offset = 0, length?: number) {
 		const headers: HeadersInit = offset || length !== undefined ? {Range: `bytes=${offset}-${length === undefined ? '' : offset + length - 1}`} : {};
 		const r = await fetch(this.base + path.split('/').map(encodeURIComponent).join('/'), {headers});
-		if (!r.ok) return null;
+		if (!r.ok || r.status === 204) return null;
 		return new Uint8Array(await r.arrayBuffer());
 	}
 
 	async size(path: string) {
 		const r = await fetch(this.base + path.split('/').map(encodeURIComponent).join('/'), {method: 'HEAD'});
-		return r.ok ? Number(r.headers.get('Content-Length')) : null;
+		return r.ok && r.status !== 204 ? Number(r.headers.get('Content-Length')) : null;
 	}
 }
 

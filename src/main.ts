@@ -10,6 +10,10 @@ import type {EntityTimeline} from './net/entities.ts';
 import {loadBsp} from './game/bsp.ts';
 import type {BspMap} from './game/bsp.ts';
 import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
+import {GameFiles} from './game/files.ts';
+import {Materials} from './game/materials.ts';
+import type {MaterialInfo} from './game/materials.ts';
+import {Zip} from './game/zip.ts';
 import type {GameFS} from './game/gamefs.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -37,6 +41,12 @@ const view3d = new View3D($('view3d'));
 const entityCache = new Map<number, EntityTimeline | null>();
 const mapCache = new Map<string, Promise<BspMap>>();
 let gameFS: GameFS | null = null;
+let gameFiles: GameFiles | null = null;
+let materials: Materials | null = null;
+const mapPaks = new Map<string, Zip | null>();
+view3d.onLoaded = () => {
+	if (!playing) render();
+};
 let mapToken = 0;
 
 function entitiesFor(index: number): EntityTimeline | null {
@@ -69,6 +79,7 @@ async function connectGame() {
 		const fs = await pickGameFolder();
 		if (fs) {
 			gameFS = fs;
+			gameFiles = null;
 			mapCache.clear();
 			load3dMap();
 		}
@@ -91,12 +102,31 @@ async function load3dMap() {
 	}
 	const token = ++mapToken;
 	const fs = gameFS;
+	if (!gameFiles || gameFiles.fs !== fs) {
+		message3d('Reading the game file index…');
+		gameFiles = new GameFiles(fs);
+		await gameFiles.init(pb.run.gameDir);
+		materials = new Materials(gameFiles);
+	}
+	const files = gameFiles;
+	const mats = materials!;
 	let promise = mapCache.get(seg.map);
 	if (!promise) {
 		message3d(`Loading ${seg.map}…`);
 		promise = (async () => {
 			for (const path of mapPaths(seg.map, pb!.run.gameDir)) {
-				if ((await fs.size(path)) !== null) return loadBsp(fs, path, seg.map);
+				if ((await fs.size(path)) !== null) {
+					return loadBsp(fs, path, seg.map, {
+						materials: async (names, pak) => {
+							const zip = pak ? new Zip(pak) : null;
+							mapPaks.set(seg.map, zip);
+							files.mapPak = zip;
+							const out = new Map<string, MaterialInfo>();
+							await Promise.all(names.map(async n => out.set(n, await mats.get(n))));
+							return out;
+						},
+					});
+				}
 			}
 			throw new Error(`${seg.map}.bsp isn't in the game folder (${fs.label}).`);
 		})();
@@ -106,7 +136,8 @@ async function load3dMap() {
 	try {
 		const bsp = await promise;
 		if (token !== mapToken) return;
-		view3d.setMap(bsp);
+		files.mapPak = mapPaks.get(seg.map) ?? null;
+		view3d.setMap(bsp, files);
 		view3d.setSegment(pb.tracks[currentSeg], entitiesFor(currentSeg));
 		message3d(null);
 		render();

@@ -1,10 +1,11 @@
 // Source BSP (version 21, Portal 2) geometry: world faces, displacements and
 // the brush models that brush entities (doors, elevators, panels) use.
 import type {GameFS} from './gamefs.ts';
+import type {MaterialInfo} from './materials.ts';
 
 const LUMP = {
 	ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7, EDGES: 12, SURFEDGES: 13,
-	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
+	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
 } as const;
 
 const SURF_SKY2D = 0x2, SURF_SKY = 0x4, SURF_TRIGGER = 0x40, SURF_NODRAW = 0x80, SURF_HINT = 0x100, SURF_SKIP = 0x200;
@@ -24,16 +25,26 @@ export interface ModelMesh {
 	edges: Float32Array;    // face outlines, as line segment pairs
 }
 
+export interface StaticProp {
+	model: string;
+	origin: [number, number, number];
+	angles: [number, number, number];
+	skin: number;
+}
+
 export interface BspMap {
 	name: string;
 	models: ModelMesh[];  // 0 = world
+	staticProps: StaticProp[];
+	materialsRead: number;  // surfaces coloured from their material files
 	bounds: {min: [number, number, number]; max: [number, number, number]};
 	faceCount: number;
 	warnings: string[];
 }
 
-// Colours by texture name. Portal 2 marks surfaces unportalable in their
-// materials; the names are a close stand-in (white panels vs black metal).
+// Colours by texture name, for when a material file can't be read. Portal 2
+// marks surfaces unportalable in their materials; the names are a close
+// stand-in (white panels vs black metal).
 export function classify(texture: string): Surface {
 	const t = texture.toLowerCase();
 	if (/glass|window|grate_glass|fizzler/.test(t)) return 'glass';
@@ -55,6 +66,15 @@ const SURFACE_COLORS: Record<Exclude<Surface, 'other'>, [number, number, number]
 function textureColor(r: number, g: number, b: number): [number, number, number] {
 	const c = (v: number) => Math.min(0.62, Math.max(0.12, Math.pow(Math.max(0, v), 1 / 2.2) * 0.75));
 	return [c(r), c(g), c(b)];
+}
+
+// a touch of the texture's own colour, so surfaces of the same kind still
+// differ (tiles vs concrete, painted vs bare metal)
+function tint(base: [number, number, number], refl: number[], surface: Surface): [number, number, number] {
+	if (surface !== 'portalable' && surface !== 'metal') return base;
+	const t = textureColor(refl[0], refl[1], refl[2]);
+	const k = surface === 'portalable' ? 0.18 : 0.3;
+	return [base[0] * (1 - k) + t[0] * k, base[1] * (1 - k) + t[1] * k, base[2] * (1 - k) + t[2] * k];
 }
 
 class Builder {
@@ -92,7 +112,13 @@ interface Lump {
 	length: number;
 }
 
-export async function loadBsp(fs: GameFS, path: string, name: string): Promise<BspMap> {
+export interface BspOptions {
+	// properties of every material the map's visible faces use; gets the
+	// map's pak file first (maps carry their own patched materials)
+	materials?: (names: string[], pak: Uint8Array | null) => Promise<Map<string, MaterialInfo>>;
+}
+
+export async function loadBsp(fs: GameFS, path: string, name: string, options: BspOptions = {}): Promise<BspMap> {
 	const head = await fs.read(path, 0, 1036);
 	if (!head) throw new Error(`${path} not found`);
 	const hv = new DataView(head.buffer, head.byteOffset, head.byteLength);
@@ -126,6 +152,8 @@ export async function loadBsp(fs: GameFS, path: string, name: string): Promise<B
 		[LUMP.PLANES, LUMP.TEXDATA, LUMP.VERTEXES, LUMP.TEXINFO, LUMP.FACES, LUMP.EDGES, LUMP.SURFEDGES, LUMP.MODELS, LUMP.DISPINFO, LUMP.DISP_VERTS, LUMP.TEXDATA_STRING_DATA, LUMP.TEXDATA_STRING_TABLE].map(read),
 	);
 
+	const staticProps = await readStaticProps(fs, path, lumps[LUMP.GAME_LUMP], warnings);
+
 	const vert = (i: number) => [verts.getFloat32(i * 12, true), verts.getFloat32(i * 12 + 4, true), verts.getFloat32(i * 12 + 8, true)];
 	const textureName = (texinfoIndex: number) => {
 		const td = texinfo.getInt32(texinfoIndex * 72 + 68, true);
@@ -156,6 +184,24 @@ export async function loadBsp(fs: GameFS, path: string, name: string): Promise<B
 	const nModels = models.byteLength / 48;
 	const meshes: ModelMesh[] = [];
 	let faceCount = 0;
+	// resolve the materials of the faces that will be drawn
+	const skipped = (ti: number) => {
+		const lower = textureName(ti).toLowerCase();
+		return (texinfo.getInt32(ti * 72 + 64, true) & SKIP_FLAGS) !== 0 || (lower.startsWith('tools/') && !lower.includes('toolsblack'));
+	};
+	let materials = new Map<string, MaterialInfo>();
+	if (options.materials) {
+		const names = new Set<string>();
+		for (let ti = 0; ti < texinfo.byteLength / 72; ti++) if (!skipped(ti)) names.add(textureName(ti).toLowerCase());
+		const pak = lumps[LUMP.PAKFILE].length ? await fs.read(path, lumps[LUMP.PAKFILE].offset, lumps[LUMP.PAKFILE].length) : null;
+		try {
+			materials = await options.materials([...names], pak);
+		} catch (e) {
+			warnings.push(`Couldn't read materials: ${(e as Error).message}`);
+		}
+	}
+	let materialsRead = 0;
+
 	const textureCache = new Map<number, {surface: Surface; skip: boolean; color: [number, number, number]}>();
 	const texInfoOf = (ti: number) => {
 		let v = textureCache.get(ti);
@@ -163,13 +209,20 @@ export async function loadBsp(fs: GameFS, path: string, name: string): Promise<B
 			const name = textureName(ti);
 			const flags = texinfo.getInt32(ti * 72 + 64, true);
 			const lower = name.toLowerCase();
-			const surface = classify(name);
+			const mat = materials.get(lower);
+			let surface: Surface;
+			if (mat?.found) {
+				materialsRead++;
+				surface = mat.liquid ? 'liquid' : mat.translucent ? 'glass' : mat.noPortal ? 'metal' : 'portalable';
+			} else {
+				surface = classify(name);
+			}
 			const td = texinfo.getInt32(ti * 72 + 68, true);
 			const refl = td >= 0 && td * 32 < texdata.byteLength ? [texdata.getFloat32(td * 32, true), texdata.getFloat32(td * 32 + 4, true), texdata.getFloat32(td * 32 + 8, true)] : [0.4, 0.4, 0.4];
 			v = {
 				surface,
 				skip: (flags & SKIP_FLAGS) !== 0 || (lower.startsWith('tools/') && !lower.includes('toolsblack')),
-				color: surface === 'other' ? textureColor(refl[0], refl[1], refl[2]) : SURFACE_COLORS[surface],
+				color: surface === 'other' ? textureColor(refl[0], refl[1], refl[2]) : tint(SURFACE_COLORS[surface], refl, surface),
 			};
 			textureCache.set(ti, v);
 		}
@@ -207,7 +260,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string): Promise<B
 
 	const b = (i: number) => models.getFloat32(i, true);
 	return {
-		name, models: meshes, faceCount, warnings,
+		name, models: meshes, staticProps, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }
@@ -258,4 +311,52 @@ function buildDisplacement(out: Builder, corners: number[][], info: DataView, dv
 			}
 		}
 	}
+}
+
+// Static props: the game lump's "sprp" entry. Entries grew over versions;
+// the origin, angles and model index sit at the start of all of them.
+async function readStaticProps(fs: GameFS, path: string, lump: {offset: number; length: number}, warnings: string[]): Promise<StaticProp[]> {
+	if (lump.length < 4) return [];
+	const gl = await fs.read(path, lump.offset, lump.length);
+	if (!gl) return [];
+	const g = new DataView(gl.buffer, gl.byteOffset, gl.byteLength);
+	const count = g.getInt32(0, true);
+	for (let i = 0; i < count; i++) {
+		const o = 4 + i * 16;
+		if (g.getUint32(o, true) !== 0x73707270) continue;  // 'sprp'
+		const flags = g.getUint16(o + 4, true);
+		const offset = g.getInt32(o + 8, true), length = g.getInt32(o + 12, true);
+		if (flags & 1) {
+			warnings.push("Static props are compressed in this map, so they aren't shown.");
+			return [];
+		}
+		const b = await fs.read(path, offset, length);
+		if (!b) return [];
+		const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+		let p = 0;
+		const dict: string[] = [];
+		const nDict = v.getInt32(p, true);
+		p += 4;
+		for (let k = 0; k < nDict; k++, p += 128) {
+			const raw = b.subarray(p, p + 128);
+			const end = raw.indexOf(0);
+			dict.push(String.fromCharCode(...raw.subarray(0, end < 0 ? 128 : end)));
+		}
+		p += 4 + v.getInt32(p, true) * 2;  // leaves
+		const nProps = v.getInt32(p, true);
+		p += 4;
+		const size = nProps ? Math.floor((b.length - p) / nProps) : 0;
+		const props: StaticProp[] = [];
+		for (let k = 0; k < nProps; k++, p += size) {
+			const f = (o: number) => v.getFloat32(p + o, true);
+			props.push({
+				origin: [f(0), f(4), f(8)],
+				angles: [f(12), f(16), f(20)],
+				model: dict[v.getUint16(p + 24, true)] ?? '',
+				skin: size >= 36 ? v.getInt32(p + 32, true) : 0,
+			});
+		}
+		return props;
+	}
+	return [];
 }

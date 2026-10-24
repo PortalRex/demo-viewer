@@ -12,10 +12,13 @@ the recording stopped cleanly.
 **3D view** (Chrome/Edge): the map is read from your own Portal 2 install (pick
 the `Portal 2` folder; in dev the server reads it from `P2_DIR`, default the
 Steam path). World geometry, displacements and brush entities (doors,
-elevators, panels) come from the BSP; portals, props and the player come from
-the entity data decoded from the run. White panels are portalable, dark ones
-aren't (guessed from texture names); other surfaces use their texture's
-average colour. Camera: the player's eyes, or orbit around the player.
+elevators, panels) and static props come from the BSP; portals, moving props
+and the player come from the entity data decoded from the run. Models are read
+from the game's VPKs (and the map's own pak file) without bones, so animated
+ones show in their reference pose. Surfaces are light where portals can go and
+dark where they can't, read from each material's `%noportal` (map-specific
+patch materials followed to their base); glass and liquids are see-through.
+Camera: the player's eyes, or orbit around the player.
 
     npm install
     npm run dev                     # http://localhost:5173
@@ -26,8 +29,8 @@ In dev, `#load=fixtures/<file>` opens a file from `fixtures/` (git-ignored).
 Layout: `src/core` reads the files into a format-independent `Run`
 (`model.ts`); `src/net` decodes entities from the network data (data tables,
 string tables, svc_PacketEntities, and proofs' ENTITIES records);
-`src/game` reads the game files (BSP); `src/player` turns a run into one
+`src/game` reads the game files (VPK, BSP, materials, models); `src/player` turns a run into one
 timeline; `src/ui` draws it.
 
     node --experimental-strip-types tools/entprobe.ts file.sarp   # entity decode summary
-    node --experimental-strip-types tools/bspprobe.ts sp_a1_intro1  # map geometry summary
+    node --experimental-strip-types tools/bspprobe.ts sp_a1_intro1  # map, materials, static props

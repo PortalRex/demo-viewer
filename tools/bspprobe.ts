@@ -1,28 +1,18 @@
-// Loads maps from the local install with the viewer's BSP reader:
+// Loads maps from the local install with the viewer's readers (geometry,
+// materials, static props):
 //   node --experimental-strip-types tools/bspprobe.ts sp_a1_intro1 sp_a2_column_blocker
-import {openSync, readSync, fstatSync, existsSync} from 'node:fs';
+import {existsSync} from 'node:fs';
 import {loadBsp} from '../src/game/bsp.ts';
 import {mapPaths} from '../src/game/gamefs.ts';
-import type {GameFS} from '../src/game/gamefs.ts';
+import {GameFiles} from '../src/game/files.ts';
+import {Materials} from '../src/game/materials.ts';
+import type {MaterialInfo} from '../src/game/materials.ts';
+import {Zip} from '../src/game/zip.ts';
+import {loadModel} from '../src/game/mdl.ts';
+import {nodeFS, ROOT} from './nodefs.ts';
 
-const ROOT = process.env.P2_DIR ?? 'C:/Program Files (x86)/Steam/steamapps/common/Portal 2';
-const fs: GameFS = {
-	label: 'node',
-	async read(path, offset = 0, length) {
-		const p = `${ROOT}/${path}`;
-		if (!existsSync(p)) return null;
-		const fd = openSync(p, 'r');
-		const n = length ?? fstatSync(fd).size - offset;
-		const buf = new Uint8Array(n);
-		readSync(fd, buf, 0, n, offset);
-		return buf;
-	},
-	async size(path) {
-		const p = `${ROOT}/${path}`;
-		return existsSync(p) ? fstatSync(openSync(p, 'r')).size : null;
-	},
-};
-
+const files = new GameFiles(nodeFS);
+await files.init('portal2');
 for (const map of process.argv.slice(2)) {
 	const path = mapPaths(map, 'portal2').find(p => existsSync(`${ROOT}/${p}`));
 	if (!path) {
@@ -30,7 +20,32 @@ for (const map of process.argv.slice(2)) {
 		continue;
 	}
 	const t0 = performance.now();
-	const bsp = await loadBsp(fs, path, map);
+	let stats = '';
+	const bsp = await loadBsp(nodeFS, path, map, {
+		materials: async (names, pak) => {
+			files.mapPak = pak ? new Zip(pak) : null;
+			const mats = new Materials(files);
+			const out = new Map<string, MaterialInfo>();
+			await Promise.all(names.map(async n => out.set(n, await mats.get(n))));
+			const found = [...out.values()].filter(m => m.found);
+			stats = `${found.length}/${names.length} materials read, ${found.filter(m => m.noPortal).length} noportal, ${found.filter(m => m.translucent).length} translucent; missing: ${[...out].filter(([, m]) => !m.found).map(([n]) => n).slice(0, 4).join(', ')}`;
+			return out;
+		},
+	});
 	const tris = (m: {positions: Float32Array}) => m.positions.length / 9;
-	console.log(`${map}: ${bsp.faceCount} faces, ${bsp.models.length} models, world ${tris(bsp.models[0].solid)} + ${tris(bsp.models[0].translucent)} tris, ${(performance.now() - t0).toFixed(0)} ms, bounds ${bsp.bounds.min.map(Math.round)} .. ${bsp.bounds.max.map(Math.round)}`, bsp.warnings);
+	console.log(`${map}: ${bsp.faceCount} faces, world ${tris(bsp.models[0].solid)} tris, ${(performance.now() - t0).toFixed(0)} ms`, bsp.warnings);
+	console.log(`  ${stats}`);
+	const unique = [...new Set(bsp.staticProps.map(p => p.model))];
+	const t1 = performance.now();
+	let ok = 0, triCount = 0;
+	const failed: string[] = [];
+	for (const m of unique) {
+		const mdl = await loadModel(files, m, [0.5, 0.5, 0.5]).catch(e => (failed.push(`${m} (${e.message})`), null));
+		if (mdl) {
+			ok++;
+			triCount += mdl.mesh.positions.length / 9;
+		} else if (!failed.some(f => f.startsWith(m))) failed.push(m);
+	}
+	console.log(`  ${bsp.staticProps.length} static props, ${unique.length} models: ${ok} loaded (${triCount} tris) in ${(performance.now() - t1).toFixed(0)} ms; failed: ${failed.slice(0, 4).join(', ')}`);
+	if (bsp.staticProps[0]) console.log(`  first prop`, bsp.staticProps[0]);
 }

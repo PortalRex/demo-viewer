@@ -3,6 +3,9 @@
 import * as THREE from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
 import type {BspMap, MeshData} from '../game/bsp.ts';
+import type {GameFiles} from '../game/files.ts';
+import {loadModel} from '../game/mdl.ts';
+import type {StudioModel} from '../game/mdl.ts';
 import type {EntityTimeline, EntityTrack} from '../net/entities.ts';
 import {keyAt} from '../net/entities.ts';
 import type {SegmentTrack, ViewState} from '../player/playback.ts';
@@ -53,6 +56,12 @@ export class View3D {
 	private entities: EntityTimeline | null = null;
 	private objects = new Map<EntityTrack, THREE.Object3D>();
 	private lastTarget: THREE.Vector3 | null = null;
+	private propGroup = new THREE.Group();
+	private propMat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
+	private files: GameFiles | null = null;
+	private models = new Map<string, Promise<THREE.BufferGeometry | null>>();
+	private mapToken = 0;
+	onLoaded = () => {};
 
 	constructor(container: HTMLElement) {
 		this.container = container;
@@ -63,7 +72,7 @@ export class View3D {
 		hemi.position.set(0, 0, 1);
 		const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 		sun.position.set(0.35, 0.25, 1);
-		this.scene.add(hemi, sun, this.mapGroup, this.entityGroup);
+		this.scene.add(hemi, sun, this.mapGroup, this.propGroup, this.entityGroup);
 
 		const body = new THREE.CapsuleGeometry(16, 40, 4, 12);
 		body.rotateX(Math.PI / 2);
@@ -97,11 +106,41 @@ export class View3D {
 		}
 	}
 
-	setMap(bsp: BspMap | null) {
+	// a model's geometry, loaded once per map (maps can carry their own models)
+	private model(name: string): Promise<THREE.BufferGeometry | null> {
+		const key = name.toLowerCase();
+		let p = this.models.get(key);
+		if (!p) {
+			const files = this.files;
+			const color: [number, number, number] = /cube|box/.test(key) ? [0.66, 0.73, 0.8] : [0.52, 0.52, 0.5];
+			p = files ? loadModel(files, key, color).then((m: StudioModel | null) => (m ? geometry(m.mesh) : null)).catch(() => null) : Promise.resolve(null);
+			this.models.set(key, p);
+		}
+		return p;
+	}
+
+	setMap(bsp: BspMap | null, files: GameFiles | null = null) {
 		this.bsp = bsp;
+		this.files = files;
+		this.models.clear();
 		this.mapGroup.clear();
+		this.propGroup.clear();
 		this.clearEntities();
+		const token = ++this.mapToken;
 		if (!bsp) return;
+		// static props, as they load
+		for (const prop of bsp.staticProps) {
+			this.model(prop.model).then(g => {
+				if (!g || token !== this.mapToken) return;
+				const mesh = new THREE.Mesh(g, this.propMat);
+				mesh.position.set(...prop.origin);
+				mesh.rotation.copy(toEuler(prop.angles));
+				mesh.matrixAutoUpdate = false;
+				mesh.updateMatrix();
+				this.propGroup.add(mesh);
+				this.onLoaded();
+			});
+		}
 		const world = bsp.models[0];
 		this.mapGroup.add(new THREE.Mesh(geometry(world.solid), this.solidMat));
 		this.mapGroup.add(this.outline(world.edges));
@@ -186,6 +225,13 @@ export class View3D {
 		const box = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), new THREE.MeshLambertMaterial({color: cube ? 0x9fb7cf : 0x8a7f6e, transparent: !cube, opacity: cube ? 1 : 0.55}));
 		box.position.set((t.mins[0] + t.maxs[0]) / 2, (t.mins[1] + t.maxs[1]) / 2, (t.mins[2] + t.maxs[2]) / 2);
 		group.add(box);
+		// swap the box for the real model when it loads
+		this.model(t.model).then(g => {
+			if (!g) return;
+			group.remove(box);
+			group.add(new THREE.Mesh(g, this.propMat));
+			this.onLoaded();
+		});
 		return group;
 	}
 

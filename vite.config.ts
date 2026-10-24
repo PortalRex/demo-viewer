@@ -27,7 +27,9 @@ function devGameFiles(): Plugin {
 					if (!st.isFile()) throw new Error('not a file');
 					size = st.size;
 				} catch {
-					res.statusCode = 404;
+					// "no content" rather than 404: lookups for loose files that
+					// aren't there are normal, and 404s fill the console
+					res.statusCode = 204;
 					return res.end();
 				}
 				res.setHeader('Accept-Ranges', 'bytes');
