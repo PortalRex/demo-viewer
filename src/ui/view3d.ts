@@ -6,12 +6,15 @@ import type {BspMap, MeshData, MaterialGroup, ModelMesh} from '../game/bsp.ts';
 import type {GameFiles} from '../game/files.ts';
 import type {Materials, MaterialInfo} from '../game/materials.ts';
 import {loadModel} from '../game/mdl.ts';
-import type {StudioModel} from '../game/mdl.ts';
+import type {StudioModel, ModelGroup} from '../game/mdl.ts';
+import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
+import type {Skeleton} from '../game/anim.ts';
+import {AnimatedModel, bakePose, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
 import type {EntityTimeline, EntityTrack} from '../net/entities.ts';
-import {keyAt} from '../net/entities.ts';
+import {keyAt, keyIndexAt} from '../net/entities.ts';
 import type {SegmentTrack, ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
 
@@ -162,6 +165,13 @@ class MaterialLibrary {
 	}
 }
 
+interface ModelAsset {
+	name: string;
+	model: StudioModel;
+	skeleton: Skeleton | null;
+	parts: {group: ModelGroup; raw: THREE.BufferGeometry; baked: THREE.BufferGeometry; material: THREE.Material; name: string}[];
+}
+
 export class View3D {
 	readonly container: HTMLElement;
 	mode: CameraMode = 'eyes';
@@ -185,7 +195,8 @@ export class View3D {
 	private skyView = new THREE.PerspectiveCamera(VERTICAL_FOV, 1, 0.5, 40000);
 	private worldFog: THREE.Fog | null = null;
 	private files: GameFiles | null = null;
-	private models = new Map<string, Promise<THREE.Object3D | null>>();
+	private models = new Map<string, Promise<ModelAsset | null>>();
+	private interval = 1 / 60;
 	private mapToken = 0;
 	onLoaded = () => {};
 
@@ -237,27 +248,28 @@ export class View3D {
 		}
 	}
 
-	// a model (all its material groups), loaded once per map and skin;
-	// returns a template to clone (maps can carry their own models)
-	private model(name: string, skin = 0): Promise<THREE.Object3D | null> {
+	// a model, loaded once per map and skin (maps can carry their own models):
+	// its groups with materials, skeleton, and geometry posed as the game
+	// draws it unanimated (sequence 0)
+	private model(name: string, skin = 0): Promise<ModelAsset | null> {
 		const key = `${name.toLowerCase()}#${skin}`;
 		let p = this.models.get(key);
 		if (!p) {
 			const files = this.files, library = this.library;
 			const color: [number, number, number] = /cube|box/.test(key) ? [0.66, 0.73, 0.8] : [0.52, 0.52, 0.5];
 			p = files && library
-				? loadModel(files, name, color, skin).then((m: StudioModel | null) => {
+				? loadModel(files, name, color, skin).then(async (m: StudioModel | null) => {
 					if (!m) return null;
-					const group = new THREE.Group();
-					for (const g of m.groups) {
-						const mesh = new THREE.Mesh(geometry(g), library.forModel(g.materialCandidates));
-						mesh.name = `${name} ${g.materialCandidates[0]}`;
-						mesh.userData.meshVertex = g.meshVertex;
-						mesh.userData.materialCandidates = g.materialCandidates;
-						group.add(mesh);
-					}
-					group.userData.checksum = m.checksum;
-					return group;
+					const skeleton = await loadSkeleton(files, m.bytes).catch(() => null);
+					const rest = skeleton ? referencePose(skeleton) : null;
+					const mats = skeleton && rest ? (samplePose(skeleton, 0, 0, rest), skinMatrices(skeleton, rest)) : null;
+					const parts = m.groups.map(g => {
+						const raw = geometry(g);
+						const posed = mats ? bakePose(g, mats) : null;
+						const baked = posed ? geometry({...g, positions: posed.positions, normals: posed.normals}) : raw;
+						return {group: g, raw, baked, material: library.forModel(g.materialCandidates), name: `${name} ${g.materialCandidates[0]}`};
+					});
+					return {name, model: m, skeleton, parts};
 				}).catch(() => null)
 				: Promise.resolve(null);
 			this.models.set(key, p);
@@ -265,69 +277,15 @@ export class View3D {
 		return p;
 	}
 
-	// The 2D skybox: six faces around the camera, drawn behind everything.
-	// Face orientation follows Quake 2's, which Source kept: rt +X, lf +Y,
-	// bk -X, ft -Y; each face's s/t run as in Quake 2's MakeSkyVec.
-	private loadSky(bsp: BspMap, token: number) {
-		this.sky.clear();
-		const name = bsp.entities.find(e => e.classname === 'worldspawn')?.skyname;
-		if (!name || !this.library) return;
-		const faces: [string, (s: number, t: number) => [number, number, number]][] = [
-			['rt', (s, t) => [1, -s, t]],
-			['bk', (s, t) => [-1, s, t]],
-			['lf', (s, t) => [s, 1, t]],
-			['ft', (s, t) => [-s, -1, t]],
-			['up', (s, t) => [-t, -s, 1]],
-			['dn', (s, t) => [t, -s, -1]],
-		];
-		const library = this.library;
-		for (const [side, at] of faces) {
-			// HDR maps use <name>_hdr when it exists
-			library.skyTexture(`skybox/${name}_hdr${side}`).then(t => t ?? library.skyTexture(`skybox/${name}${side}`)).then(tex => {
-				if (!tex || token !== this.mapToken) return;
-				const corners: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-				const pos: number[] = [], uv: number[] = [];
-				for (const i of [0, 1, 2, 0, 2, 3]) {
-					const [cs, ct] = corners[i];
-					pos.push(...at(cs, ct));
-					uv.push((cs + 1) / 2, (1 - ct) / 2);
-				}
-				const g = new THREE.BufferGeometry();
-				g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-				g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-				const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide, depthTest: false, depthWrite: false, fog: false}));
-				mesh.frustumCulled = false;
-				mesh.renderOrder = -1;
-				this.sky.add(mesh);
-				this.onLoaded();
-			});
+	// the model posed for drawing as is (static props)
+	private staticObject(asset: ModelAsset): THREE.Group {
+		const group = new THREE.Group();
+		for (const part of asset.parts) {
+			const mesh = new THREE.Mesh(part.baked, part.material);
+			mesh.name = part.name;
+			group.add(mesh);
 		}
-	}
-
-	// a static prop with its baked vertex light, or null without (usable) data
-	private litProp(template: THREE.Object3D, vhv: Uint8Array | null): THREE.Object3D | null {
-		const light = vhv ? readVhv(vhv) : null;
-		if (!light || light.checksum !== template.userData.checksum || !this.library) return null;
-		const out = new THREE.Group();
-		for (const child of template.children) {
-			const mesh = child as THREE.Mesh;
-			const mv = mesh.userData.meshVertex as Uint32Array;
-			const colors = new Float32Array(mv.length * 3);
-			for (let i = 0; i < mv.length; i++) {
-				const vl = light.meshes[Math.floor(mv[i] / 1048576)];
-				const k = (mv[i] % 1048576) * 4;
-				if (!vl || k + 3 > vl.length) return null;
-				colors[i * 3] = vl[k + 2] / 255;      // stored BGRA
-				colors[i * 3 + 1] = vl[k + 1] / 255;
-				colors[i * 3 + 2] = vl[k] / 255;
-			}
-			const g = mesh.geometry.clone();
-			g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-			const lit = new THREE.Mesh(g, this.library.forModel(mesh.userData.materialCandidates, true));
-			lit.name = mesh.name;
-			out.add(lit);
-		}
-		return out;
+		return group;
 	}
 
 	private brushModel(m: ModelMesh): THREE.Group {
@@ -400,9 +358,9 @@ export class View3D {
 			Promise.all([
 				this.model(prop.model, prop.skin),
 				pak ? pak.read(`sp_hdr_${prop.index}.vhv`).then(b => b ?? pak.read(`sp_${prop.index}.vhv`)) : null,
-			]).then(([template, vhv]) => {
-				if (!template || token !== this.mapToken) return;
-				const o = this.litProp(template, vhv) ?? template.clone();
+			]).then(([asset, vhv]) => {
+				if (!asset || token !== this.mapToken) return;
+				const o = this.litProp(asset, vhv) ?? this.staticObject(asset);
 				o.position.set(...prop.origin);
 				o.rotation.copy(toEuler(prop.angles));
 				o.updateMatrixWorld(true);
@@ -414,8 +372,73 @@ export class View3D {
 		}
 	}
 
+	// The 2D skybox: six faces around the camera, drawn behind everything.
+	// Face orientation follows Quake 2's, which Source kept: rt +X, lf +Y,
+	// bk -X, ft -Y; each face's s/t run as in Quake 2's MakeSkyVec.
+	private loadSky(bsp: BspMap, token: number) {
+		this.sky.clear();
+		const name = bsp.entities.find(e => e.classname === 'worldspawn')?.skyname;
+		if (!name || !this.library) return;
+		const faces: [string, (s: number, t: number) => [number, number, number]][] = [
+			['rt', (s, t) => [1, -s, t]],
+			['bk', (s, t) => [-1, s, t]],
+			['lf', (s, t) => [s, 1, t]],
+			['ft', (s, t) => [-s, -1, t]],
+			['up', (s, t) => [-t, -s, 1]],
+			['dn', (s, t) => [t, -s, -1]],
+		];
+		const library = this.library;
+		for (const [side, at] of faces) {
+			// HDR maps use <name>_hdr when it exists
+			library.skyTexture(`skybox/${name}_hdr${side}`).then(t => t ?? library.skyTexture(`skybox/${name}${side}`)).then(tex => {
+				if (!tex || token !== this.mapToken) return;
+				const corners: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+				const pos: number[] = [], uv: number[] = [];
+				for (const i of [0, 1, 2, 0, 2, 3]) {
+					const [cs, ct] = corners[i];
+					pos.push(...at(cs, ct));
+					uv.push((cs + 1) / 2, (1 - ct) / 2);
+				}
+				const g = new THREE.BufferGeometry();
+				g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+				g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+				const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide, depthTest: false, depthWrite: false, fog: false}));
+				mesh.frustumCulled = false;
+				mesh.renderOrder = -1;
+				this.sky.add(mesh);
+				this.onLoaded();
+			});
+		}
+	}
+
+	// a static prop with its baked vertex light, or null without (usable) data
+	private litProp(asset: ModelAsset, vhv: Uint8Array | null): THREE.Object3D | null {
+		const light = vhv ? readVhv(vhv) : null;
+		if (!light || light.checksum !== asset.model.checksum || !this.library) return null;
+		const out = new THREE.Group();
+		for (const part of asset.parts) {
+			const mv = part.group.meshVertex;
+			const colors = new Float32Array(mv.length * 3);
+			for (let i = 0; i < mv.length; i++) {
+				const vl = light.meshes[Math.floor(mv[i] / 1048576)];
+				const k = (mv[i] % 1048576) * 4;
+				if (!vl || k + 3 > vl.length) return null;
+				colors[i * 3] = vl[k + 2] / 255;      // stored BGRA
+				colors[i * 3 + 1] = vl[k + 1] / 255;
+				colors[i * 3 + 2] = vl[k] / 255;
+			}
+			const g = part.baked.clone();
+			g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+			const lit = new THREE.Mesh(g, this.library.forModel(part.group.materialCandidates, true));
+			lit.name = part.name;
+			out.add(lit);
+		}
+		return out;
+	}
+
 	setSegment(track: SegmentTrack, entities: EntityTimeline | null) {
 		this.entities = entities;
+		this.interval = track.seg.intervalPerTick;
 		this.clearEntities();
 		// the path as line segments, broken at teleports
 		if (this.pathLine) this.scene.remove(this.pathLine);
@@ -484,14 +507,48 @@ export class View3D {
 		const box = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), new THREE.MeshLambertMaterial({color: cube ? 0x9fb7cf : 0x8a7f6e, transparent: !cube, opacity: cube ? 1 : 0.55}));
 		box.position.set((t.mins[0] + t.maxs[0]) / 2, (t.mins[1] + t.maxs[1]) / 2, (t.mins[2] + t.maxs[2]) / 2);
 		group.add(box);
-		// swap the box for the real model when it loads
-		this.model(t.model).then(template => {
-			if (!template) return;
+		// swap the box for the real model when it loads, animated when it can be
+		this.model(t.model).then(asset => {
+			if (!asset) return;
 			group.remove(box);
-			group.add(template.clone());
+			if (asset.skeleton && asset.skeleton.sequences.length && t.keys.some(k => k.anim)) {
+				const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material: p.material})));
+				group.add(anim.group);
+				group.userData.anim = anim;
+				group.userData.skeleton = asset.skeleton;
+			} else {
+				group.add(this.staticObject(asset));
+			}
 			this.onLoaded();
 		});
 		return group;
+	}
+
+	// an entity's sequence and cycle at a tick: the server's cycle,
+	// interpolated between updates, or for client-side animation advanced from
+	// when the sequence (re)started
+	private animAt(t: EntityTrack, tick: number, sk: Skeleton): [number, number] {
+		const i = keyIndexAt(t, tick);
+		const k = t.keys[i];
+		const a = k.anim!;
+		const looping = sk.sequences[a.sequence]?.looping ?? false;
+		const wrap = (c: number) => (looping ? c - Math.floor(c) : Math.min(1, Math.max(0, c)));
+		if (a.clientSide) {
+			let start = i;
+			while (start > 0) {
+				const p = t.keys[start - 1].anim;
+				if (!p || p.sequence !== a.sequence || p.parity !== a.parity) break;
+				start--;
+			}
+			const elapsed = (tick - t.keys[start].tick) * this.interval;
+			return [a.sequence, wrap(t.keys[start].anim!.cycle + elapsed * a.rate * sequenceRate(sk, a.sequence))];
+		}
+		const n = t.keys[i + 1]?.anim;
+		if (!n || n.sequence !== a.sequence || n.parity !== a.parity) return [a.sequence, a.cycle];
+		let c1 = n.cycle;
+		if (looping && c1 < a.cycle) c1 += 1;
+		const f = (tick - k.tick) / Math.max(1, t.keys[i + 1].tick - k.tick);
+		return [a.sequence, wrap(a.cycle + (c1 - a.cycle) * f)];
 	}
 
 	resize() {
@@ -517,6 +574,11 @@ export class View3D {
 				if (!o) continue;
 				o.visible = show;
 				if (show && k) {
+					const anim = o.userData.anim as AnimatedModel | undefined;
+					if (anim && k.anim) {
+						const [seq, cycle] = this.animAt(t, tick, o.userData.skeleton);
+						anim.setPose(seq, cycle);
+					}
 					o.position.set(k.origin[0], k.origin[1], k.origin[2]);
 					// players turn with their view but don't tilt
 					o.rotation.copy(toEuler(t.className === 'CPortal_Player' ? [0, k.angles[1], 0] : k.angles));

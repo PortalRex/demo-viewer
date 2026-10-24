@@ -15,8 +15,12 @@ the `Portal 2` folder; in dev the server reads it from `P2_DIR`, default the
 Steam path). World geometry, displacements and brush entities (doors,
 elevators, panels) and static props come from the BSP; portals, moving props
 and the player come from the entity data decoded from the run. Models are read
-from the game's VPKs (and the map's own pak file) without bones, so animated
-ones show in their reference pose. Surfaces use their real textures (VTF) and the map's
+from the game's VPKs (and the map's own pak file). Models are posed as the game
+poses them: static props with sequence 0 (many models are stored unposed and
+stood up by their root bone), animated entities as skinned meshes following
+their recorded sequence and cycle (interpolated between server updates, or
+advanced locally for client-side animation), including sequences from
+`$includemodel` files and `.ani` anim blocks. Surfaces use their real textures (VTF) and the map's
 baked HDR lighting (lightmaps packed into one atlas, tone mapped); static props
 use their textures, skins and vrad's per-vertex lighting from the map's pak
 (`sp_hdr_N.vhv`, matched to the hardware vertex order); fog comes from the

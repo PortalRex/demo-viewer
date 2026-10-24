@@ -26,6 +26,15 @@ export interface EntityKey {
 	visible: boolean;  // in the snapshot and not EF_NODRAW
 	active?: boolean;  // portals: m_bActivated
 	eyeZ?: number;     // players: view offset height
+	anim?: AnimState;  // animated models
+}
+
+export interface AnimState {
+	sequence: number;
+	cycle: number;        // 0..1; only meaningful when !clientSide
+	rate: number;         // playback rate
+	clientSide: boolean;  // the client advances the cycle itself
+	parity: number;       // m_nNewSequenceParity: changes when the sequence restarts
 }
 
 export interface EntityTrack {
@@ -57,6 +66,11 @@ interface ClassFields {
 	eyeYaw: number;
 	viewOffset: number;     // players: m_vecViewOffset (vec3) or its [2]
 	viewOffsetIsVec: boolean;
+	sequence: number;
+	cycle: number;
+	rate: number;
+	clientSide: number;
+	parity: number;
 	model: number;          // m_nModelIndex
 	effects: number;        // m_fEffects
 	mins: number;
@@ -88,6 +102,11 @@ function fieldsFor(cls: ServerClass): ClassFields {
 		eyeYaw: find(cls, 'm_angEyeAngles[1]'),
 		viewOffset: find(cls, 'portallocaldata.m_vecViewOffset', 'localdata.m_vecViewOffset', 'portalnonlocaldata.m_vecViewOffset[2]', 'm_vecViewOffset[2]'),
 		viewOffsetIsVec: cls.index.has('portallocaldata.m_vecViewOffset') || cls.index.has('localdata.m_vecViewOffset'),
+		sequence: find(cls, 'm_nSequence'),
+		cycle: find(cls, 'serveranimdata.m_flCycle', 'm_flCycle'),
+		rate: find(cls, 'm_flPlaybackRate'),
+		clientSide: find(cls, 'm_bClientSideAnimation'),
+		parity: find(cls, 'm_nNewSequenceParity'),
 		cell: [find(cls, 'm_cellbits'), find(cls, 'm_cellX'), find(cls, 'm_cellY'), find(cls, 'm_cellZ')],
 		cellOrigin: origin >= 0 && (cls.flat[origin].prop.flags & (F.CELLCOORD | F.CELLCOORDLP | F.CELLCOORDINT)) !== 0,
 		angles: find(cls, 'm_angRotation', 'm_angAbsRotation'),
@@ -164,6 +183,13 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		const visible = e.inSnapshot && !(num(s[f.effects]) & EF_NODRAW);
 		const active = f.activated >= 0 ? num(s[f.activated]) !== 0 : undefined;
 		const eyeZ = f.viewOffset < 0 ? undefined : f.viewOffsetIsVec ? vec(s[f.viewOffset])?.[2] : num(s[f.viewOffset]);
+		const anim: AnimState | undefined = f.sequence < 0 ? undefined : {
+			sequence: num(s[f.sequence]),
+			cycle: num(s[f.cycle]),
+			rate: f.rate >= 0 && s[f.rate] !== undefined ? num(s[f.rate]) : 1,
+			clientSide: num(s[f.clientSide]) !== 0,
+			parity: num(s[f.parity]),
+		};
 		const t = e.track;
 		const mins = vec(s[f.mins]), maxs = vec(s[f.maxs]);
 		if (mins) t.mins = [mins[0], mins[1], mins[2]];
@@ -171,9 +197,9 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		if (f.model >= 0) t.model = modelName(num(s[f.model]));
 		if (f.isPortal2 >= 0) t.orange = num(s[f.isPortal2]) !== 0;
 		const last = t.keys[t.keys.length - 1];
-		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && sameVec(last.origin, origin) && sameVec(last.angles, angles)) return;
+		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim)) return;
 		if (last && last.tick === tick) t.keys.pop();
-		t.keys.push({tick, origin, angles, visible, active, eyeZ});
+		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim});
 	};
 
 	const leave = (e: LiveEntity, tick: number, remove: boolean) => {
@@ -310,9 +336,15 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+const sameAnim = (a?: AnimState, b?: AnimState) => a === b || (!!a && !!b && a.sequence === b.sequence && a.cycle === b.cycle && a.rate === b.rate && a.clientSide === b.clientSide && a.parity === b.parity);
 
 // The key in effect at a tick (or undefined before the entity exists)
 export function keyAt(track: EntityTrack, tick: number): EntityKey | undefined {
+	const i = keyIndexAt(track, tick);
+	return i < 0 ? undefined : track.keys[i];
+}
+
+export function keyIndexAt(track: EntityTrack, tick: number): number {
 	const k = track.keys;
 	let lo = 0, hi = k.length - 1, ans = -1;
 	while (lo <= hi) {
@@ -324,5 +356,5 @@ export function keyAt(track: EntityTrack, tick: number): EntityKey | undefined {
 			hi = mid - 1;
 		}
 	}
-	return ans < 0 ? undefined : k[ans];
+	return ans;
 }
