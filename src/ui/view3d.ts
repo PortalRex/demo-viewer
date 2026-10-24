@@ -2,6 +2,8 @@
 // recorded entities (portals, brush entities, props) and the player's view.
 import * as THREE from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
+import {MeshBVH} from 'three-mesh-bvh';
+import {composeLightmap, styleValue} from '../game/bsp.ts';
 import type {BspMap, MeshData, MaterialGroup, ModelMesh} from '../game/bsp.ts';
 import type {GameFiles} from '../game/files.ts';
 import type {Materials, MaterialInfo} from '../game/materials.ts';
@@ -12,7 +14,7 @@ import type {Skeleton} from '../game/anim.ts';
 import {AnimatedModel, bakePose, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
-import {paintUniforms, ditherUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
+import {paintUniforms, ditherUniforms, fogUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -21,7 +23,7 @@ import {keyAt, keyIndexAt} from '../net/entities.ts';
 import type {SegmentTrack, ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
 
-export type CameraMode = 'eyes' | 'orbit';
+export type CameraMode = 'eyes' | 'orbit' | 'free';
 
 // Portal 2's 90° horizontal FOV at 4:3, as a vertical FOV (widescreen keeps it)
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
@@ -57,7 +59,11 @@ function geometry(m: MeshData) {
 
 // How bright the baked lighting is drawn. three's basic material divides
 // light maps by pi.
-const LIGHTMAP_EXPOSURE = 2.5;
+// Portal 2's lightmaps (and prop vertex lighting) come out of the shaders
+// 16x brighter than the stored linear values (the integer-HDR lightmap
+// scale); the frame is then scaled by the auto exposure and clamped, with no
+// filmic curve.
+const LIGHTMAP_EXPOSURE = 16;
 
 // three.js materials for the map's materials: textured once the texture
 // loads (flat colour until then), lit by the lightmap atlas for the world
@@ -174,6 +180,13 @@ class MaterialLibrary {
 	}
 }
 
+interface FogSettings {
+	color: number[];  // 0..255, gamma
+	start: number;
+	end: number;
+	maxDensity: number;
+}
+
 interface ModelAsset {
 	name: string;
 	model: StudioModel;
@@ -213,6 +226,26 @@ export class View3D {
 	private effects: EffectAssets | null = null;
 	private fizzlers = new Map<string, THREE.ShaderMaterial>();
 	private paint: PaintLayer | null = null;
+	private lightTex: THREE.DataTexture | null = null;
+	private styleValues = new Map<number, number>();  // what the lightmap texture was composed with
+	// fog (colour 0..255, gamma) and auto exposure: the map's defaults until
+	// the player's controllers say otherwise
+	private fogBase: FogSettings | null = null;
+	private fog: FogSettings | null = null;
+	private exposure = 2;
+	private exposureRange: [number, number] = [0.5, 2];
+	private meter: THREE.WebGLRenderTarget | null = null;
+	private meterCount = 0;
+	private lastRender = 0;
+	private tracksByIndex = new Map<number, EntityTrack[]>();
+	// the world's solid faces, for keeping the orbit camera inside the map
+	private collision: MeshBVH | null = null;
+	// free camera: held movement keys, view angles (degrees), drag state
+	private freeKeys = new Set<string>();
+	private freeAngles = [0, 0];  // pitch, yaw
+	private freeDrag: {x: number; y: number} | null = null;
+	private freeFrame = 0;
+	private freeLast = 0;
 	private mapToken = 0;
 	onLoaded = () => {};
 
@@ -222,9 +255,9 @@ export class View3D {
 		this.camera.up.set(0, 0, 1);
 		this.scene.background = new THREE.Color(0x0c0e12);
 		this.scene.fog = new THREE.Fog(0x0c0e12, 6000, 30000);
-		const hemi = new THREE.HemisphereLight(0xffffff, 0x3a3f48, 1.6);
+		const hemi = new THREE.HemisphereLight(0xffffff, 0x3a3f48, 0.55);
 		hemi.position.set(0, 0, 1);
-		const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+		const sun = new THREE.DirectionalLight(0xffffff, 0.4);
 		sun.position.set(0.35, 0.25, 1);
 		this.scene.add(hemi, sun, this.mapGroup, this.propGroup, this.entityGroup, this.sky);
 		this.sky.renderOrder = -1;
@@ -241,19 +274,26 @@ export class View3D {
 		this.renderer = new THREE.WebGLRenderer({antialias: true});
 		// HDR lighting needs its highlights rolled off, as the game's tone
 		// mapping does
-		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-		this.renderer.toneMappingExposure = 1.1;
+		this.renderer.toneMapping = THREE.LinearToneMapping;
+		this.renderer.toneMappingExposure = 3;
 		this.renderer.setPixelRatio(window.devicePixelRatio || 1);
 		this.container.appendChild(this.renderer.domElement);
 		this.controls = new OrbitControls(this.camera, this.renderer.domElement);
 		this.controls.enableDamping = false;
 		this.controls.enabled = this.mode === 'orbit';
 		this.controls.addEventListener('change', () => this.render());
+		this.bindFreeCamera(this.renderer.domElement);
 		return this.renderer;
 	}
 
 	setMode(mode: CameraMode) {
+		if (mode === 'free' && this.mode !== 'free') {
+			// start from wherever the camera is, looking the same way
+			const dir = this.camera.getWorldDirection(new THREE.Vector3());
+			this.freeAngles = [-Math.asin(Math.max(-1, Math.min(1, dir.z))) * 180 / Math.PI, Math.atan2(dir.y, dir.x) * 180 / Math.PI];
+		}
 		this.mode = mode;
+		this.freeKeys.clear();
 		if (this.controls) this.controls.enabled = mode === 'orbit';
 		this.lastTarget = null;
 		if (mode === 'orbit') {
@@ -337,6 +377,9 @@ export class View3D {
 			lightTex.flipY = false;
 			lightTex.needsUpdate = true;
 		}
+		this.lightTex = lightTex;
+		this.styleValues.clear();
+		this.tracksByIndex.clear();
 		this.library = new MaterialLibrary(files, materials, lightTex);
 		this.library.onChange = () => this.onLoaded();
 		this.effects = new EffectAssets(materials, this.library.textures);
@@ -344,19 +387,26 @@ export class View3D {
 		this.paint = null;
 		paintUniforms.paintOn.value = 0;
 
-		// fog, from the map's fog controller
+		// fog until the recording names the player's fog controller: the
+		// map's first enabled one
 		const fog = bsp.entities.find(e => e.classname === 'env_fog_controller' && e.fogenable !== '0');
-		if (fog) {
-			const c = (fog.fogcolor ?? '0 0 0').split(/\s+/).map(Number);
-			const color = new THREE.Color().setRGB(c[0] / 255, c[1] / 255, c[2] / 255, THREE.SRGBColorSpace);
-			this.scene.fog = new THREE.Fog(color, Number(fog.fogstart) || 0, Number(fog.fogend) || 30000);
-			this.scene.background = color;
-		} else {
-			this.scene.fog = null;
-			this.scene.background = new THREE.Color(0x000000);
-		}
+		this.fogBase = fog ? {
+			color: (fog.fogcolor ?? '0 0 0').split(/\s+/).map(Number).slice(0, 3),
+			start: Number(fog.fogstart) || 0,
+			end: Number(fog.fogend) || 30000,
+			maxDensity: fog.fogmaxdensity ? Number(fog.fogmaxdensity) : 1,
+		} : null;
+		this.fog = this.fogBase;
+		this.scene.fog = fog ? new THREE.Fog(0, 0, 1) : null;
+		this.scene.background = new THREE.Color(0x000000);
+		// the exposure range Portal 2's test chambers set on the tonemap
+		// controller (global_ents' environment relays), until the recording
+		// has the controller's own values
+		this.exposureRange = [0.5, 3];
+		this.exposure = 3;
 
 		this.mapGroup.add(this.brushModel(bsp.models[0]));
+		this.collision = worldCollision(bsp.models[0]);
 		this.loadSky(bsp, token);
 		this.worldFog = this.scene.fog as THREE.Fog | null;
 
@@ -459,6 +509,12 @@ export class View3D {
 
 	setSegment(track: SegmentTrack, entities: EntityTimeline | null) {
 		this.entities = entities;
+		this.tracksByIndex.clear();
+		for (const t of entities?.tracks ?? []) {
+			const list = this.tracksByIndex.get(t.index);
+			if (list) list.push(t);
+			else this.tracksByIndex.set(t.index, [t]);
+		}
 		this.interval = track.seg.intervalPerTick;
 		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint) : null;
 		paintUniforms.paintMap.value = this.paint?.texture ?? null;
@@ -559,16 +615,20 @@ export class View3D {
 		}
 		if (HIDDEN_CLASSES.has(t.className) || !t.model.endsWith('.mdl')) return null;
 		const size = [t.maxs[0] - t.mins[0], t.maxs[1] - t.mins[1], t.maxs[2] - t.mins[2]];
-		if (size.some(s => s <= 0) || size.some(s => s > 1024)) return null;
-		const cube = /cube|box/i.test(t.model);
 		const group = new THREE.Group();
-		const box = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), new THREE.MeshLambertMaterial({color: cube ? 0x9fb7cf : 0x8a7f6e, transparent: !cube, opacity: cube ? 1 : 0.55}));
-		box.position.set((t.mins[0] + t.maxs[0]) / 2, (t.mins[1] + t.maxs[1]) / 2, (t.mins[2] + t.maxs[2]) / 2);
-		group.add(box);
-		// swap the box for the real model when it loads, animated when it can be
+		// a box of the entity's size until the model loads (not for huge
+		// ones: room-moving panels and the like just appear)
+		let box: THREE.Mesh | null = null;
+		if (size.every(s => s > 0 && s <= 512)) {
+			const cube = /cube|box/i.test(t.model);
+			box = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), new THREE.MeshLambertMaterial({color: cube ? 0x9fb7cf : 0x8a7f6e, transparent: !cube, opacity: cube ? 1 : 0.55}));
+			box.position.set((t.mins[0] + t.maxs[0]) / 2, (t.mins[1] + t.maxs[1]) / 2, (t.mins[2] + t.maxs[2]) / 2);
+			group.add(box);
+		}
+		// the real model when it loads, animated when it can be
 		this.model(t.model).then(asset => {
+			if (box) group.remove(box);
 			if (!asset) return;
-			group.remove(box);
 			if (asset.skeleton && asset.skeleton.sequences.length && t.keys.some(k => k.anim)) {
 				const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material: p.material})));
 				group.add(anim.group);
@@ -712,6 +772,131 @@ export class View3D {
 	// an entity's sequence and cycle at a tick: the server's cycle,
 	// interpolated between updates, or for client-side animation advanced from
 	// when the sequence (re)started
+	// the entity at a network index at a tick (indices get reused)
+	private entityAt(index: number, tick: number, className: string): EntityKey | undefined {
+		for (const t of this.tracksByIndex.get(index) ?? []) {
+			if (t.className !== className) continue;
+			const k = keyAt(t, tick);
+			if (k) return k;
+		}
+		return undefined;
+	}
+
+	// the player's fog and tonemap controllers
+	private applyControllers(pk: EntityKey | undefined, tick: number) {
+		const e = pk?.extra;
+		let fog = this.fogBase;
+		const fk = e ? this.entityAt(Number(e['m_PlayerFog.m_hCtrl'] ?? -1) & 2047, tick, 'CFogController')?.extra : undefined;
+		if (fk) {
+			const c = Number(fk['m_fog.colorPrimary'] ?? 0);
+			fog = Number(fk['m_fog.enable']) ? {
+				color: [c & 255, (c >>> 8) & 255, (c >>> 16) & 255],
+				start: Number(fk['m_fog.start'] ?? 0),
+				end: Number(fk['m_fog.end'] ?? 30000),
+				maxDensity: Number(fk['m_fog.maxdensity'] ?? 1),
+			} : null;
+		}
+		this.fog = fog;
+		const tk = e ? this.entityAt(Number(e['localdata.m_hTonemapController'] ?? -1) & 2047, tick, 'CEnvTonemapController')?.extra : undefined;
+		if (tk) {
+			const lo = Number(tk.m_bUseCustomAutoExposureMin) ? Number(tk.m_flCustomAutoExposureMin) : 0.5;
+			const hi = Number(tk.m_bUseCustomAutoExposureMax) ? Number(tk.m_flCustomAutoExposureMax) : 2;
+			this.exposureRange = [lo, Math.max(lo, hi)];
+		}
+	}
+
+	// Auto exposure, as the engine's: every few frames the view is drawn
+	// small without exposure, and the scale is set so the 60th percentile of
+	// luminance lands at 0.6 (and the brightest 5% don't blow out), within
+	// the tonemap controller's range, approached gradually.
+	private meterExposure(r: THREE.WebGLRenderer) {
+		const now = performance.now();
+		const dt = Math.min(0.5, (now - this.lastRender) / 1000);
+		this.lastRender = now;
+		if (this.meterCount++ % 8 === 0) {
+			const w = 64, h = 36;
+			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType});
+			const fog = this.scene.fog;
+			this.scene.fog = null;
+			r.setRenderTarget(this.meter);
+			r.render(this.scene, this.camera);
+			r.setRenderTarget(null);
+			this.scene.fog = fog;
+			const px = new Uint16Array(w * h * 4);
+			r.readRenderTargetPixels(this.meter, 0, 0, w, h, px);
+			const lum: number[] = [];
+			for (let i = 0; i < px.length; i += 4) {
+				const f = THREE.DataUtils.fromHalfFloat;
+				lum.push(0.2126 * f(px[i]) + 0.7152 * f(px[i + 1]) + 0.0722 * f(px[i + 2]));
+			}
+			lum.sort((a, b) => a - b);
+			const at = (p: number) => Math.max(1e-4, lum[Math.floor(lum.length * p)]);
+			const target = Math.min(0.6 / at(0.6), 1 / at(0.95));
+			this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
+		}
+		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
+		this.exposure += (t - this.exposure) * Math.min(1, dt * 1.5);
+		r.toneMappingExposure = this.exposure;
+	}
+	private meterTarget: number | null = null;
+
+	// the fog colour as drawn: three mixes fog in after exposure and output
+	// encoding, so it's given already exposed and encoded
+	private updateFog() {
+		const fog = this.fog, sceneFog = this.scene.fog as THREE.Fog | null;
+		if (!fog || !sceneFog) {
+			if (sceneFog) sceneFog.far = sceneFog.near = 1e9;
+			fogUniforms.fogMaxDensity.value = 0;
+			return;
+		}
+		const enc = (v: number) => {
+			const lin = Math.min(1, Math.pow(v / 255, 2.2) * this.exposure);
+			return lin <= 0.0031308 ? lin * 12.92 : 1.055 * Math.pow(lin, 1 / 2.4) - 0.055;
+		};
+		sceneFog.color.setRGB(enc(fog.color[0]), enc(fog.color[1]), enc(fog.color[2]), THREE.LinearSRGBColorSpace);
+		sceneFog.near = fog.start;
+		sceneFog.far = fog.end;
+		fogUniforms.fogMaxDensity.value = fog.maxDensity;
+		// the clear colour is encoded but not exposed by three
+		if (this.scene.background instanceof THREE.Color) {
+			const lin = (v: number) => Math.min(1, Math.pow(v / 255, 2.2) * this.exposure * fog.maxDensity);
+			this.scene.background.setRGB(lin(fog.color[0]), lin(fog.color[1]), lin(fog.color[2]), THREE.LinearSRGBColorSpace);
+		}
+	}
+
+	// switchable lights: the styles' values at this tick, from the
+	// recording's "lightstyles" table; the lightmap is re-summed where they
+	// changed
+	private updateLightStyles(tick: number) {
+		const lm = this.bsp?.lightmap, tex = this.lightTex, changes = this.entities?.lightStyles;
+		if (!lm || !tex || !changes?.length || !lm.styles.length) return;
+		const patterns = new Map<number, string>();
+		for (const c of changes) {
+			if (c.tick > tick) break;
+			patterns.set(c.style, c.pattern);
+		}
+		const time = tick * this.interval;
+		const changed = new Set<number>();
+		const value = (style: number) => {
+			const p = patterns.get(style);
+			return p === undefined ? (style ? this.styleValues.get(style) ?? 1 : 1) : styleValue(p, time);
+		};
+		for (const st of lm.styles) {
+			const v = value(st);
+			if (this.styleValues.get(st) !== v) changed.add(st);
+		}
+		if (!changed.size) return;
+		for (const st of changed) this.styleValues.set(st, value(st));
+		const half = tex.image.data as unknown as Uint16Array;
+		for (const b of composeLightmap(lm, st => (st ? this.styleValues.get(st) ?? 1 : value(0)), changed)) {
+			for (let y = 0; y < b.h; y++) {
+				const start = ((b.y + y) * lm.width + b.x) * 4;
+				for (let i = start; i < start + b.w * 4; i++) half[i] = THREE.DataUtils.toHalfFloat(lm.data[i]);
+			}
+		}
+		tex.needsUpdate = true;
+	}
+
 	private animAt(t: EntityTrack, tick: number, sk: Skeleton): [number, number] {
 		const i = keyIndexAt(t, tick);
 		const k = t.keys[i];
@@ -756,6 +941,7 @@ export class View3D {
 			const time = performance.now() / 1000;
 			for (const m of this.fizzlers.values()) m.uniforms.time.value = time;
 			this.paint?.seek(tick);
+			this.updateLightStyles(tick);
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
 				const show = !!k && this.shows(t, k);
@@ -790,12 +976,13 @@ export class View3D {
 		// player: the decoded entity where there is one, else the recorded view
 		const pk = ents?.player ? keyAt(ents.player, tick) : undefined;
 		const feet = pk ? new THREE.Vector3(...pk.origin) : view ? new THREE.Vector3(...view.origin) : null;
+		this.applyControllers(pk, tick);
 		// screen-door dissolve of whatever is between the orbit camera and the player
 		ditherUniforms.ditherOn.value = feet && this.mode === 'orbit' ? 1 : 0;
 		if (feet) ditherUniforms.ditherTarget.value.copy(feet).add(new THREE.Vector3(0, 0, 36));
 		if (feet) {
 			this.player.position.copy(feet);
-			this.player.visible = this.mode === 'orbit';
+			this.player.visible = this.mode !== 'eyes';
 			const eye = feet.clone();
 			eye.z += pk?.eyeZ ?? DEFAULT_EYE;
 			if (this.mode === 'eyes') {
@@ -804,6 +991,8 @@ export class View3D {
 				const pitch = ang[0] * Math.PI / 180, yaw = ang[1] * Math.PI / 180;
 				const fwd = new THREE.Vector3(Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), -Math.sin(pitch));
 				this.camera.lookAt(eye.clone().add(fwd));
+			} else if (this.mode === 'free') {
+				// the free camera goes where the user takes it
 			} else if (this.controls) {
 				// follow: move the camera with the player, keep the user's angle
 				const target = feet.clone();
@@ -821,6 +1010,101 @@ export class View3D {
 		const r = this.renderer;
 		if (!r) return;
 		this.camera.updateMatrixWorld();
+		if (this.bsp) {
+			this.meterExposure(r);
+			this.updateFog();
+		}
+		// orbit: the camera stays on the player's side of walls, as a game's
+		// third-person camera does (the user's distance is kept for later)
+		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
+		this.renderScene(r);
+		if (saved) {
+			this.camera.position.copy(saved);
+			this.camera.updateMatrixWorld();
+		}
+	}
+
+	// Free camera: drag to look, WASD to fly along the view, Q/E down/up,
+	// Shift faster, Ctrl slower (as noclip)
+	private bindFreeCamera(canvas: HTMLCanvasElement) {
+		const MOVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight']);
+		canvas.addEventListener('pointerdown', e => {
+			if (this.mode !== 'free' || e.button !== 0) return;
+			this.freeDrag = {x: e.clientX, y: e.clientY};
+			canvas.setPointerCapture(e.pointerId);
+		});
+		canvas.addEventListener('pointermove', e => {
+			if (!this.freeDrag) return;
+			this.freeAngles[1] -= (e.clientX - this.freeDrag.x) * 0.22;
+			this.freeAngles[0] = Math.max(-89, Math.min(89, this.freeAngles[0] + (e.clientY - this.freeDrag.y) * 0.22));
+			this.freeDrag = {x: e.clientX, y: e.clientY};
+			this.applyFreeView();
+			this.render();
+		});
+		const end = () => (this.freeDrag = null);
+		canvas.addEventListener('pointerup', end);
+		canvas.addEventListener('pointercancel', end);
+		window.addEventListener('keydown', e => {
+			if (this.mode !== 'free' || !MOVE_KEYS.has(e.code) || e.metaKey || e.altKey) return;
+			if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;
+			if (this.container.hidden) return;
+			e.preventDefault();
+			this.freeKeys.add(e.code);
+			if (!this.freeFrame) {
+				this.freeLast = document.timeline.currentTime as number ?? performance.now();
+				this.freeFrame = requestAnimationFrame(this.freeTick);
+			}
+		});
+		window.addEventListener('keyup', e => this.freeKeys.delete(e.code));
+		window.addEventListener('blur', () => this.freeKeys.clear());
+	}
+
+	private applyFreeView() {
+		const p = this.freeAngles[0] * Math.PI / 180, y = this.freeAngles[1] * Math.PI / 180;
+		const c = this.camera.position;
+		this.camera.lookAt(c.x + Math.cos(p) * Math.cos(y), c.y + Math.cos(p) * Math.sin(y), c.z - Math.sin(p));
+	}
+
+	private freeTick = (now: number) => {
+		this.freeFrame = 0;
+		const k = this.freeKeys;
+		const moving = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE'].some(c => k.has(c));
+		if (this.mode !== 'free' || !moving) return;
+		const dt = Math.max(0, Math.min(0.1, (now - this.freeLast) / 1000));
+		this.freeLast = now;
+		const speed = (k.has('ShiftLeft') || k.has('ShiftRight') ? 1600 : k.has('ControlLeft') || k.has('ControlRight') ? 120 : 500) * dt;
+		const p = this.freeAngles[0] * Math.PI / 180, y = this.freeAngles[1] * Math.PI / 180;
+		const fwd = new THREE.Vector3(Math.cos(p) * Math.cos(y), Math.cos(p) * Math.sin(y), -Math.sin(p));
+		const right = new THREE.Vector3(Math.sin(y), -Math.cos(y), 0);
+		const move = new THREE.Vector3();
+		if (k.has('KeyW')) move.add(fwd);
+		if (k.has('KeyS')) move.sub(fwd);
+		if (k.has('KeyD')) move.add(right);
+		if (k.has('KeyA')) move.sub(right);
+		if (k.has('KeyE')) move.z += 1;
+		if (k.has('KeyQ')) move.z -= 1;
+		if (move.lengthSq()) this.camera.position.addScaledVector(move.normalize(), speed);
+		this.applyFreeView();
+		this.render();
+		this.freeFrame = requestAnimationFrame(this.freeTick);
+	};
+
+	private pullInCamera(): THREE.Vector3 | null {
+		if (!this.collision || !this.controls) return null;
+		const target = this.controls.target;
+		const offset = this.camera.position.clone().sub(target);
+		const len = offset.length();
+		if (len < 1) return null;
+		const ray = new THREE.Ray(target.clone(), offset.clone().divideScalar(len));
+		const hit = this.collision.raycastFirst(ray, THREE.DoubleSide);
+		if (!hit || hit.distance > len) return null;
+		const saved = this.camera.position.clone();
+		this.camera.position.copy(target).addScaledVector(ray.direction, Math.max(4, hit.distance - 10));
+		this.camera.updateMatrixWorld();
+		return saved;
+	}
+
+	private renderScene(r: THREE.WebGLRenderer) {
 		if (this.portals.size) this.renderPortalViews(r);
 		// the sky stays centred on the camera, inside the far plane
 		this.sky.scale.setScalar(this.camera.far * 0.5);
@@ -864,6 +1148,32 @@ export class View3D {
 		r.autoClear = true;
 	}
 
+	// debugging: render at a fixed size, optionally from a given eye and
+	// pitch/yaw, and return it as a PNG data URL
+	snapshot(w: number, h: number, eye?: number[], ang?: number[]): string {
+		const r = this.ensureRenderer();
+		const size = r.getSize(new THREE.Vector2());
+		const aspect = this.camera.aspect;
+		const saved = [this.camera.position.clone(), this.camera.quaternion.clone()] as const;
+		if (eye && ang) {
+			this.camera.position.set(eye[0], eye[1], eye[2]);
+			const p = ang[0] * Math.PI / 180, y = ang[1] * Math.PI / 180;
+			this.camera.lookAt(eye[0] + Math.cos(p) * Math.cos(y), eye[1] + Math.cos(p) * Math.sin(y), eye[2] - Math.sin(p));
+		}
+		r.setSize(w, h, false);
+		this.camera.aspect = w / h;
+		this.camera.updateProjectionMatrix();
+		this.render();
+		const url = r.domElement.toDataURL('image/png');
+		r.setSize(size.x, size.y, false);
+		this.camera.aspect = aspect;
+		this.camera.updateProjectionMatrix();
+		this.camera.position.copy(saved[0]);
+		this.camera.quaternion.copy(saved[1]);
+		this.render();
+		return url;
+	}
+
 	// debugging: what's under a point of the canvas (0..1 coordinates)
 	pick(x: number, y: number) {
 		const ray = new THREE.Raycaster();
@@ -879,4 +1189,21 @@ export class View3D {
 		const mat = (hit.object as THREE.Mesh).material as THREE.MeshBasicMaterial;
 		return {path, point: hit.point.toArray().map(Math.round), material: mat.name, hasMap: !!mat.map, vertexColors: mat.vertexColors, type: mat.type};
 	}
+}
+
+// one triangle soup of the world's solid faces (not glass or liquids) with a
+// BVH, for ray tests
+function worldCollision(m: ModelMesh): MeshBVH | null {
+	const solid = m.groups.filter(g => g.surface !== 'glass' && g.surface !== 'liquid');
+	const count = solid.reduce((n, g) => n + g.positions.length, 0);
+	if (!count) return null;
+	const pos = new Float32Array(count);
+	let o = 0;
+	for (const g of solid) {
+		pos.set(g.positions, o);
+		o += g.positions.length;
+	}
+	const geom = new THREE.BufferGeometry();
+	geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+	return new MeshBVH(geom);
 }

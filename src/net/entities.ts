@@ -40,6 +40,10 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CProjectedTractorBeamEntity: ['m_vecStartPoint', 'm_vecEndPoint'],
 	CTrigger_TractorBeam: ['m_vStart', 'm_vEnd', 'm_flRadius', 'm_bReversed', 'm_bDisabled'],
 	CTriggerPortalCleanser: ['m_bDisabled', 'm_bVisible'],
+	// which fog and tonemap controllers apply to the player
+	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController'],
+	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
+	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],
 };
 
 export interface AnimState {
@@ -66,6 +70,14 @@ export interface EntityTimeline {
 	errors: string[];
 	player?: EntityTrack;
 	paint: PaintEvent[];
+	lightStyles: LightStyleChange[];  // in tick order
+}
+
+// a light style's pattern ("lightstyles" string table entry = style number)
+export interface LightStyleChange {
+	tick: number;
+	style: number;
+	pattern: string;
 }
 
 // per-class indices of the props the viewer uses
@@ -159,6 +171,9 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 	const classCounts = new Map<string, number>();
 	const backdoorSeen = seg.net.some(r => r.kind === 'entities');
 	const paint: PaintEvent[] = [];
+	const lightStyles: LightStyleChange[] = [];
+	const stylePatterns = new Map<number, string>();
+	let tableTick = 0;
 
 	const modelName = (index: number) => tableByName.get('modelprecache')?.entries[index]?.name ?? '';
 
@@ -181,6 +196,17 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 	const onTableChange = (t: StringTable) => {
 		tableByName.set(t.name, t);
 		if (t.name === 'instancebaseline') instanceBaselines.clear();
+		if (t.name === 'lightstyles') {
+			t.entries.forEach((e, style) => {
+				if (!e?.data) return;
+				let end = e.data.indexOf(0);
+				if (end < 0) end = e.data.length;
+				const pattern = String.fromCharCode(...e.data.subarray(0, end));
+				if (stylePatterns.get(style) === pattern) return;
+				stylePatterns.set(style, pattern);
+				lightStyles.push({tick: tableTick, style, pattern});
+			});
+		}
 	};
 
 	const record = (e: LiveEntity, tick: number) => {
@@ -292,6 +318,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 	}
 
 	function handle(r: NetRecord) {
+		tableTick = Math.max(0, r.tick);
 		switch (r.kind) {
 		case 'packet':
 			walkPacket(r.data, r.bits, {
@@ -362,7 +389,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 			}
 		}
 	}
-	return {tracks, classCounts, errors, player, paint};
+	return {tracks, classCounts, errors, player, paint, lightStyles};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];

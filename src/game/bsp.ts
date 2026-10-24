@@ -11,7 +11,7 @@ const LUMP = {
 } as const;
 
 const SURF_SKY2D = 0x2, SURF_SKY = 0x4, SURF_TRIGGER = 0x40, SURF_NODRAW = 0x80, SURF_HINT = 0x100, SURF_SKIP = 0x200;
-const SURF_NOLIGHT = 0x400;
+const SURF_NOLIGHT = 0x400, SURF_BUMPLIGHT = 0x800;
 const SKIP_FLAGS = SURF_SKY2D | SURF_SKY | SURF_TRIGGER | SURF_NODRAW | SURF_HINT | SURF_SKIP;
 
 export type Surface = 'portalable' | 'metal' | 'glass' | 'liquid' | 'other';
@@ -36,10 +36,67 @@ export interface ModelMesh {
 	edges: Float32Array;  // face outlines, as line segment pairs
 }
 
+// One light style's luxels for one face block (with its 1-luxel border),
+// linear RGB. A face can have up to four styles: 0 is the always-on light,
+// 32 and up are named lights the map switches.
+export interface LightmapLayer {
+	style: number;
+	rgb: Float32Array;
+}
+
+export interface LightmapBlock {
+	x: number;  // atlas position of the border's corner
+	y: number;
+	w: number;  // with the border
+	h: number;
+	layers: LightmapLayer[];
+}
+
 export interface Lightmap {
 	width: number;
 	height: number;
-	data: Float32Array;  // RGBA, linear
+	data: Float32Array;  // RGBA, linear: the layers summed at the current style values
+	blocks: LightmapBlock[];
+	styles: number[];    // the switchable styles in use (not 0)
+}
+
+// Sums the blocks' layers at the given style values (0 = off, 1 = normal).
+// `only`: just the blocks using one of these styles. Returns the blocks
+// written.
+export function composeLightmap(lm: Lightmap, value: (style: number) => number, only?: Set<number>): LightmapBlock[] {
+	const done: LightmapBlock[] = [];
+	for (const b of lm.blocks) {
+		if (only && !b.layers.some(l => only.has(l.style))) continue;
+		const scale = b.layers.map(l => value(l.style));
+		for (let y = 0; y < b.h; y++) {
+			for (let x = 0; x < b.w; x++) {
+				const i = y * b.w + x, o = ((b.y + y) * lm.width + b.x + x) * 4;
+				let r = 0, g = 0, bl = 0;
+				for (let k = 0; k < b.layers.length; k++) {
+					const s = scale[k];
+					if (!s) continue;
+					const rgb = b.layers[k].rgb;
+					r += rgb[i * 3] * s;
+					g += rgb[i * 3 + 1] * s;
+					bl += rgb[i * 3 + 2] * s;
+				}
+				lm.data[o] = r;
+				lm.data[o + 1] = g;
+				lm.data[o + 2] = bl;
+				lm.data[o + 3] = 1;
+			}
+		}
+		done.push(b);
+	}
+	return done;
+}
+
+// A light style's brightness from its pattern ('a' dark .. 'm' normal ..
+// 'z' double), animated at 10 letters a second as the engine does
+export function styleValue(pattern: string, time: number): number {
+	if (!pattern) return 0;
+	const c = pattern.charCodeAt(Math.floor(time * 10) % pattern.length) - 97;
+	return Math.max(0, c) * 22 / 264;
 }
 
 export interface StaticProp {
@@ -375,27 +432,48 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		const W = packer.width, H = Math.max(4, packer.height);
 		const data = new Float32Array(W * H * 4);
 		for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) data.set([1, 1, 1, 1], (y * W + x) * 4);
+		const lmBlocks: LightmapBlock[] = [];
+		const styleSet = new Set<number>();
+		// until a recording says otherwise: named lights as the map starts
+		// them (spawnflag 1 = initially dark)
+		const initial = new Map<number, number>();
+		for (const e of entities) {
+			const st = Number(e.style);
+			if (/^light/.test(e.classname ?? '') && st >= 32) initial.set(st, Number(e.spawnflags) & 1 ? 0 : styleValue(e.pattern || 'm', 0));
+		}
+		const defaultStyle = (st: number) => initial.get(st) ?? 1;
 		const lbytes = new Uint8Array(lighting.buffer, lighting.byteOffset, lighting.byteLength);
 		for (const [f, b] of blocks) {
-			const base = lightFaces.getInt32(f * 56 + 20, true);
-			const sample = (sx: number, sy: number) => {
-				const i = base + (Math.min(b.h - 1, Math.max(0, sy)) * b.w + Math.min(b.w - 1, Math.max(0, sx))) * 4;
-				if (i + 4 > lbytes.length) return [0, 0, 0];
-				const e = 2 ** ((lbytes[i + 3] << 24) >> 24);
-				return [lbytes[i] * e / 255, lbytes[i + 1] * e / 255, lbytes[i + 2] * e / 255];
-			};
-			for (let y = -1; y <= b.h; y++) {
-				for (let x = -1; x <= b.w; x++) {
-					const c = sample(x, y);
-					const o = ((b.y + y) * W + (b.x + x)) * 4;
-					data[o] = c[0];
-					data[o + 1] = c[1];
-					data[o + 2] = c[2];
-					data[o + 3] = 1;
+			const o = f * 56;
+			const base = lightFaces.getInt32(o + 20, true);
+			// each style's samples follow the previous style's (four sets
+			// for bump-mapped faces: flat first, then the three bump bases)
+			const ti = faces.getInt16(o + 10, true);
+			const perStyle = b.w * b.h * ((texinfo.getInt32(ti * 72 + 64, true) & SURF_BUMPLIGHT) ? 4 : 1) * 4;
+			const layers: LightmapLayer[] = [];
+			for (let k = 0; k < 4; k++) {
+				const style = lightFaces.getUint8(o + 16 + k);
+				if (style === 255) break;
+				const start = base + k * perStyle;
+				const rgb = new Float32Array((b.w + 2) * (b.h + 2) * 3);
+				for (let y = -1; y <= b.h; y++) {
+					for (let x = -1; x <= b.w; x++) {
+						const i = start + (Math.min(b.h - 1, Math.max(0, y)) * b.w + Math.min(b.w - 1, Math.max(0, x))) * 4;
+						if (i + 4 > lbytes.length) continue;
+						const e = 2 ** ((lbytes[i + 3] << 24) >> 24) / 255;
+						const j = ((y + 1) * (b.w + 2) + x + 1) * 3;
+						rgb[j] = lbytes[i] * e;
+						rgb[j + 1] = lbytes[i + 1] * e;
+						rgb[j + 2] = lbytes[i + 2] * e;
+					}
 				}
+				layers.push({style, rgb});
+				if (style) styleSet.add(style);
 			}
+			lmBlocks.push({x: b.x - 1, y: b.y - 1, w: b.w + 2, h: b.h + 2, layers});
 		}
-		lightmap = {width: W, height: H, data};
+		lightmap = {width: W, height: H, data, blocks: lmBlocks, styles: [...styleSet]};
+		composeLightmap(lightmap, defaultStyle);
 	}
 
 	// faces that can carry paint: lit world faces (model 0)

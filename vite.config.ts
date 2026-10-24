@@ -1,6 +1,6 @@
 import {defineConfig} from 'vite';
 import type {Plugin} from 'vite';
-import {createReadStream, statSync} from 'node:fs';
+import {createReadStream, mkdirSync, statSync, writeFileSync} from 'node:fs';
 import {join, normalize} from 'node:path';
 
 // Dev only: serves the local Portal 2 install at /__game/ (with Range
@@ -14,6 +14,18 @@ function devGameFiles(): Plugin {
 		name: 'dev-game-files',
 		apply: 'serve',
 		configureServer(server) {
+			// debugging: POST a PNG data URL to /__shot?name=x to save it in fixtures/shots
+			server.middlewares.use('/__shot', (req, res) => {
+				const name = (/name=([\w-]+)/.exec(req.url ?? '')?.[1]) ?? 'shot';
+				const parts: Buffer[] = [];
+				req.on('data', (c: Buffer) => parts.push(c));
+				req.on('end', () => {
+					mkdirSync('fixtures/shots', {recursive: true});
+					const data = Buffer.concat(parts).toString().replace(/^data:image\/\w+;base64,/, '');
+					writeFileSync(`fixtures/shots/${name}.png`, Buffer.from(data, 'base64'));
+					res.end('ok');
+				});
+			});
 			server.middlewares.use('/__game/', (req, res) => {
 				const rel = normalize(decodeURIComponent((req.url ?? '/').split('?')[0])).replace(/^([/\\])+/, '');
 				if (rel.startsWith('..')) {

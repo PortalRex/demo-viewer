@@ -11,6 +11,18 @@ export const paintUniforms = {
 	paintOn: {value: 0},
 };
 
+// Source's fog: linear from start to end, up to a maximum density
+export const fogUniforms = {
+	fogMaxDensity: {value: 1},
+};
+
+const FOG_FRAGMENT = `
+#ifdef USE_FOG
+	float fogFactor = clamp((vFogDepth - fogNear) / max(fogFar - fogNear, 1.0), 0.0, 1.0) * fogMaxDensity;
+	gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+#endif
+`;
+
 export const ditherUniforms = {
 	ditherOn: {value: 0},
 	ditherTarget: {value: new THREE.Vector3()},
@@ -66,13 +78,14 @@ const PAINT_FRAGMENT = `
 
 function hook(material: THREE.Material, paint: boolean) {
 	material.onBeforeCompile = shader => {
-		Object.assign(shader.uniforms, ditherUniforms);
+		Object.assign(shader.uniforms, ditherUniforms, fogUniforms);
 		if (paint) Object.assign(shader.uniforms, paintUniforms);
 		shader.vertexShader = 'varying vec3 vDitherWorld;\n' + shader.vertexShader.replace(
 			'#include <project_vertex>',
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
 		);
-		shader.fragmentShader = DITHER_FRAGMENT_HEAD + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
+		shader.fragmentShader = DITHER_FRAGMENT_HEAD + 'uniform float fogMaxDensity;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
+			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + (paint ? PAINT_FRAGMENT : ''));
 	};

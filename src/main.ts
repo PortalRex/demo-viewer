@@ -39,6 +39,15 @@ let viewMode: 'top' | 'side' | '3d' = 'top';
 
 const view3d = new View3D($('view3d'));
 if (import.meta.env.DEV) (window as unknown as {view3d: View3D}).view3d = view3d;  // for debugging in the console
+if (import.meta.env.DEV) {
+	// debugging: seek, look from a game position (eye origin + pitch/yaw), save the 3D view to fixtures/shots
+	const w = window as unknown as Record<string, unknown>;
+	w.seek = (t: number) => seekTo(t);
+	w.shot = (name: string, eye?: number[], ang?: number[]) => {
+		const url = view3d.snapshot(1600, 900, eye, ang);
+		return fetch(`/__shot?name=${name}`, {method: 'POST', body: url}).then(r => r.text());
+	};
+}
 const entityCache = new Map<number, EntityTimeline | null>();
 const mapCache = new Map<string, Promise<BspMap>>();
 let gameFS: GameFS | null = null;
