@@ -135,7 +135,7 @@ export class Materials {
 			noCull: truthy(p.get('$nocull')),
 			unlit: /unlitgeneric|unlittwotexture|sprite|monitorscreen|^sky$/.test(shader),
 			alpha: p.has('$alpha') ? Number(p.get('$alpha')) || 0 : 1,
-			color: parseColor(p.get('$color')) ?? parseColor(p.get('$color2')) ?? [1, 1, 1],
+			color: parseColor(p.get('$color')) ?? parseColor(p.get('$color2')) ?? parseColor(p.get('$refracttint')) ?? [1, 1, 1],
 		};
 	}
 }

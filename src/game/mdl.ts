@@ -8,8 +8,9 @@ import type {MeshData} from './bsp.ts';
 export interface ModelGroup extends MeshData {
 	// where the material can be: each $cdmaterials folder + the texture name
 	materialCandidates: string[];
-	// for static prop vertex lighting: this group's vertices' indices into the
-	// model's LOD 0 vertex list, in the order vrad lit them
+	// for static prop vertex lighting: per vertex, the studio mesh number
+	// (times 2^20) plus the index of the vertex in that mesh's hardware vertex
+	// list (its strip groups' vertices in order), which the lighting follows
 	meshVertex: Uint32Array;
 }
 
@@ -17,7 +18,8 @@ export interface StudioModel {
 	groups: ModelGroup[];
 	min: [number, number, number];
 	max: [number, number, number];
-	meshes: {vertexCount: number}[];  // studio meshes in order (for .vhv files)
+	meshes: {vertexCount: number}[];  // the drawn studio meshes, by their number in .vhv files
+	checksum: number;
 }
 
 const VVD_VERTEX = 48;
@@ -55,7 +57,8 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 	const candidates = (ref: number) => {
 		const tex = textures[textureFor(ref)] ?? '';
 		const cds = dirs.length ? dirs : [''];
-		return cds.map(cd => (cd && !cd.endsWith('/') ? `${cd}/` : cd) + tex);
+		// texture names can carry their own folder; try them bare as well
+		return [...new Set([...cds.map(cd => (cd && !cd.endsWith('/') ? `${cd}/` : cd) + tex), tex])];
 	};
 
 	// VVD: LOD 0 vertices, through the fixup table when there is one
@@ -80,10 +83,15 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 	const vtxBodyParts = x.getInt32(28, true), vtxBodyPartOffset = x.getInt32(32, true);
 	const stripGroupSize = guessStripGroupSize(x, vtxBodyPartOffset);
 
+	// vertex lighting files number meshes across every model of every body
+	// part, so count them all even though only the default model is drawn
+	let meshNumber = 0;
 	for (let b = 0; b < Math.min(bodyParts, vtxBodyParts); b++) {
 		const bp = bodyPartOffset + b * 16;
 		const models = m.getInt32(bp + 4, true);
 		if (!models) continue;
+		const firstMesh = meshNumber;
+		for (let k = 0; k < models; k++) meshNumber += m.getInt32(bp + m.getInt32(bp + 12, true) + k * 148 + 72, true);
 		const model = bp + m.getInt32(bp + 12, true);  // the first (default) model
 		const meshes = m.getInt32(model + 72, true);
 		const meshOffset = model + m.getInt32(model + 76, true);
@@ -99,10 +107,7 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 			const mesh = meshOffset + mi * 116;
 			const ref = m.getInt32(mesh, true);
 			const meshVertexBase = modelVertexBase + m.getInt32(mesh + 12, true);
-			// numLODVertexes[0] of the mesh's vertex data (after its pointer)
-			const meshVertexCount = m.getInt32(mesh + 52, true);
-			const meshListIndex = meshList.length;
-			meshList.push({vertexCount: meshVertexCount});
+			const meshListIndex = firstMesh + mi;
 			let g = groups.get(ref);
 			if (!g) {
 				g = {pos: [], nrm: [], col: [], uv: [], mv: []};
@@ -111,7 +116,8 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 			const vMesh = vMeshOffset + mi * 9;
 			const nGroups = x.getInt32(vMesh, true);
 			const groupOffset = vMesh + x.getInt32(vMesh + 4, true);
-			for (let sgi = 0; sgi < nGroups; sgi++) {
+			let hwBase = 0;  // hardware vertices of the strip groups before this one
+			for (let sgi = 0; sgi < nGroups; sgi++, hwBase += x.getInt32(groupOffset + (sgi - 1) * stripGroupSize, true)) {
 				const sg = groupOffset + sgi * stripGroupSize;
 				const numVerts = x.getInt32(sg, true), vertOffset = sg + x.getInt32(sg + 4, true);
 				const numIndices = x.getInt32(sg + 8, true), indexOffset = sg + x.getInt32(sg + 12, true);
@@ -120,20 +126,21 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 					for (const k of [0, 2, 1]) {  // studio triangles wind clockwise
 						const idx = x.getUint16(indexOffset + (i + k) * 2, true);
 						if (idx >= numVerts) break;
-						tri.push(x.getUint16(vertOffset + idx * 9 + 4, true));
+						tri.push(idx);
 					}
 					if (tri.length < 3) continue;
-					for (const orig of tri) {
+					for (const idx of tri) {
+						const orig = x.getUint16(vertOffset + idx * 9 + 4, true);
 						const vo = vertex(meshVertexBase + orig);
 						g.pos.push(d.getFloat32(vo + 16, true), d.getFloat32(vo + 20, true), d.getFloat32(vo + 24, true));
 						g.nrm.push(d.getFloat32(vo + 28, true), d.getFloat32(vo + 32, true), d.getFloat32(vo + 36, true));
 						g.uv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
 						g.col.push(...color);
-						// mesh index in the high bits, vertex within the mesh below
-						g.mv.push(meshListIndex * 65536 + orig);
+						g.mv.push(meshListIndex * 1048576 + hwBase + idx);
 					}
 				}
 			}
+			meshList[meshListIndex] = {vertexCount: hwBase};
 		}
 	}
 
@@ -147,7 +154,7 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 		});
 	}
 	if (!out.length) return null;
-	return {groups: out, min: hull(104), max: hull(116), meshes: meshList};
+	return {groups: out, min: hull(104), max: hull(116), meshes: meshList, checksum: m.getUint32(8, true)};
 }
 
 // Strip group headers are 25 bytes, or 33 in files with topology data

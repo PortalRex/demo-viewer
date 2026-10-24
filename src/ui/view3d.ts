@@ -8,6 +8,8 @@ import type {Materials, MaterialInfo} from '../game/materials.ts';
 import {loadModel} from '../game/mdl.ts';
 import type {StudioModel} from '../game/mdl.ts';
 import {TextureCache} from './textures.ts';
+import {Zip} from '../game/zip.ts';
+import {readVhv} from '../game/vhv.ts';
 import type {EntityTimeline, EntityTrack} from '../net/entities.ts';
 import {keyAt} from '../net/entities.ts';
 import type {SegmentTrack, ViewState} from '../player/playback.ts';
@@ -55,6 +57,7 @@ class MaterialLibrary {
 	private lightmap: THREE.Texture | null;
 	private world = new Map<string, THREE.Material>();
 	private model = new Map<string, THREE.Material>();
+	private litModel = new Map<string, THREE.Material>();
 	onChange = () => {};
 
 	constructor(files: GameFiles, materials: Materials, lightmap: THREE.Texture | null) {
@@ -73,15 +76,38 @@ class MaterialLibrary {
 			mat.alphaTest = 0.5;
 		}
 		if (info.noCull || info.translucent || info.alphaTest) mat.side = THREE.DoubleSide;
-		if (!info.baseTexture) return;
+		if (!info.baseTexture) {
+			// refraction only (glass): a faint tint of what's behind
+			if (info.shader === 'refract') {
+				mat.vertexColors = false;
+				mat.opacity = 0.18;
+				mat.color.setRGB(...info.color);
+				mat.needsUpdate = true;
+			}
+			return;
+		}
 		this.textures.get(info.baseTexture).then(tex => {
 			if (!tex) return;
 			mat.map = tex;
-			mat.vertexColors = false;
-			mat.color.setRGB(...info.color);
+			// lit props keep their vertex colours: those are the baked light
+			if (!mat.userData.vertexLit) mat.vertexColors = false;
+			const k = mat.userData.scale ?? 1;
+			mat.color.setRGB(info.color[0] * k, info.color[1] * k, info.color[2] * k);
 			mat.needsUpdate = true;
 			this.onChange();
 		});
+	}
+
+	// a skybox face's texture (skybox/<name><side>)
+	async skyTexture(material: string): Promise<THREE.Texture | null> {
+		const info = await this.materials.get(material);
+		if (!info.found || !info.baseTexture) return null;
+		const tex = await this.textures.get(info.baseTexture);
+		if (!tex) return null;
+		const t = tex.clone();
+		t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+		t.needsUpdate = true;
+		return t;
 	}
 
 	forWorld(group: MaterialGroup): THREE.Material {
@@ -107,12 +133,22 @@ class MaterialLibrary {
 		return mat;
 	}
 
-	forModel(candidates: string[]): THREE.Material {
+	// `vertexLit`: the geometry's colours are vrad's baked light (static props)
+	forModel(candidates: string[], vertexLit = false): THREE.Material {
 		const key = candidates.join('|');
-		const cached = this.model.get(key);
+		const cache = vertexLit ? this.litModel : this.model;
+		const cached = cache.get(key);
 		if (cached) return cached;
-		const mat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
-		this.model.set(key, mat);
+		let mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial;
+		if (vertexLit) {
+			mat = new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.DoubleSide});
+			mat.userData.vertexLit = true;
+			mat.userData.scale = LIGHTMAP_EXPOSURE;
+			mat.color.setScalar(LIGHTMAP_EXPOSURE);
+		} else {
+			mat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
+		}
+		cache.set(key, mat);
 		(async () => {
 			for (const c of candidates) {
 				const info = await this.materials.get(c);
@@ -143,6 +179,11 @@ export class View3D {
 	private objects = new Map<EntityTrack, THREE.Object3D>();
 	private lastTarget: THREE.Vector3 | null = null;
 	private propGroup = new THREE.Group();
+	private sky = new THREE.Group();
+	// 3D skybox: the map's miniature area seen from sky_camera, scaled up
+	private skyCamera: {origin: THREE.Vector3; scale: number; fog: THREE.Fog | null} | null = null;
+	private skyView = new THREE.PerspectiveCamera(VERTICAL_FOV, 1, 0.5, 40000);
+	private worldFog: THREE.Fog | null = null;
 	private files: GameFiles | null = null;
 	private models = new Map<string, Promise<THREE.Object3D | null>>();
 	private mapToken = 0;
@@ -157,7 +198,8 @@ export class View3D {
 		hemi.position.set(0, 0, 1);
 		const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 		sun.position.set(0.35, 0.25, 1);
-		this.scene.add(hemi, sun, this.mapGroup, this.propGroup, this.entityGroup);
+		this.scene.add(hemi, sun, this.mapGroup, this.propGroup, this.entityGroup, this.sky);
+		this.sky.renderOrder = -1;
 
 		const body = new THREE.CapsuleGeometry(16, 40, 4, 12);
 		body.rotateX(Math.PI / 2);
@@ -210,14 +252,82 @@ export class View3D {
 					for (const g of m.groups) {
 						const mesh = new THREE.Mesh(geometry(g), library.forModel(g.materialCandidates));
 						mesh.name = `${name} ${g.materialCandidates[0]}`;
+						mesh.userData.meshVertex = g.meshVertex;
+						mesh.userData.materialCandidates = g.materialCandidates;
 						group.add(mesh);
 					}
+					group.userData.checksum = m.checksum;
 					return group;
 				}).catch(() => null)
 				: Promise.resolve(null);
 			this.models.set(key, p);
 		}
 		return p;
+	}
+
+	// The 2D skybox: six faces around the camera, drawn behind everything.
+	// Face orientation follows Quake 2's, which Source kept: rt +X, lf +Y,
+	// bk -X, ft -Y; each face's s/t run as in Quake 2's MakeSkyVec.
+	private loadSky(bsp: BspMap, token: number) {
+		this.sky.clear();
+		const name = bsp.entities.find(e => e.classname === 'worldspawn')?.skyname;
+		if (!name || !this.library) return;
+		const faces: [string, (s: number, t: number) => [number, number, number]][] = [
+			['rt', (s, t) => [1, -s, t]],
+			['bk', (s, t) => [-1, s, t]],
+			['lf', (s, t) => [s, 1, t]],
+			['ft', (s, t) => [-s, -1, t]],
+			['up', (s, t) => [-t, -s, 1]],
+			['dn', (s, t) => [t, -s, -1]],
+		];
+		const library = this.library;
+		for (const [side, at] of faces) {
+			// HDR maps use <name>_hdr when it exists
+			library.skyTexture(`skybox/${name}_hdr${side}`).then(t => t ?? library.skyTexture(`skybox/${name}${side}`)).then(tex => {
+				if (!tex || token !== this.mapToken) return;
+				const corners: [number, number][] = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+				const pos: number[] = [], uv: number[] = [];
+				for (const i of [0, 1, 2, 0, 2, 3]) {
+					const [cs, ct] = corners[i];
+					pos.push(...at(cs, ct));
+					uv.push((cs + 1) / 2, (1 - ct) / 2);
+				}
+				const g = new THREE.BufferGeometry();
+				g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+				g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+				const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide, depthTest: false, depthWrite: false, fog: false}));
+				mesh.frustumCulled = false;
+				mesh.renderOrder = -1;
+				this.sky.add(mesh);
+				this.onLoaded();
+			});
+		}
+	}
+
+	// a static prop with its baked vertex light, or null without (usable) data
+	private litProp(template: THREE.Object3D, vhv: Uint8Array | null): THREE.Object3D | null {
+		const light = vhv ? readVhv(vhv) : null;
+		if (!light || light.checksum !== template.userData.checksum || !this.library) return null;
+		const out = new THREE.Group();
+		for (const child of template.children) {
+			const mesh = child as THREE.Mesh;
+			const mv = mesh.userData.meshVertex as Uint32Array;
+			const colors = new Float32Array(mv.length * 3);
+			for (let i = 0; i < mv.length; i++) {
+				const vl = light.meshes[Math.floor(mv[i] / 1048576)];
+				const k = (mv[i] % 1048576) * 4;
+				if (!vl || k + 3 > vl.length) return null;
+				colors[i * 3] = vl[k + 2] / 255;      // stored BGRA
+				colors[i * 3 + 1] = vl[k + 1] / 255;
+				colors[i * 3 + 2] = vl[k] / 255;
+			}
+			const g = mesh.geometry.clone();
+			g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+			const lit = new THREE.Mesh(g, this.library.forModel(mesh.userData.materialCandidates, true));
+			lit.name = mesh.name;
+			out.add(lit);
+		}
+		return out;
 	}
 
 	private brushModel(m: ModelMesh): THREE.Group {
@@ -268,12 +378,31 @@ export class View3D {
 		}
 
 		this.mapGroup.add(this.brushModel(bsp.models[0]));
+		this.loadSky(bsp, token);
+		this.worldFog = this.scene.fog as THREE.Fog | null;
 
-		// static props, as they load
+		const sc = bsp.entities.find(e => e.classname === 'sky_camera');
+		this.skyCamera = null;
+		if (sc) {
+			const o = (sc.origin ?? '0 0 0').split(/\s+/).map(Number);
+			let skyFog: THREE.Fog | null = null;
+			if (sc.fogenable === '1') {
+				const c = (sc.fogcolor ?? '0 0 0').split(/\s+/).map(Number);
+				skyFog = new THREE.Fog(new THREE.Color().setRGB(c[0] / 255, c[1] / 255, c[2] / 255, THREE.SRGBColorSpace), Number(sc.fogstart) || 0, Number(sc.fogend) || 30000);
+			}
+			this.skyCamera = {origin: new THREE.Vector3(o[0], o[1], o[2]), scale: Number(sc.scale) || 16, fog: skyFog};
+			this.skyView.up.set(0, 0, 1);
+		}
+
+		// static props, as they load, with vrad's vertex lighting from the pak
+		const pak = bsp.pak ? new Zip(bsp.pak) : null;
 		for (const prop of bsp.staticProps) {
-			this.model(prop.model, prop.skin).then(template => {
+			Promise.all([
+				this.model(prop.model, prop.skin),
+				pak ? pak.read(`sp_hdr_${prop.index}.vhv`).then(b => b ?? pak.read(`sp_${prop.index}.vhv`)) : null,
+			]).then(([template, vhv]) => {
 				if (!template || token !== this.mapToken) return;
-				const o = template.clone();
+				const o = this.litProp(template, vhv) ?? template.clone();
 				o.position.set(...prop.origin);
 				o.rotation.copy(toEuler(prop.angles));
 				o.updateMatrixWorld(true);
@@ -423,7 +552,45 @@ export class View3D {
 	}
 
 	render() {
-		this.renderer?.render(this.scene, this.camera);
+		const r = this.renderer;
+		if (!r) return;
+		// the sky stays centred on the camera, inside the far plane
+		this.sky.scale.setScalar(this.camera.far * 0.5);
+		const sc = this.skyCamera;
+		if (!sc) {
+			this.sky.position.copy(this.camera.position);
+			r.render(this.scene, this.camera);
+			return;
+		}
+
+		// 3D skybox first: the same scene from sky_camera, at 1/scale of the
+		// view's position, with its own fog; then the map over it (its sky
+		// faces aren't drawn, so the skybox shows through)
+		const background = this.scene.background;
+		const hidden = ([this.entityGroup, this.player, this.pathLine] as (THREE.Object3D | null)[]).filter((o): o is THREE.Object3D => !!o && o.visible);
+		r.autoClear = false;
+		if (background instanceof THREE.Color) r.setClearColor(background);
+		r.clear();
+		this.scene.background = null;
+
+		this.skyView.position.copy(sc.origin).addScaledVector(this.camera.position, 1 / sc.scale);
+		this.skyView.quaternion.copy(this.camera.quaternion);
+		this.skyView.fov = this.camera.fov;
+		this.skyView.aspect = this.camera.aspect;
+		this.skyView.updateProjectionMatrix();
+		this.sky.position.copy(this.skyView.position);
+		for (const o of hidden) o.visible = false;
+		this.scene.fog = sc.fog;
+		r.render(this.scene, this.skyView);
+		for (const o of hidden) o.visible = true;
+
+		r.clearDepth();
+		this.sky.visible = false;
+		this.scene.fog = this.worldFog;
+		r.render(this.scene, this.camera);
+		this.sky.visible = true;
+		this.scene.background = background;
+		r.autoClear = true;
 	}
 
 	// debugging: what's under a point of the canvas (0..1 coordinates)

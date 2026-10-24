@@ -17,8 +17,11 @@ elevators, panels) and static props come from the BSP; portals, moving props
 and the player come from the entity data decoded from the run. Models are read
 from the game's VPKs (and the map's own pak file) without bones, so animated
 ones show in their reference pose. Surfaces use their real textures (VTF) and the map's
-baked HDR lighting (lightmaps packed into one atlas, tone mapped); props use
-their textures and skins; fog comes from the map's fog controller. Without
+baked HDR lighting (lightmaps packed into one atlas, tone mapped); static props
+use their textures, skins and vrad's per-vertex lighting from the map's pak
+(`sp_hdr_N.vhv`, matched to the hardware vertex order); fog comes from the
+map's fog controller; the 2D skybox and the 3D skybox (`sky_camera`, drawn in
+its own pass at 1/scale with its own fog) are drawn behind the map. Without
 textures (before they load) surfaces are light where portals can go and dark
 where they can't, from each material's `%noportal`.
 Camera: the player's eyes, or orbit around the player.
