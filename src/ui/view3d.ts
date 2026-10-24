@@ -2,10 +2,12 @@
 // recorded entities (portals, brush entities, props) and the player's view.
 import * as THREE from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
-import type {BspMap, MeshData} from '../game/bsp.ts';
+import type {BspMap, MeshData, MaterialGroup, ModelMesh} from '../game/bsp.ts';
 import type {GameFiles} from '../game/files.ts';
+import type {Materials, MaterialInfo} from '../game/materials.ts';
 import {loadModel} from '../game/mdl.ts';
 import type {StudioModel} from '../game/mdl.ts';
+import {TextureCache} from './textures.ts';
 import type {EntityTimeline, EntityTrack} from '../net/entities.ts';
 import {keyAt} from '../net/entities.ts';
 import type {SegmentTrack, ViewState} from '../player/playback.ts';
@@ -20,7 +22,7 @@ const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 
 // entity classes that aren't worth a box
 const HIDDEN_CLASSES = new Set([
-	'CPortal_Player', 'CWeaponPortalgun', 'CPredictedViewModel', 'CBaseViewModel', 'CFuncPortalBumper', 'CFuncNoPortalVolume',
+	'CWeaponPortalgun', 'CPredictedViewModel', 'CBaseViewModel', 'CFuncPortalBumper', 'CFuncNoPortalVolume',
 	'CVGuiScreen', 'CMovieDisplay', 'CBoneFollower', 'CInfoPlacementHelper', 'CEnvProjectedTexture', 'CFogController',
 	'CParticleSystem', 'CRopeKeyframe', 'CSprite', 'CSpriteOriented', 'CBeam', 'CPortalGameRulesProxy', 'CPortalGameRules',
 	'CTeam', 'CPlayerResource', 'CPortal_PlayerResource', 'CWorld', 'CSun', 'CEnvTonemapController', 'CFunc_LiquidPortal',
@@ -36,7 +38,92 @@ function geometry(m: MeshData) {
 	g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
 	g.setAttribute('normal', new THREE.BufferAttribute(m.normals, 3));
 	g.setAttribute('color', new THREE.BufferAttribute(m.colors, 3));
+	if (m.uv) g.setAttribute('uv', new THREE.BufferAttribute(m.uv, 2));
+	if (m.lightUv) g.setAttribute('uv1', new THREE.BufferAttribute(m.lightUv, 2));
 	return g;
+}
+
+// How bright the baked lighting is drawn. three's basic material divides
+// light maps by pi.
+const LIGHTMAP_EXPOSURE = 2.5;
+
+// three.js materials for the map's materials: textured once the texture
+// loads (flat colour until then), lit by the lightmap atlas for the world
+class MaterialLibrary {
+	private materials: Materials;
+	private textures: TextureCache;
+	private lightmap: THREE.Texture | null;
+	private world = new Map<string, THREE.Material>();
+	private model = new Map<string, THREE.Material>();
+	onChange = () => {};
+
+	constructor(files: GameFiles, materials: Materials, lightmap: THREE.Texture | null) {
+		this.materials = materials;
+		this.textures = new TextureCache(files);
+		this.lightmap = lightmap;
+	}
+
+	private apply(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
+		if (info.translucent || info.liquid) {
+			mat.transparent = true;
+			mat.depthWrite = false;
+			mat.opacity = info.liquid && !info.baseTexture ? 0.6 : info.alpha;
+			if (info.additive) mat.blending = THREE.AdditiveBlending;
+		} else if (info.alphaTest) {
+			mat.alphaTest = 0.5;
+		}
+		if (info.noCull || info.translucent || info.alphaTest) mat.side = THREE.DoubleSide;
+		if (!info.baseTexture) return;
+		this.textures.get(info.baseTexture).then(tex => {
+			if (!tex) return;
+			mat.map = tex;
+			mat.vertexColors = false;
+			mat.color.setRGB(...info.color);
+			mat.needsUpdate = true;
+			this.onChange();
+		});
+	}
+
+	forWorld(group: MaterialGroup): THREE.Material {
+		const cached = this.world.get(group.material);
+		if (cached) return cached;
+		const mat = new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.FrontSide});
+		if (group.surface === 'glass' || group.surface === 'liquid') {
+			mat.transparent = true;
+			mat.opacity = 0.35;
+			mat.depthWrite = false;
+		}
+		this.world.set(group.material, mat);
+		this.materials.get(group.material).then(info => {
+			if (!info.found) return;
+			if (!info.unlit && this.lightmap) {
+				mat.lightMap = this.lightmap;
+				mat.lightMapIntensity = Math.PI * LIGHTMAP_EXPOSURE;
+			}
+			this.apply(mat, info);
+			mat.needsUpdate = true;
+			this.onChange();
+		});
+		return mat;
+	}
+
+	forModel(candidates: string[]): THREE.Material {
+		const key = candidates.join('|');
+		const cached = this.model.get(key);
+		if (cached) return cached;
+		const mat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
+		this.model.set(key, mat);
+		(async () => {
+			for (const c of candidates) {
+				const info = await this.materials.get(c);
+				if (info.found) {
+					this.apply(mat, info);
+					return;
+				}
+			}
+		})();
+		return mat;
+	}
 }
 
 export class View3D {
@@ -46,8 +133,7 @@ export class View3D {
 	private scene = new THREE.Scene();
 	private camera = new THREE.PerspectiveCamera(VERTICAL_FOV, 1, 1, 40000);
 	private controls: OrbitControls | null = null;
-	private solidMat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.FrontSide});
-	private glassMat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide, transparent: true, opacity: 0.3, depthWrite: false});
+	private library: MaterialLibrary | null = null;
 	private mapGroup = new THREE.Group();
 	private entityGroup = new THREE.Group();
 	private pathLine: THREE.LineSegments | null = null;
@@ -57,9 +143,8 @@ export class View3D {
 	private objects = new Map<EntityTrack, THREE.Object3D>();
 	private lastTarget: THREE.Vector3 | null = null;
 	private propGroup = new THREE.Group();
-	private propMat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
 	private files: GameFiles | null = null;
-	private models = new Map<string, Promise<THREE.BufferGeometry | null>>();
+	private models = new Map<string, Promise<THREE.Object3D | null>>();
 	private mapToken = 0;
 	onLoaded = () => {};
 
@@ -84,6 +169,10 @@ export class View3D {
 	private ensureRenderer() {
 		if (this.renderer) return this.renderer;
 		this.renderer = new THREE.WebGLRenderer({antialias: true});
+		// HDR lighting needs its highlights rolled off, as the game's tone
+		// mapping does
+		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+		this.renderer.toneMappingExposure = 1.1;
 		this.renderer.setPixelRatio(window.devicePixelRatio || 1);
 		this.container.appendChild(this.renderer.domElement);
 		this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -106,20 +195,43 @@ export class View3D {
 		}
 	}
 
-	// a model's geometry, loaded once per map (maps can carry their own models)
-	private model(name: string): Promise<THREE.BufferGeometry | null> {
-		const key = name.toLowerCase();
+	// a model (all its material groups), loaded once per map and skin;
+	// returns a template to clone (maps can carry their own models)
+	private model(name: string, skin = 0): Promise<THREE.Object3D | null> {
+		const key = `${name.toLowerCase()}#${skin}`;
 		let p = this.models.get(key);
 		if (!p) {
-			const files = this.files;
+			const files = this.files, library = this.library;
 			const color: [number, number, number] = /cube|box/.test(key) ? [0.66, 0.73, 0.8] : [0.52, 0.52, 0.5];
-			p = files ? loadModel(files, key, color).then((m: StudioModel | null) => (m ? geometry(m.mesh) : null)).catch(() => null) : Promise.resolve(null);
+			p = files && library
+				? loadModel(files, name, color, skin).then((m: StudioModel | null) => {
+					if (!m) return null;
+					const group = new THREE.Group();
+					for (const g of m.groups) {
+						const mesh = new THREE.Mesh(geometry(g), library.forModel(g.materialCandidates));
+						mesh.name = `${name} ${g.materialCandidates[0]}`;
+						group.add(mesh);
+					}
+					return group;
+				}).catch(() => null)
+				: Promise.resolve(null);
 			this.models.set(key, p);
 		}
 		return p;
 	}
 
-	setMap(bsp: BspMap | null, files: GameFiles | null = null) {
+	private brushModel(m: ModelMesh): THREE.Group {
+		const group = new THREE.Group();
+		for (const g of m.groups) {
+			const mesh = new THREE.Mesh(geometry(g), this.library!.forWorld(g));
+			mesh.name = `brush ${g.material}`;
+			if (g.surface === 'glass' || g.surface === 'liquid') mesh.renderOrder = 1;
+			group.add(mesh);
+		}
+		return group;
+	}
+
+	setMap(bsp: BspMap | null, files: GameFiles | null = null, materials: Materials | null = null) {
 		this.bsp = bsp;
 		this.files = files;
 		this.models.clear();
@@ -127,27 +239,49 @@ export class View3D {
 		this.propGroup.clear();
 		this.clearEntities();
 		const token = ++this.mapToken;
-		if (!bsp) return;
+		if (!bsp || !files || !materials) return;
+
+		let lightTex: THREE.DataTexture | null = null;
+		if (bsp.lightmap) {
+			const lm = bsp.lightmap;
+			const half = new Uint16Array(lm.data.length);
+			for (let i = 0; i < lm.data.length; i++) half[i] = THREE.DataUtils.toHalfFloat(lm.data[i]);
+			lightTex = new THREE.DataTexture(half, lm.width, lm.height, THREE.RGBAFormat, THREE.HalfFloatType);
+			lightTex.magFilter = lightTex.minFilter = THREE.LinearFilter;
+			lightTex.channel = 1;
+			lightTex.flipY = false;
+			lightTex.needsUpdate = true;
+		}
+		this.library = new MaterialLibrary(files, materials, lightTex);
+		this.library.onChange = () => this.onLoaded();
+
+		// fog, from the map's fog controller
+		const fog = bsp.entities.find(e => e.classname === 'env_fog_controller' && e.fogenable !== '0');
+		if (fog) {
+			const c = (fog.fogcolor ?? '0 0 0').split(/\s+/).map(Number);
+			const color = new THREE.Color().setRGB(c[0] / 255, c[1] / 255, c[2] / 255, THREE.SRGBColorSpace);
+			this.scene.fog = new THREE.Fog(color, Number(fog.fogstart) || 0, Number(fog.fogend) || 30000);
+			this.scene.background = color;
+		} else {
+			this.scene.fog = null;
+			this.scene.background = new THREE.Color(0x000000);
+		}
+
+		this.mapGroup.add(this.brushModel(bsp.models[0]));
+
 		// static props, as they load
 		for (const prop of bsp.staticProps) {
-			this.model(prop.model).then(g => {
-				if (!g || token !== this.mapToken) return;
-				const mesh = new THREE.Mesh(g, this.propMat);
-				mesh.position.set(...prop.origin);
-				mesh.rotation.copy(toEuler(prop.angles));
-				mesh.matrixAutoUpdate = false;
-				mesh.updateMatrix();
-				this.propGroup.add(mesh);
+			this.model(prop.model, prop.skin).then(template => {
+				if (!template || token !== this.mapToken) return;
+				const o = template.clone();
+				o.position.set(...prop.origin);
+				o.rotation.copy(toEuler(prop.angles));
+				o.updateMatrixWorld(true);
+				o.matrixAutoUpdate = false;
+				for (const c of o.children) c.matrixAutoUpdate = false;
+				this.propGroup.add(o);
 				this.onLoaded();
 			});
-		}
-		const world = bsp.models[0];
-		this.mapGroup.add(new THREE.Mesh(geometry(world.solid), this.solidMat));
-		this.mapGroup.add(this.outline(world.edges));
-		if (world.translucent.positions.length) {
-			const glass = new THREE.Mesh(geometry(world.translucent), this.glassMat);
-			glass.renderOrder = 1;
-			this.mapGroup.add(glass);
 		}
 	}
 
@@ -169,14 +303,6 @@ export class View3D {
 		this.lastTarget = null;
 	}
 
-	private edgeMat = new THREE.LineBasicMaterial({color: 0x000000, transparent: true, opacity: 0.2});
-
-	private outline(edges: Float32Array) {
-		const g = new THREE.BufferGeometry();
-		g.setAttribute('position', new THREE.BufferAttribute(edges, 3));
-		return new THREE.LineSegments(g, this.edgeMat);
-	}
-
 	private clearEntities() {
 		this.entityGroup.clear();
 		this.objects.clear();
@@ -193,6 +319,14 @@ export class View3D {
 	}
 
 	private makeObject(t: EntityTrack): THREE.Object3D | null {
+		if (t.className === 'CPortal_Player') {
+			// the other player in co-op
+			if (t === this.entities?.player) return null;
+			const body = new THREE.CapsuleGeometry(16, 40, 4, 12);
+			body.rotateX(Math.PI / 2);
+			body.translate(0, 0, 36);
+			return new THREE.Mesh(body, new THREE.MeshLambertMaterial({color: 0xff8a1f}));
+		}
 		if (t.className === 'CProp_Portal') {
 			const group = new THREE.Group();
 			const color = t.orange ? 0xff8a1f : 0x3f9bff;
@@ -210,12 +344,8 @@ export class View3D {
 		const brush = /^\*(\d+)$/.exec(t.model);
 		if (brush && this.bsp) {
 			const m = this.bsp.models[Number(brush[1])];
-			if (!m || !m.solid.positions.length) return null;
-			const group = new THREE.Group();
-			group.add(new THREE.Mesh(geometry(m.solid), this.solidMat));
-			group.add(this.outline(m.edges));
-			if (m.translucent.positions.length) group.add(new THREE.Mesh(geometry(m.translucent), this.glassMat));
-			return group;
+			if (!m || !m.groups.length || !this.library) return null;
+			return this.brushModel(m);
 		}
 		if (HIDDEN_CLASSES.has(t.className) || !t.model.endsWith('.mdl')) return null;
 		const size = [t.maxs[0] - t.mins[0], t.maxs[1] - t.mins[1], t.maxs[2] - t.mins[2]];
@@ -226,10 +356,10 @@ export class View3D {
 		box.position.set((t.mins[0] + t.maxs[0]) / 2, (t.mins[1] + t.maxs[1]) / 2, (t.mins[2] + t.maxs[2]) / 2);
 		group.add(box);
 		// swap the box for the real model when it loads
-		this.model(t.model).then(g => {
-			if (!g) return;
+		this.model(t.model).then(template => {
+			if (!template) return;
 			group.remove(box);
-			group.add(new THREE.Mesh(g, this.propMat));
+			group.add(template.clone());
 			this.onLoaded();
 		});
 		return group;
@@ -259,7 +389,8 @@ export class View3D {
 				o.visible = show;
 				if (show && k) {
 					o.position.set(k.origin[0], k.origin[1], k.origin[2]);
-					o.rotation.copy(toEuler(k.angles));
+					// players turn with their view but don't tilt
+					o.rotation.copy(toEuler(t.className === 'CPortal_Player' ? [0, k.angles[1], 0] : k.angles));
 				}
 			}
 		}
@@ -293,5 +424,21 @@ export class View3D {
 
 	render() {
 		this.renderer?.render(this.scene, this.camera);
+	}
+
+	// debugging: what's under a point of the canvas (0..1 coordinates)
+	pick(x: number, y: number) {
+		const ray = new THREE.Raycaster();
+		ray.setFromCamera(new THREE.Vector2(x * 2 - 1, 1 - y * 2), this.camera);
+		const hit = ray.intersectObjects([this.mapGroup, this.propGroup, this.entityGroup], true)[0];
+		if (!hit) return null;
+		let o: THREE.Object3D | null = hit.object;
+		const path: string[] = [];
+		while (o) {
+			path.push(o.name || o.type);
+			o = o.parent;
+		}
+		const mat = (hit.object as THREE.Mesh).material as THREE.MeshBasicMaterial;
+		return {path, point: hit.point.toArray().map(Math.round), material: mat.name, hasMap: !!mat.map, vertexColors: mat.vertexColors, type: mat.type};
 	}
 }

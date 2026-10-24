@@ -1,28 +1,45 @@
-// Source BSP (version 21, Portal 2) geometry: world faces, displacements and
-// the brush models that brush entities (doors, elevators, panels) use.
+// Source BSP (version 21, Portal 2): world faces, displacements and the brush
+// models brush entities use (doors, elevators, panels), with texture and
+// lightmap coordinates; the baked lighting packed into one atlas; static props.
 import type {GameFS} from './gamefs.ts';
 import type {MaterialInfo} from './materials.ts';
 
 const LUMP = {
-	ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7, EDGES: 12, SURFEDGES: 13,
+	ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7, LIGHTING: 8, EDGES: 12, SURFEDGES: 13,
 	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
+	LIGHTING_HDR: 53, FACES_HDR: 58,
 } as const;
 
 const SURF_SKY2D = 0x2, SURF_SKY = 0x4, SURF_TRIGGER = 0x40, SURF_NODRAW = 0x80, SURF_HINT = 0x100, SURF_SKIP = 0x200;
+const SURF_NOLIGHT = 0x400;
 const SKIP_FLAGS = SURF_SKY2D | SURF_SKY | SURF_TRIGGER | SURF_NODRAW | SURF_HINT | SURF_SKIP;
 
 export type Surface = 'portalable' | 'metal' | 'glass' | 'liquid' | 'other';
 
+// One material's triangles. `uv` is in texture repeats, `lightUv` in the
+// lightmap atlas (0..1); `colors` are the flat fallback.
 export interface MeshData {
 	positions: Float32Array;
 	normals: Float32Array;
 	colors: Float32Array;
+	uv?: Float32Array;
+	lightUv?: Float32Array;
+}
+
+export interface MaterialGroup extends MeshData {
+	material: string;    // lower case, under materials/
+	surface: Surface;
 }
 
 export interface ModelMesh {
-	solid: MeshData;
-	translucent: MeshData;  // glass, liquids
-	edges: Float32Array;    // face outlines, as line segment pairs
+	groups: MaterialGroup[];
+	edges: Float32Array;  // face outlines, as line segment pairs
+}
+
+export interface Lightmap {
+	width: number;
+	height: number;
+	data: Float32Array;  // RGBA, linear
 }
 
 export interface StaticProp {
@@ -30,13 +47,18 @@ export interface StaticProp {
 	origin: [number, number, number];
 	angles: [number, number, number];
 	skin: number;
+	index: number;  // in the map's list (its vertex lighting file is sp_hdr_<index>.vhv)
 }
 
 export interface BspMap {
 	name: string;
 	models: ModelMesh[];  // 0 = world
 	staticProps: StaticProp[];
-	materialsRead: number;  // surfaces coloured from their material files
+	lightmap: Lightmap | null;
+	entities: Record<string, string>[];
+	materials: Map<string, MaterialInfo>;
+	pak: Uint8Array | null;
+	materialsRead: number;
 	bounds: {min: [number, number, number]; max: [number, number, number]};
 	faceCount: number;
 	warnings: string[];
@@ -61,8 +83,8 @@ const SURFACE_COLORS: Record<Exclude<Surface, 'other'>, [number, number, number]
 	liquid: [0.35, 0.42, 0.16],
 };
 
-// everything else: the texture's average colour (stored linear), toned down
-// so it never competes with the portalable white
+// a texture's average colour (stored linear), toned down so it never
+// competes with the portalable white
 function textureColor(r: number, g: number, b: number): [number, number, number] {
 	const c = (v: number) => Math.min(0.62, Math.max(0.12, Math.pow(Math.max(0, v), 1 / 2.2) * 0.75));
 	return [c(r), c(g), c(b)];
@@ -77,16 +99,24 @@ function tint(base: [number, number, number], refl: number[], surface: Surface):
 	return [base[0] * (1 - k) + t[0] * k, base[1] * (1 - k) + t[1] * k, base[2] * (1 - k) + t[2] * k];
 }
 
+interface Vert {
+	p: number[];
+	uv: [number, number];
+	lm: [number, number];
+}
+
 class Builder {
 	pos: number[] = [];
 	nrm: number[] = [];
 	col: number[] = [];
+	uv: number[] = [];
+	lm: number[] = [];
 
-	// wound counter-clockwise around `facing` (the face's front), so
-	// back faces can be culled
-	tri(a: number[], b: number[], c: number[], color: [number, number, number], facing: number[]) {
-		const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
-		const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+	// wound counter-clockwise around `facing` (the face's front), so back
+	// faces can be culled
+	tri(a: Vert, b: Vert, c: Vert, color: [number, number, number], facing: number[]) {
+		const ux = b.p[0] - a.p[0], uy = b.p[1] - a.p[1], uz = b.p[2] - a.p[2];
+		const vx = c.p[0] - a.p[0], vy = c.p[1] - a.p[1], vz = c.p[2] - a.p[2];
 		let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
 		const l = Math.hypot(nx, ny, nz);
 		if (l < 1e-6) return;
@@ -95,15 +125,43 @@ class Builder {
 			[b, c] = [c, b];
 			nx = -nx; ny = -ny; nz = -nz;
 		}
-		this.pos.push(...a, ...b, ...c);
-		for (let i = 0; i < 3; i++) {
+		for (const v of [a, b, c]) {
+			this.pos.push(v.p[0], v.p[1], v.p[2]);
 			this.nrm.push(nx, ny, nz);
 			this.col.push(...color);
+			this.uv.push(v.uv[0], v.uv[1]);
+			this.lm.push(v.lm[0], v.lm[1]);
 		}
 	}
 
-	build(): MeshData {
-		return {positions: new Float32Array(this.pos), normals: new Float32Array(this.nrm), colors: new Float32Array(this.col)};
+	get empty() {
+		return this.pos.length === 0;
+	}
+}
+
+// Shelf packing of lightmap blocks into one atlas
+class AtlasPacker {
+	width: number;
+	height = 0;
+	private x = 0;
+	private y = 0;
+	private rowH = 0;
+
+	constructor(width: number) {
+		this.width = width;
+	}
+
+	place(w: number, h: number): [number, number] {
+		if (this.x + w > this.width) {
+			this.y += this.rowH;
+			this.x = 0;
+			this.rowH = 0;
+		}
+		const at: [number, number] = [this.x, this.y];
+		this.x += w;
+		this.rowH = Math.max(this.rowH, h);
+		this.height = Math.max(this.height, this.y + this.rowH);
+		return at;
 	}
 }
 
@@ -116,6 +174,20 @@ export interface BspOptions {
 	// properties of every material the map's visible faces use; gets the
 	// map's pak file first (maps carry their own patched materials)
 	materials?: (names: string[], pak: Uint8Array | null) => Promise<Map<string, MaterialInfo>>;
+}
+
+function parseEntities(text: string): Record<string, string>[] {
+	const out: Record<string, string>[] = [];
+	const re = /\{([^{}]*)\}/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(text))) {
+		const e: Record<string, string> = {};
+		const kv = /"([^"]*)"\s*"([^"]*)"/g;
+		let k: RegExpExecArray | null;
+		while ((k = kv.exec(m[1]))) e[k[1].toLowerCase()] = k[2];
+		out.push(e);
+	}
+	return out;
 }
 
 export async function loadBsp(fs: GameFS, path: string, name: string, options: BspOptions = {}): Promise<BspMap> {
@@ -140,18 +212,28 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 
 	const warnings: string[] = [];
 	if (version !== 21) warnings.push(`BSP version ${version}; expected 21.`);
-	const read = async (i: number) => {
+	const readBytes = async (i: number) => {
 		const l = lumps[i];
-		if (!l.length) return new DataView(new ArrayBuffer(0));
+		if (!l.length) return new Uint8Array(0);
 		const b = (await fs.read(path, l.offset, l.length))!;
 		if (b.length >= 4 && String.fromCharCode(...b.subarray(0, 4)) === 'LZMA') throw new Error('this map uses compressed lumps, which the viewer can\'t read yet');
+		return b;
+	};
+	const read = async (i: number) => {
+		const b = await readBytes(i);
 		return new DataView(b.buffer, b.byteOffset, b.byteLength);
 	};
 
-	const [planes, texdata, verts, texinfo, faces, edges, surfedges, models, dispinfo, dispverts, strData, strTable] = await Promise.all(
-		[LUMP.PLANES, LUMP.TEXDATA, LUMP.VERTEXES, LUMP.TEXINFO, LUMP.FACES, LUMP.EDGES, LUMP.SURFEDGES, LUMP.MODELS, LUMP.DISPINFO, LUMP.DISP_VERTS, LUMP.TEXDATA_STRING_DATA, LUMP.TEXDATA_STRING_TABLE].map(read),
-	);
-
+	// HDR lighting when the map has it (Portal 2's maps only have HDR)
+	const hdr = lumps[LUMP.LIGHTING_HDR].length > 0;
+	const [planes, texdata, verts, texinfo, ldrFaces, hdrFaces, edges, surfedges, models, dispinfo, dispverts, strData, strTable, lighting] = await Promise.all([
+		read(LUMP.PLANES), read(LUMP.TEXDATA), read(LUMP.VERTEXES), read(LUMP.TEXINFO), read(LUMP.FACES), read(LUMP.FACES_HDR),
+		read(LUMP.EDGES), read(LUMP.SURFEDGES), read(LUMP.MODELS), read(LUMP.DISPINFO), read(LUMP.DISP_VERTS),
+		read(LUMP.TEXDATA_STRING_DATA), read(LUMP.TEXDATA_STRING_TABLE), read(hdr ? LUMP.LIGHTING_HDR : LUMP.LIGHTING),
+	]);
+	const faces = ldrFaces.byteLength ? ldrFaces : hdrFaces;
+	const lightFaces = hdr && hdrFaces.byteLength === faces.byteLength ? hdrFaces : faces;
+	const entities = parseEntities(new TextDecoder('latin1').decode(await readBytes(LUMP.ENTITIES)));
 	const staticProps = await readStaticProps(fs, path, lumps[LUMP.GAME_LUMP], warnings);
 
 	const vert = (i: number) => [verts.getFloat32(i * 12, true), verts.getFloat32(i * 12 + 4, true), verts.getFloat32(i * 12 + 8, true)];
@@ -181,19 +263,16 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		return out;
 	};
 
-	const nModels = models.byteLength / 48;
-	const meshes: ModelMesh[] = [];
-	let faceCount = 0;
 	// resolve the materials of the faces that will be drawn
 	const skipped = (ti: number) => {
 		const lower = textureName(ti).toLowerCase();
 		return (texinfo.getInt32(ti * 72 + 64, true) & SKIP_FLAGS) !== 0 || (lower.startsWith('tools/') && !lower.includes('toolsblack'));
 	};
 	let materials = new Map<string, MaterialInfo>();
+	const pak = lumps[LUMP.PAKFILE].length ? await fs.read(path, lumps[LUMP.PAKFILE].offset, lumps[LUMP.PAKFILE].length) : null;
 	if (options.materials) {
 		const names = new Set<string>();
 		for (let ti = 0; ti < texinfo.byteLength / 72; ti++) if (!skipped(ti)) names.add(textureName(ti).toLowerCase());
-		const pak = lumps[LUMP.PAKFILE].length ? await fs.read(path, lumps[LUMP.PAKFILE].offset, lumps[LUMP.PAKFILE].length) : null;
 		try {
 			materials = await options.materials([...names], pak);
 		} catch (e) {
@@ -202,37 +281,131 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 	}
 	let materialsRead = 0;
 
-	const textureCache = new Map<number, {surface: Surface; skip: boolean; color: [number, number, number]}>();
-	const texInfoOf = (ti: number) => {
-		let v = textureCache.get(ti);
-		if (!v) {
-			const name = textureName(ti);
-			const flags = texinfo.getInt32(ti * 72 + 64, true);
-			const lower = name.toLowerCase();
-			const mat = materials.get(lower);
-			let surface: Surface;
-			if (mat?.found) {
-				materialsRead++;
-				surface = mat.liquid ? 'liquid' : mat.translucent ? 'glass' : mat.noPortal ? 'metal' : 'portalable';
-			} else {
-				surface = classify(name);
-			}
-			const td = texinfo.getInt32(ti * 72 + 68, true);
-			const refl = td >= 0 && td * 32 < texdata.byteLength ? [texdata.getFloat32(td * 32, true), texdata.getFloat32(td * 32 + 4, true), texdata.getFloat32(td * 32 + 8, true)] : [0.4, 0.4, 0.4];
-			v = {
-				surface,
-				skip: (flags & SKIP_FLAGS) !== 0 || (lower.startsWith('tools/') && !lower.includes('toolsblack')),
-				color: surface === 'other' ? textureColor(refl[0], refl[1], refl[2]) : tint(SURFACE_COLORS[surface], refl, surface),
-			};
-			textureCache.set(ti, v);
+	interface TexInfo {
+		material: string;
+		surface: Surface;
+		skip: boolean;
+		color: [number, number, number];
+		vecs: number[];      // texture s/t vectors (2 x 4)
+		lmVecs: number[];    // lightmap s/t vectors (2 x 4)
+		size: [number, number];
+		lit: boolean;
+	}
+	const texCache = new Map<number, TexInfo>();
+	const texInfoOf = (ti: number): TexInfo => {
+		let v = texCache.get(ti);
+		if (v) return v;
+		const name = textureName(ti);
+		const o = ti * 72;
+		const flags = texinfo.getInt32(o + 64, true);
+		const lower = name.toLowerCase();
+		const mat = materials.get(lower);
+		let surface: Surface;
+		if (mat?.found) {
+			materialsRead++;
+			surface = mat.liquid ? 'liquid' : mat.translucent ? 'glass' : mat.noPortal ? 'metal' : 'portalable';
+		} else {
+			surface = classify(name);
 		}
+		const td = texinfo.getInt32(o + 68, true);
+		const hasTd = td >= 0 && td * 32 < texdata.byteLength;
+		const refl = hasTd ? [texdata.getFloat32(td * 32, true), texdata.getFloat32(td * 32 + 4, true), texdata.getFloat32(td * 32 + 8, true)] : [0.4, 0.4, 0.4];
+		const floats = (start: number) => Array.from({length: 8}, (_, i) => texinfo.getFloat32(o + start + i * 4, true));
+		v = {
+			material: lower,
+			surface,
+			skip: skipped(ti),
+			color: surface === 'other' ? textureColor(refl[0], refl[1], refl[2]) : tint(SURFACE_COLORS[surface], refl, surface),
+			vecs: floats(0),
+			lmVecs: floats(32),
+			size: hasTd ? [texdata.getInt32(td * 32 + 16, true) || 1, texdata.getInt32(td * 32 + 20, true) || 1] : [1, 1],
+			lit: !(flags & SURF_NOLIGHT),
+		};
+		texCache.set(ti, v);
 		return v;
 	};
+
+	// ---- lightmap atlas ----
+	// Each lit face has a block of (size + 1) luxels per axis (ColorRGBExp32,
+	// the first of four for bump-mapped faces). Blocks get a 1-luxel border
+	// copied from their edge so filtering doesn't bleed; the top-left corner
+	// is white for unlit faces.
+	const nFaces = faces.byteLength / 56;
+	const packer = new AtlasPacker(2048);
+	const WHITE: [number, number] = [1, 1];
+	packer.place(4, 4);
+	const blocks = new Map<number, {x: number; y: number; w: number; h: number; mins: [number, number]}>();
+	if (lighting.byteLength) {
+		const order: number[] = [];
+		for (let f = 0; f < nFaces; f++) {
+			const o = f * 56;
+			const ti = faces.getInt16(o + 10, true);
+			if (ti < 0 || lightFaces.getInt32(o + 20, true) < 0) continue;
+			const tex = texInfoOf(ti);
+			if (tex.skip || !tex.lit) continue;
+			order.push(f);
+		}
+		order.sort((a, b) => lightFaces.getInt32(b * 56 + 40, true) - lightFaces.getInt32(a * 56 + 40, true));
+		for (const f of order) {
+			const o = f * 56;
+			const w = lightFaces.getInt32(o + 36, true) + 1, h = lightFaces.getInt32(o + 40, true) + 1;
+			if (w <= 0 || h <= 0 || w > 512 || h > 512) continue;
+			const [x, y] = packer.place(w + 2, h + 2);
+			blocks.set(f, {x: x + 1, y: y + 1, w, h, mins: [lightFaces.getInt32(o + 28, true), lightFaces.getInt32(o + 32, true)]});
+		}
+	}
+	let lightmap: Lightmap | null = null;
+	if (blocks.size) {
+		const W = packer.width, H = Math.max(4, packer.height);
+		const data = new Float32Array(W * H * 4);
+		for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) data.set([1, 1, 1, 1], (y * W + x) * 4);
+		const lbytes = new Uint8Array(lighting.buffer, lighting.byteOffset, lighting.byteLength);
+		for (const [f, b] of blocks) {
+			const base = lightFaces.getInt32(f * 56 + 20, true);
+			const sample = (sx: number, sy: number) => {
+				const i = base + (Math.min(b.h - 1, Math.max(0, sy)) * b.w + Math.min(b.w - 1, Math.max(0, sx))) * 4;
+				if (i + 4 > lbytes.length) return [0, 0, 0];
+				const e = 2 ** ((lbytes[i + 3] << 24) >> 24);
+				return [lbytes[i] * e / 255, lbytes[i + 1] * e / 255, lbytes[i + 2] * e / 255];
+			};
+			for (let y = -1; y <= b.h; y++) {
+				for (let x = -1; x <= b.w; x++) {
+					const c = sample(x, y);
+					const o = ((b.y + y) * W + (b.x + x)) * 4;
+					data[o] = c[0];
+					data[o + 1] = c[1];
+					data[o + 2] = c[2];
+					data[o + 3] = 1;
+				}
+			}
+		}
+		lightmap = {width: W, height: H, data};
+	}
+
+	const vertexFor = (p: number[], tex: TexInfo, f: number, base = p): Vert => {
+		const tv = tex.vecs, lv = tex.lmVecs;
+		const uv: [number, number] = [
+			(base[0] * tv[0] + base[1] * tv[1] + base[2] * tv[2] + tv[3]) / tex.size[0],
+			(base[0] * tv[4] + base[1] * tv[5] + base[2] * tv[6] + tv[7]) / tex.size[1],
+		];
+		let lm: [number, number] = [WHITE[0] / (lightmap?.width ?? 4), WHITE[1] / (lightmap?.height ?? 4)];
+		const b = blocks.get(f);
+		if (b && lightmap) {
+			const s = base[0] * lv[0] + base[1] * lv[1] + base[2] * lv[2] + lv[3] - b.mins[0];
+			const t = base[0] * lv[4] + base[1] * lv[5] + base[2] * lv[6] + lv[7] - b.mins[1];
+			lm = [(b.x + s + 0.5) / lightmap.width, (b.y + t + 0.5) / lightmap.height];
+		}
+		return {p, uv, lm};
+	};
+
+	const nModels = models.byteLength / 48;
+	const meshes: ModelMesh[] = [];
+	let faceCount = 0;
 
 	for (let m = 0; m < nModels; m++) {
 		const firstFace = models.getInt32(m * 48 + 40, true);
 		const numFaces = models.getInt32(m * 48 + 44, true);
-		const solid = new Builder(), translucent = new Builder();
+		const groups = new Map<string, {tex: TexInfo; b: Builder}>();
 		const edgeList: number[] = [];
 		for (let f = firstFace; f < firstFace + numFaces; f++) {
 			const o = f * 56;
@@ -240,8 +413,13 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			if (ti < 0) continue;
 			const tex = texInfoOf(ti);
 			if (tex.skip) continue;
-			const target = tex.surface === 'glass' || tex.surface === 'liquid' ? translucent : solid;
-			const color = tex.color;
+			// one group per material (the texture size can differ per texinfo,
+			// but uv is divided by the material's own texture size later)
+			let g = groups.get(tex.material);
+			if (!g) {
+				g = {tex, b: new Builder()};
+				groups.set(tex.material, g);
+			}
 			const disp = faces.getInt16(o + 12, true);
 			const vs = faceVerts(f);
 			const pn = faces.getUint16(o, true);
@@ -249,23 +427,34 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			const facing = [planes.getFloat32(pn * 20, true) * flip, planes.getFloat32(pn * 20 + 4, true) * flip, planes.getFloat32(pn * 20 + 8, true) * flip];
 			for (let i = 0; i < vs.length; i++) edgeList.push(...vs[i], ...vs[(i + 1) % vs.length]);
 			if (disp >= 0 && vs.length === 4) {
-				buildDisplacement(target, vs, dispinfo, dispverts, disp, color, facing);
+				buildDisplacement(g.b, vs, dispinfo, dispverts, disp, tex.color, facing, (p, base) => vertexFor(p, tex, f, base));
 			} else {
-				for (let i = 1; i + 1 < vs.length; i++) target.tri(vs[0], vs[i], vs[i + 1], color, facing);
+				const vv = vs.map(p => vertexFor(p, tex, f));
+				for (let i = 1; i + 1 < vv.length; i++) g.b.tri(vv[0], vv[i], vv[i + 1], tex.color, facing);
 			}
 			faceCount++;
 		}
-		meshes.push({solid: solid.build(), translucent: translucent.build(), edges: new Float32Array(edgeList)});
+		const out: MaterialGroup[] = [];
+		for (const [material, {tex, b}] of groups) {
+			if (b.empty) continue;
+			out.push({
+				material, surface: tex.surface,
+				positions: new Float32Array(b.pos), normals: new Float32Array(b.nrm), colors: new Float32Array(b.col),
+				uv: new Float32Array(b.uv), lightUv: new Float32Array(b.lm),
+			});
+		}
+		meshes.push({groups: out, edges: new Float32Array(edgeList)});
 	}
 
 	const b = (i: number) => models.getFloat32(i, true);
 	return {
-		name, models: meshes, staticProps, materialsRead, faceCount, warnings,
+		name, models: meshes, staticProps, lightmap, entities, materials, pak, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }
 
-function buildDisplacement(out: Builder, corners: number[][], info: DataView, dverts: DataView, index: number, color: [number, number, number], facing: number[]) {
+function buildDisplacement(out: Builder, corners: number[][], info: DataView, dverts: DataView, index: number,
+	color: [number, number, number], facing: number[], vertex: (p: number[], base: number[]) => Vert) {
 	const o = index * 176;
 	const start = [info.getFloat32(o, true), info.getFloat32(o + 4, true), info.getFloat32(o + 8, true)];
 	const vertStart = info.getInt32(o + 12, true);
@@ -284,7 +473,8 @@ function buildDisplacement(out: Builder, corners: number[][], info: DataView, dv
 	const c = [0, 1, 2, 3].map(i => corners[(first + i) % 4]);
 	const lerp = (a: number[], b: number[], t: number) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 
-	const grid: number[][] = [];
+	// texture and lightmap coordinates follow the flat face under the bumps
+	const grid: Vert[] = [];
 	for (let y = 0; y < size; y++) {
 		const t = y / (size - 1);
 		const left = lerp(c[0], c[1], t), right = lerp(c[3], c[2], t);
@@ -292,11 +482,11 @@ function buildDisplacement(out: Builder, corners: number[][], info: DataView, dv
 			const base = lerp(left, right, x / (size - 1));
 			const vo = (vertStart + y * size + x) * 20;
 			const dist = dverts.getFloat32(vo + 12, true);
-			grid.push([
+			grid.push(vertex([
 				base[0] + dverts.getFloat32(vo, true) * dist,
 				base[1] + dverts.getFloat32(vo + 4, true) * dist,
 				base[2] + dverts.getFloat32(vo + 8, true) * dist,
-			]);
+			], base));
 		}
 	}
 	for (let y = 0; y < size - 1; y++) {
@@ -350,6 +540,7 @@ async function readStaticProps(fs: GameFS, path: string, lump: {offset: number; 
 		for (let k = 0; k < nProps; k++, p += size) {
 			const f = (o: number) => v.getFloat32(p + o, true);
 			props.push({
+				index: k,
 				origin: [f(0), f(4), f(8)],
 				angles: [f(12), f(16), f(20)],
 				model: dict[v.getUint16(p + 24, true)] ?? '',

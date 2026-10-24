@@ -1,6 +1,7 @@
 # SAR Run Viewer
 
-Watch Portal 2 runs in the browser from a SAR proof (`.sarp`) or a demo (`.dem`).
+Watch Portal 2 runs in the browser from a SAR proof (`.sarp`) or demos (`.dem`;
+open all of a run's demos at once and they play as one run).
 Files are read in the page; nothing is uploaded.
 
 Shows, per segment (map load): the player's path (top or side view, coloured by
@@ -15,9 +16,11 @@ Steam path). World geometry, displacements and brush entities (doors,
 elevators, panels) and static props come from the BSP; portals, moving props
 and the player come from the entity data decoded from the run. Models are read
 from the game's VPKs (and the map's own pak file) without bones, so animated
-ones show in their reference pose. Surfaces are light where portals can go and
-dark where they can't, read from each material's `%noportal` (map-specific
-patch materials followed to their base); glass and liquids are see-through.
+ones show in their reference pose. Surfaces use their real textures (VTF) and the map's
+baked HDR lighting (lightmaps packed into one atlas, tone mapped); props use
+their textures and skins; fog comes from the map's fog controller. Without
+textures (before they load) surfaces are light where portals can go and dark
+where they can't, from each material's `%noportal`.
 Camera: the player's eyes, or orbit around the player.
 
     npm install

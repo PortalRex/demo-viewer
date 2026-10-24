@@ -52,6 +52,27 @@ export interface MaterialInfo {
 	translucent: boolean;
 	liquid: boolean;
 	found: boolean;
+	shader: string;
+	baseTexture: string;    // under materials/, without .vtf
+	alphaTest: boolean;
+	additive: boolean;
+	noCull: boolean;
+	unlit: boolean;         // not lightmapped (UnlitGeneric, sprites, ...)
+	alpha: number;          // $alpha
+	color: [number, number, number];  // $color / $color2 tint
+}
+
+const MISSING: MaterialInfo = {
+	noPortal: false, translucent: false, liquid: false, found: false, shader: '', baseTexture: '', alphaTest: false,
+	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1],
+};
+
+function parseColor(v: string | undefined): [number, number, number] | null {
+	if (!v) return null;
+	const nums = v.replace(/[[\]{}]/g, ' ').trim().split(/\s+/).map(Number);
+	if (nums.length < 3 || nums.some(n => !isFinite(n))) return null;
+	const scale = v.includes('{') ? 1 / 255 : 1;
+	return [nums[0] * scale, nums[1] * scale, nums[2] * scale];
 }
 
 const truthy = (v: string | undefined) => v !== undefined && v !== '0' && v.toLowerCase() !== 'false';
@@ -98,13 +119,23 @@ export class Materials {
 
 	private async load(name: string, depth: number): Promise<MaterialInfo> {
 		const m = await this.params(`materials/${name}.vmt`, depth);
-		if (!m) return {noPortal: false, translucent: false, liquid: false, found: false};
+		if (!m) return MISSING;
 		const p = m.params;
+		const shader = m.shader;
+		const alphaTest = truthy(p.get('$alphatest'));
 		return {
 			found: true,
+			shader,
 			noPortal: truthy(p.get('%noportal')),
-			translucent: truthy(p.get('$translucent')) || m.shader === 'refract' || truthy(p.get('$alphatest')) && /glass|grate|fence/.test(name),
-			liquid: m.shader === 'water' || /water|goo/.test(name) && m.shader !== 'lightmappedgeneric',
+			translucent: truthy(p.get('$translucent')) || shader === 'refract' || truthy(p.get('$additive')),
+			liquid: shader === 'water' || /water|goo/.test(name) && shader !== 'lightmappedgeneric',
+			baseTexture: (p.get('$basetexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			alphaTest,
+			additive: truthy(p.get('$additive')),
+			noCull: truthy(p.get('$nocull')),
+			unlit: /unlitgeneric|unlittwotexture|sprite|monitorscreen|^sky$/.test(shader),
+			alpha: p.has('$alpha') ? Number(p.get('$alpha')) || 0 : 1,
+			color: parseColor(p.get('$color')) ?? parseColor(p.get('$color2')) ?? [1, 1, 1],
 		};
 	}
 }

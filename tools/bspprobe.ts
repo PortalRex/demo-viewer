@@ -32,8 +32,8 @@ for (const map of process.argv.slice(2)) {
 			return out;
 		},
 	});
-	const tris = (m: {positions: Float32Array}) => m.positions.length / 9;
-	console.log(`${map}: ${bsp.faceCount} faces, world ${tris(bsp.models[0].solid)} tris, ${(performance.now() - t0).toFixed(0)} ms`, bsp.warnings);
+	const tris = (m: {groups: {positions: Float32Array}[]}) => m.groups.reduce((n, g) => n + g.positions.length / 9, 0);
+	console.log(`${map}: ${bsp.faceCount} faces, world ${tris(bsp.models[0])} tris, ${bsp.models[0].groups.length} materials, lightmap ${bsp.lightmap ? bsp.lightmap.width + 'x' + bsp.lightmap.height : 'none'}, ${(performance.now() - t0).toFixed(0)} ms`, bsp.warnings);
 	console.log(`  ${stats}`);
 	const unique = [...new Set(bsp.staticProps.map(p => p.model))];
 	const t1 = performance.now();
@@ -43,7 +43,7 @@ for (const map of process.argv.slice(2)) {
 		const mdl = await loadModel(files, m, [0.5, 0.5, 0.5]).catch(e => (failed.push(`${m} (${e.message})`), null));
 		if (mdl) {
 			ok++;
-			triCount += mdl.mesh.positions.length / 9;
+			triCount += mdl.groups.reduce((n, g) => n + g.positions.length / 9, 0);
 		} else if (!failed.some(f => f.startsWith(m))) failed.push(m);
 	}
 	console.log(`  ${bsp.staticProps.length} static props, ${unique.length} models: ${ok} loaded (${triCount} tris) in ${(performance.now() - t1).toFixed(0)} ms; failed: ${failed.slice(0, 4).join(', ')}`);

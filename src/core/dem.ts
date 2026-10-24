@@ -109,7 +109,7 @@ export function readDem(bytes: Uint8Array, fileName: string): Run {
 			['Demo protocol', String(demoProtocol)], ['Network protocol', String(netProtocol)],
 			['Header ticks', String(ticks)], ['Header time', `${playbackTime.toFixed(3)} s`], ['Frames', String(frames)],
 		],
-		game: gameDir, gameDir, player: client, segments: [seg], dataTables, warnings,
+		game: gameDir, gameDir, player: client, segments: [{...seg, dataTables}], dataTables, warnings,
 	};
 }
 

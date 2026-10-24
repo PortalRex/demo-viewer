@@ -1,18 +1,34 @@
 // Studio models (.mdl + .vvd + .dx90.vtx): the triangles of LOD 0 of each
-// body part's default model, in the model's own space. Bones are ignored, so
-// animated models show in their reference pose.
+// body part's default model, in the model's own space, grouped by material
+// for the chosen skin. Bones are ignored, so animated models show in their
+// reference pose.
 import type {GameFiles} from './files.ts';
 import type {MeshData} from './bsp.ts';
 
+export interface ModelGroup extends MeshData {
+	// where the material can be: each $cdmaterials folder + the texture name
+	materialCandidates: string[];
+	// for static prop vertex lighting: this group's vertices' indices into the
+	// model's LOD 0 vertex list, in the order vrad lit them
+	meshVertex: Uint32Array;
+}
+
 export interface StudioModel {
-	mesh: MeshData;
+	groups: ModelGroup[];
 	min: [number, number, number];
 	max: [number, number, number];
+	meshes: {vertexCount: number}[];  // studio meshes in order (for .vhv files)
 }
 
 const VVD_VERTEX = 48;
 
-export async function loadModel(files: GameFiles, name: string, color: [number, number, number]): Promise<StudioModel | null> {
+function cstr(b: Uint8Array, at: number) {
+	let end = at;
+	while (end < b.length && b[end]) end++;
+	return String.fromCharCode(...b.subarray(at, end));
+}
+
+export async function loadModel(files: GameFiles, name: string, color: [number, number, number], skin = 0): Promise<StudioModel | null> {
 	const base = name.toLowerCase().replace(/\\/g, '/').replace(/\.mdl$/, '');
 	const [mdl, vvd, vtx] = await Promise.all([files.read(`${base}.mdl`), files.read(`${base}.vvd`), files.read(`${base}.dx90.vtx`)]);
 	if (!mdl || !vvd || !vtx) return null;
@@ -22,6 +38,25 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 	if (m.getUint32(0, true) !== 0x54534449 /* IDST */ || d.getUint32(0, true) !== 0x56534449 /* IDSV */) return null;
 
 	const hull = (o: number): [number, number, number] => [m.getFloat32(o, true), m.getFloat32(o + 4, true), m.getFloat32(o + 8, true)];
+
+	// textures, material folders and the skin table
+	const texCount = m.getInt32(204, true), texOffset = m.getInt32(208, true);
+	const textures: string[] = [];
+	for (let i = 0; i < texCount; i++) {
+		const t = texOffset + i * 64;
+		textures.push(cstr(mdl, t + m.getInt32(t, true)).toLowerCase().replace(/\\/g, '/'));
+	}
+	const dirCount = m.getInt32(212, true), dirOffset = m.getInt32(216, true);
+	const dirs: string[] = [];
+	for (let i = 0; i < dirCount; i++) dirs.push(cstr(mdl, m.getInt32(dirOffset + i * 4, true)).toLowerCase().replace(/\\/g, '/'));
+	const skinRefs = m.getInt32(220, true), skinFamilies = m.getInt32(224, true), skinIndex = m.getInt32(228, true);
+	const family = skin >= 0 && skin < skinFamilies ? skin : 0;
+	const textureFor = (ref: number) => (ref < skinRefs && skinFamilies > 0 ? m.getInt16(skinIndex + (family * skinRefs + ref) * 2, true) : ref);
+	const candidates = (ref: number) => {
+		const tex = textures[textureFor(ref)] ?? '';
+		const cds = dirs.length ? dirs : [''];
+		return cds.map(cd => (cd && !cd.endsWith('/') ? `${cd}/` : cd) + tex);
+	};
 
 	// VVD: LOD 0 vertices, through the fixup table when there is one
 	const numFixups = d.getInt32(48, true);
@@ -37,12 +72,10 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 			for (let k = 0; k < n; k++) vertexIds.push(src + k);
 		}
 	}
-	const vertex = (i: number) => {
-		const id = vertexIds ? vertexIds[i] : i;
-		return vertexStart + id * VVD_VERTEX;
-	};
+	const vertex = (i: number) => vertexStart + (vertexIds ? vertexIds[i] : i) * VVD_VERTEX;
 
-	const pos: number[] = [], nrm: number[] = [], col: number[] = [];
+	const groups = new Map<number, {pos: number[]; nrm: number[]; col: number[]; uv: number[]; mv: number[]}>();
+	const meshList: {vertexCount: number}[] = [];
 	const bodyParts = m.getInt32(232, true), bodyPartOffset = m.getInt32(236, true);
 	const vtxBodyParts = x.getInt32(28, true), vtxBodyPartOffset = x.getInt32(32, true);
 	const stripGroupSize = guessStripGroupSize(x, vtxBodyPartOffset);
@@ -64,39 +97,61 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 
 		for (let mi = 0; mi < Math.min(meshes, vMeshes); mi++) {
 			const mesh = meshOffset + mi * 116;
+			const ref = m.getInt32(mesh, true);
 			const meshVertexBase = modelVertexBase + m.getInt32(mesh + 12, true);
+			// numLODVertexes[0] of the mesh's vertex data (after its pointer)
+			const meshVertexCount = m.getInt32(mesh + 52, true);
+			const meshListIndex = meshList.length;
+			meshList.push({vertexCount: meshVertexCount});
+			let g = groups.get(ref);
+			if (!g) {
+				g = {pos: [], nrm: [], col: [], uv: [], mv: []};
+				groups.set(ref, g);
+			}
 			const vMesh = vMeshOffset + mi * 9;
-			const groups = x.getInt32(vMesh, true);
+			const nGroups = x.getInt32(vMesh, true);
 			const groupOffset = vMesh + x.getInt32(vMesh + 4, true);
-			for (let g = 0; g < groups; g++) {
-				const sg = groupOffset + g * stripGroupSize;
+			for (let sgi = 0; sgi < nGroups; sgi++) {
+				const sg = groupOffset + sgi * stripGroupSize;
 				const numVerts = x.getInt32(sg, true), vertOffset = sg + x.getInt32(sg + 4, true);
 				const numIndices = x.getInt32(sg + 8, true), indexOffset = sg + x.getInt32(sg + 12, true);
 				for (let i = 0; i + 2 < numIndices; i += 3) {
+					const tri: number[] = [];
 					for (const k of [0, 2, 1]) {  // studio triangles wind clockwise
 						const idx = x.getUint16(indexOffset + (i + k) * 2, true);
-						if (idx >= numVerts) continue;
-						const orig = x.getUint16(vertOffset + idx * 9 + 4, true);
+						if (idx >= numVerts) break;
+						tri.push(x.getUint16(vertOffset + idx * 9 + 4, true));
+					}
+					if (tri.length < 3) continue;
+					for (const orig of tri) {
 						const vo = vertex(meshVertexBase + orig);
-						if (vo + VVD_VERTEX > vvd.length) continue;
-						pos.push(d.getFloat32(vo + 16, true), d.getFloat32(vo + 20, true), d.getFloat32(vo + 24, true));
-						nrm.push(d.getFloat32(vo + 28, true), d.getFloat32(vo + 32, true), d.getFloat32(vo + 36, true));
-						col.push(...color);
+						g.pos.push(d.getFloat32(vo + 16, true), d.getFloat32(vo + 20, true), d.getFloat32(vo + 24, true));
+						g.nrm.push(d.getFloat32(vo + 28, true), d.getFloat32(vo + 32, true), d.getFloat32(vo + 36, true));
+						g.uv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
+						g.col.push(...color);
+						// mesh index in the high bits, vertex within the mesh below
+						g.mv.push(meshListIndex * 65536 + orig);
 					}
 				}
 			}
 		}
 	}
-	if (pos.length % 9) pos.length = nrm.length = col.length = pos.length - (pos.length % 9);
-	if (!pos.length) return null;
-	return {
-		mesh: {positions: new Float32Array(pos), normals: new Float32Array(nrm), colors: new Float32Array(col)},
-		min: hull(104), max: hull(116),
-	};
+
+	const out: ModelGroup[] = [];
+	for (const [ref, g] of groups) {
+		if (!g.pos.length) continue;
+		out.push({
+			materialCandidates: candidates(ref),
+			positions: new Float32Array(g.pos), normals: new Float32Array(g.nrm), colors: new Float32Array(g.col),
+			uv: new Float32Array(g.uv), meshVertex: new Uint32Array(g.mv),
+		});
+	}
+	if (!out.length) return null;
+	return {groups: out, min: hull(104), max: hull(116), meshes: meshList};
 }
 
 // Strip group headers are 25 bytes, or 33 in files with topology data
-// (newer branches). Pick the size whose first group has sane offsets.
+// (newer branches). Pick the size whose second group has sane offsets.
 function guessStripGroupSize(x: DataView, bodyPartOffset: number): number {
 	try {
 		const vModel = bodyPartOffset + x.getInt32(bodyPartOffset + 4, true);

@@ -1,4 +1,4 @@
-import {loadRun} from './core/load.ts';
+import {loadRuns} from './core/load.ts';
 import {Playback, viewAt, cmdAt} from './player/playback.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
@@ -38,6 +38,7 @@ let viewMode: 'top' | 'side' | '3d' = 'top';
 // ---- entities and the 3D map ----
 
 const view3d = new View3D($('view3d'));
+if (import.meta.env.DEV) (window as unknown as {view3d: View3D}).view3d = view3d;  // for debugging in the console
 const entityCache = new Map<number, EntityTimeline | null>();
 const mapCache = new Map<string, Promise<BspMap>>();
 let gameFS: GameFS | null = null;
@@ -137,7 +138,7 @@ async function load3dMap() {
 		const bsp = await promise;
 		if (token !== mapToken) return;
 		files.mapPak = mapPaks.get(seg.map) ?? null;
-		view3d.setMap(bsp, files);
+		view3d.setMap(bsp, files, mats);
 		view3d.setSegment(pb.tracks[currentSeg], entitiesFor(currentSeg));
 		message3d(null);
 		render();
@@ -156,9 +157,10 @@ function showError(msg: string) {
 	setTimeout(() => (el.hidden = true), 6000);
 }
 
-async function open(bytes: Uint8Array, name: string) {
+async function open(files: {bytes: Uint8Array; name: string}[]) {
+	const name = files.length === 1 ? files[0].name : `${files.length} files`;
 	try {
-		const run = await loadRun(bytes, name);
+		const run = await loadRuns(files);
 		if (!run.segments.some(s => s.views.length)) throw new Error('This file has no gameplay to show.');
 		pb = new Playback(run);
 		$('drop').hidden = true;
@@ -169,7 +171,7 @@ async function open(bytes: Uint8Array, name: string) {
 		entityCache.clear();
 		t = 0;
 		setPlaying(false);
-		document.title = `${name} · SAR Run Viewer`;
+		document.title = `${run.fileName} · SAR Run Viewer`;
 		requestAnimationFrame(() => render());
 	} catch (e) {
 		showError(`Couldn't open ${name}: ${(e as Error).message}`);
@@ -299,8 +301,8 @@ window.addEventListener('resize', () => render());
 // ---- opening files ----
 
 $<HTMLInputElement>('file-input').onchange = async e => {
-	const f = (e.target as HTMLInputElement).files?.[0];
-	if (f) open(new Uint8Array(await f.arrayBuffer()), f.name);
+	const list = [...((e.target as HTMLInputElement).files ?? [])];
+	if (list.length) open(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
 };
 
 const drop = $('drop');
@@ -312,14 +314,14 @@ window.addEventListener('dragleave', () => drop.classList.remove('over'));
 window.addEventListener('drop', async e => {
 	e.preventDefault();
 	drop.classList.remove('over');
-	const f = e.dataTransfer?.files[0];
-	if (f) open(new Uint8Array(await f.arrayBuffer()), f.name);
+	const list = [...(e.dataTransfer?.files ?? [])].filter(x => /\.(sarp|dem)$/i.test(x.name));
+	if (list.length) open(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
 });
 
 // dev convenience: #load=fixtures/name.sarp opens a file served next to the page
 const m = location.hash.match(/^#load=(.+)$/);
 if (m) {
 	fetch(m[1]).then(r => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.statusText))))
-		.then(b => open(new Uint8Array(b), decodeURIComponent(m[1].split('/').pop()!)))
+		.then(b => open([{bytes: new Uint8Array(b), name: decodeURIComponent(m[1].split('/').pop()!)}]))
 		.catch(e => showError(`Couldn't load ${m[1]}: ${e.message}`));
 }

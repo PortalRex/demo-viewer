@@ -285,7 +285,27 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	}
 
-	const player = tracks.find(t => t.className === 'CPortal_Player' && t.index === 1) ?? tracks.find(t => t.className === 'CPortal_Player');
+	// the recording player: in co-op that can be either player, so take the
+	// one that follows the recorded view
+	const players = tracks.filter(t => t.className === 'CPortal_Player' && t.keys.length);
+	let player = players[0];
+	if (players.length > 1 && seg.views.length) {
+		let best = Infinity;
+		for (const p of players) {
+			let sum = 0, n = 0;
+			for (let i = 0; i < seg.views.length; i += Math.max(1, Math.floor(seg.views.length / 50))) {
+				const v = seg.views[i], k = keyAt(p, v.tick);
+				if (!k) continue;
+				sum += Math.hypot(k.origin[0] - v.origin[0], k.origin[1] - v.origin[1], k.origin[2] - v.origin[2]);
+				n++;
+			}
+			const score = n ? sum / n : Infinity;
+			if (score < best) {
+				best = score;
+				player = p;
+			}
+		}
+	}
 	return {tracks, classCounts, errors, player};
 }
 
