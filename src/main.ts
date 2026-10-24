@@ -3,6 +3,14 @@ import {Playback, viewAt, cmdAt} from './player/playback.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
+import {View3D} from './ui/view3d.ts';
+import type {CameraMode} from './ui/view3d.ts';
+import {decodeEntities} from './net/entities.ts';
+import type {EntityTimeline} from './net/entities.ts';
+import {loadBsp} from './game/bsp.ts';
+import type {BspMap} from './game/bsp.ts';
+import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
+import type {GameFS} from './game/gamefs.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -21,6 +29,94 @@ let playing = false;
 let rate = 1;
 let currentSeg = -1;
 let lastFrame = 0;
+let viewMode: 'top' | 'side' | '3d' = 'top';
+
+// ---- entities and the 3D map ----
+
+const view3d = new View3D($('view3d'));
+const entityCache = new Map<number, EntityTimeline | null>();
+const mapCache = new Map<string, Promise<BspMap>>();
+let gameFS: GameFS | null = null;
+let mapToken = 0;
+
+function entitiesFor(index: number): EntityTimeline | null {
+	if (!pb) return null;
+	if (!entityCache.has(index)) {
+		const seg = pb.run.segments[index];
+		const tables = seg.dataTables ?? pb.run.dataTables;
+		let tl: EntityTimeline | null = null;
+		if (tables) {
+			try {
+				tl = decodeEntities(seg, tables);
+				if (tl.errors.length) console.warn(`entities in ${seg.map}:`, tl.errors);
+			} catch (e) {
+				console.warn(`couldn't decode entities in ${seg.map}`, e);
+			}
+		}
+		entityCache.set(index, tl);
+	}
+	return entityCache.get(index)!;
+}
+
+function message3d(html: string | null) {
+	const el = $('view3d-msg');
+	el.hidden = html === null;
+	if (html !== null) el.innerHTML = `<div class="box">${html}</div>`;
+}
+
+async function connectGame() {
+	try {
+		const fs = await pickGameFolder();
+		if (fs) {
+			gameFS = fs;
+			mapCache.clear();
+			load3dMap();
+		}
+	} catch (e) {
+		if ((e as Error).name !== 'AbortError') message3d(`<h2>Couldn't open the folder</h2>${(e as Error).message}`);
+	}
+}
+
+async function load3dMap() {
+	if (!pb || viewMode !== '3d' || currentSeg < 0) return;  // render() calls back once a segment is shown
+	const seg = pb.tracks[currentSeg].seg;
+	gameFS ??= await devGameFS();
+	if (!gameFS) {
+		message3d(`<h2>The 3D view uses your own copy of the game</h2>
+			Pick your <b>Portal 2</b> folder (the one with portal2.exe, usually in steamapps/common).
+			The map is read from it in this page; nothing is uploaded.
+			<br><button class="primary" id="connect-game">Choose Portal 2 folder</button>`);
+		$('connect-game').onclick = connectGame;
+		return;
+	}
+	const token = ++mapToken;
+	const fs = gameFS;
+	let promise = mapCache.get(seg.map);
+	if (!promise) {
+		message3d(`Loading ${seg.map}…`);
+		promise = (async () => {
+			for (const path of mapPaths(seg.map, pb!.run.gameDir)) {
+				if ((await fs.size(path)) !== null) return loadBsp(fs, path, seg.map);
+			}
+			throw new Error(`${seg.map}.bsp isn't in the game folder (${fs.label}).`);
+		})();
+		mapCache.set(seg.map, promise);
+		promise.catch(() => mapCache.delete(seg.map));
+	}
+	try {
+		const bsp = await promise;
+		if (token !== mapToken) return;
+		view3d.setMap(bsp);
+		view3d.setSegment(pb.tracks[currentSeg], entitiesFor(currentSeg));
+		message3d(null);
+		render();
+	} catch (e) {
+		if (token === mapToken) message3d(`<h2>Couldn't load the map</h2>${(e as Error).message}<br><button class="primary" id="connect-game">Choose another folder</button>`);
+		const b = document.getElementById('connect-game');
+		if (b) b.onclick = connectGame;
+	}
+}
+
 
 function showError(msg: string) {
 	const el = $('error');
@@ -39,6 +135,7 @@ async function open(bytes: Uint8Array, name: string) {
 		panels.setRun(run, i => seekTo(pb!.tracks[i].start));
 		timeline.pb = pb;
 		currentSeg = -1;
+		entityCache.clear();
 		t = 0;
 		setPlaying(false);
 		document.title = `${name} · SAR Run Viewer`;
@@ -86,10 +183,15 @@ function render() {
 		pathView.setTrack(loc.track);
 		speedGraph.setTrack(loc.track);
 		panels.setSegment(loc.index, seg);
+		if (viewMode === '3d') {
+			view3d.setMap(null);
+			load3dMap();
+		}
 	}
 	const view = viewAt(loc.track, loc.tick);
 	const cmd = cmdAt(loc.track, loc.tick);
-	pathView.draw(view, loc.tick, seg.sar);
+	if (viewMode === '3d') view3d.update(view, loc.tick);
+	else pathView.draw(view, loc.tick, seg.sar);
 	timeline.draw(t, loc.index);
 	speedGraph.draw(loc.tick);
 	inputs.show(cmd);
@@ -127,12 +229,27 @@ $('view-mode').onclick = e => {
 	const b = (e.target as HTMLElement).closest('button');
 	if (!b) return;
 	for (const x of $('view-mode').querySelectorAll('button')) x.classList.toggle('on', x === b);
-	pathView.setMode(b.dataset.mode as 'top' | 'side');
+	viewMode = b.dataset.mode as typeof viewMode;
+	const is3d = viewMode === '3d';
+	$('path').hidden = is3d;
+	$('view3d').hidden = !is3d;
+	$('cam-mode').hidden = !is3d;
+	$('follow').hidden = is3d;
+	$('fit').hidden = is3d;
+	if (is3d) load3dMap();
+	else pathView.setMode(viewMode as 'top' | 'side');
+	render();
+};
+$('cam-mode').onclick = e => {
+	const b = (e.target as HTMLElement).closest('button');
+	if (!b) return;
+	for (const x of $('cam-mode').querySelectorAll('button')) x.classList.toggle('on', x === b);
+	view3d.setMode(b.dataset.cam as CameraMode);
 	render();
 };
 
 document.addEventListener('keydown', e => {
-	if (!pb || (e.target as HTMLElement).matches('input, select, textarea')) return;
+	if (!pb || (e.target instanceof Element && e.target.matches('input, select, textarea'))) return;
 	const step = e.shiftKey ? 60 : 1;
 	if (e.code === 'Space') {
 		e.preventDefault();

@@ -53,6 +53,13 @@ export type SarEvent = {tick: number} & (
 	| {kind: 'other'; type: number; size: number}
 );
 
+// Raw network data, decoded into entities on demand (src/net)
+export type NetRecord =
+	| {kind: 'packet'; tick: number; data: Uint8Array; bits: number; signon: boolean; backdoor: boolean}
+	| {kind: 'entities'; tick: number; isDelta: boolean; maxEntries: number; updated: number; data: Uint8Array; bits: number}
+	| {kind: 'table'; tick: number; name: string; entries: {index: number; name?: string; data?: Uint8Array}[]}
+	| {kind: 'snapshot'; tick: number; data: Uint8Array};
+
 export interface Segment {
 	index: number;
 	map: string;
@@ -65,6 +72,8 @@ export interface Segment {
 	userCmds: UserCmd[];
 	consoleCmds: ConsoleCmd[];
 	sar: SarEvent[];
+	net: NetRecord[];
+	dataTables?: Uint8Array;  // when they differ from the run's
 }
 
 export type Check = {state: 'ok' | 'bad' | 'unknown' | 'none'; detail: string};
@@ -81,9 +90,11 @@ export interface Run {
 	fileSize: number;
 	info: [string, string][];
 	game: string;
+	gameDir: string;  // the game folder (portal2, portal_stories, ...)
 	player: string;
 	segments: Segment[];
 	verification?: Verification;
+	dataTables?: Uint8Array;
 	warnings: string[];
 }
 

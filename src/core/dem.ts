@@ -37,10 +37,11 @@ export function readDem(bytes: Uint8Array, fileName: string): Run {
 
 	const seg: Segment = {
 		index: 0, map, startedMidMap: false, intervalPerTick: ticks > 0 && playbackTime > 0 ? playbackTime / ticks : 1 / 60,
-		firstTick: Infinity, lastTick: -Infinity, views: [], userCmds: [], consoleCmds: [], sar: [],
+		firstTick: Infinity, lastTick: -Infinity, views: [], userCmds: [], consoleCmds: [], sar: [], net: [],
 	};
 
 	let synced = false;
+	let dataTables: Uint8Array | undefined;
 	frameLoop: while (r.remaining >= 6) {
 		const cmd = r.u8();
 		const tick = r.i32();
@@ -52,7 +53,8 @@ export function readDem(bytes: Uint8Array, fileName: string): Run {
 				const views = readCmdInfo(r);
 				r.i32(); r.i32();  // sequence numbers
 				const size = r.i32();
-				r.pos += size;
+				const data = r.bytesN(size);
+				seg.net.push({kind: 'packet', tick: Math.max(0, tick), data, bits: size * 8, signon: cmd === Cmd.SIGNON, backdoor: false});
 				if (cmd === Cmd.PACKET && synced && tick >= 0) {
 					seg.views.push({tick, ...views[0]});
 					if (tick < seg.firstTick) seg.firstTick = tick;
@@ -73,11 +75,11 @@ export function readDem(bytes: Uint8Array, fileName: string): Run {
 				break;
 			}
 			case Cmd.DATATABLES:
-			case Cmd.STRINGTABLES: {
-				const size = r.i32();
-				r.pos += size;
+				dataTables = r.bytesN(r.i32());
 				break;
-			}
+			case Cmd.STRINGTABLES:
+				seg.net.push({kind: 'snapshot', tick: Math.max(0, tick), data: r.bytesN(r.i32())});
+				break;
 			case Cmd.CUSTOMDATA: {
 				const callback = r.i32();
 				const data = r.bytesN(r.i32());
@@ -107,7 +109,7 @@ export function readDem(bytes: Uint8Array, fileName: string): Run {
 			['Demo protocol', String(demoProtocol)], ['Network protocol', String(netProtocol)],
 			['Header ticks', String(ticks)], ['Header time', `${playbackTime.toFixed(3)} s`], ['Frames', String(frames)],
 		],
-		game: gameDir, player: client, segments: [seg], warnings,
+		game: gameDir, gameDir, player: client, segments: [seg], dataTables, warnings,
 	};
 }
 

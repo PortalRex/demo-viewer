@@ -99,11 +99,13 @@ export async function readSarp(bytes: Uint8Array, fileName: string): Promise<Run
 
 	const run: Run = {
 		format: 'sarp', fileName, fileSize: bytes.length, info: [['Created', new Date(created * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC']],
-		game: '', player: '', segments: [], verification, warnings,
+		game: '', gameDir: '', player: '', segments: [], verification, warnings,
 	};
 
 	let seg: Segment | undefined;
 	let sync: number | undefined;
+	let lastTick = 0;
+	let dataTables: Uint8Array | undefined;
 	// ticks before 0 are loading (and the clock resets at the next level
 	// change, a few packets before the segment ends): kept off the timeline
 	const tickOf = (clock: number) => (sync === undefined ? -1 : clock - sync);
@@ -139,11 +141,13 @@ export async function readSarp(bytes: Uint8Array, fileName: string): Promise<Run
 				body.i32();     // network protocol
 				const interval = body.f32();
 				run.game ||= gameDir;
+				run.gameDir ||= gameDir;
 				run.player ||= clientName;
 				seg = {
 					index, map, startedMidMap: (flags & 1) !== 0, intervalPerTick: interval || 1 / 60,
-					firstTick: Infinity, lastTick: -Infinity, views: [], userCmds: [], consoleCmds: [], sar: [],
+					firstTick: Infinity, lastTick: -Infinity, views: [], userCmds: [], consoleCmds: [], sar: [], net: [],
 				};
+				seg.dataTables = dataTables;
 				sync = undefined;
 				run.segments.push(seg);
 				break;
@@ -164,9 +168,41 @@ export async function readSarp(bytes: Uint8Array, fileName: string): Promise<Run
 				const clock = body.i32();
 				const views = readCmdInfo(body);
 				const tick = tickOf(clock);
+				body.i32(); body.i32();  // sequence numbers
+				const bits = body.varint();
+				seg.net.push({kind: 'packet', tick: Math.max(0, tick), data: body.bytesN(Math.ceil(bits / 8)), bits, signon: (flags & 1) !== 0, backdoor: (flags & 2) !== 0});
+				lastTick = Math.max(0, tick);
 				if (flags & 1 || tick < 0) break;  // signon or loading
 				touch(seg, tick);
 				seg.views.push({tick, ...views[0]});
+				break;
+			}
+			case Rec.DATATABLES:
+				// raw payload; written again only if the tables change
+				dataTables = body.bytesN(body.remaining);
+				run.dataTables ??= dataTables;
+				if (seg) seg.dataTables = dataTables;
+				break;
+			case Rec.ENTITIES: {
+				if (!seg) break;
+				body.i32();  // server tick
+				const flags = body.u8();
+				const maxEntries = body.varint(), updated = body.varint(), bits = body.varint();
+				seg.net.push({kind: 'entities', tick: lastTick, isDelta: (flags & 1) !== 0, maxEntries, updated, data: body.bytesN(Math.ceil(bits / 8)), bits});
+				break;
+			}
+			case Rec.STRINGTABLE: {
+				if (!seg) break;
+				body.i32();  // tick
+				const name = body.string();
+				const n = body.varint();
+				const entries = [];
+				for (let i = 0; i < n; i++) {
+					const index = body.varint();
+					const f = body.u8();
+					entries.push({index, name: f & 1 ? body.string() : undefined, data: f & 2 ? body.blob() : undefined});
+				}
+				seg.net.push({kind: 'table', tick: lastTick, name, entries});
 				break;
 			}
 			case Rec.USERCMD: {

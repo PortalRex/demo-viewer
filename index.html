@@ -37,12 +37,20 @@
 					<div class="seg-toggle" id="view-mode">
 						<button data-mode="top" class="on">Top</button>
 						<button data-mode="side">Side</button>
+						<button data-mode="3d">3D</button>
+					</div>
+					<div class="seg-toggle" id="cam-mode" hidden>
+						<button data-cam="eyes" class="on" title="See through the player's eyes">Eyes</button>
+						<button data-cam="orbit" title="Orbit around the player (drag to turn, scroll to zoom)">Orbit</button>
 					</div>
 					<button id="follow" class="toggle on" title="Keep the player in view">Follow</button>
 					<button id="fit" title="Fit the whole path">Fit</button>
 					<div class="readout" id="readout"></div>
 				</div>
 				<canvas id="path"></canvas>
+				<div id="view3d" class="view3d" hidden>
+					<div id="view3d-msg" class="view3d-msg" hidden></div>
+				</div>
 				<div class="hud">
 					<div id="inputs" class="inputs"></div>
 					<div id="speed-now" class="speed-now"></div>

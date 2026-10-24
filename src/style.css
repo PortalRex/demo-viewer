@@ -64,6 +64,12 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .readout { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: pre; text-align: right; }
 #path { flex: 1; width: 100%; min-height: 0; display: block; cursor: grab; }
 #path:active { cursor: grabbing; }
+.view3d { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+.view3d canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.view3d-msg { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px; background: #0c0e12; color: var(--muted); z-index: 1; }
+.view3d-msg .box { max-width: 440px; }
+.view3d-msg h2 { color: var(--text); font-size: 17px; margin: 0 0 8px; }
+.view3d-msg button.primary { background: var(--accent); color: #06121f; font-weight: 600; border: 0; margin-top: 10px; padding: 7px 14px; }
 .hud { position: absolute; left: 12px; bottom: 12px; display: flex; align-items: flex-end; gap: 14px; pointer-events: none; }
 .speed-now { font-family: var(--mono); font-size: 13px; background: rgba(10, 12, 16, 0.75); padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); }
 
