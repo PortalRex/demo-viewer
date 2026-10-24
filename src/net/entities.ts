@@ -27,7 +27,18 @@ export interface EntityKey {
 	active?: boolean;  // portals: m_bActivated
 	eyeZ?: number;     // players: view offset height
 	anim?: AnimState;  // animated models
+	extra?: Record<string, PropValue>;  // class-specific props (EXTRA_PROPS)
 }
+
+// Props kept for the classes the 3D view draws specially
+export const EXTRA_PROPS: Record<string, string[]> = {
+	CProp_Portal: ['m_hLinkedPortal', 'm_fNetworkHalfWidth', 'm_fNetworkHalfHeight'],
+	CPortalLaser: ['m_vStartPoint', 'm_vEndPoint', 'm_bLaserOn'],
+	CProjectedWallEntity: ['m_vecStartPoint', 'm_vecEndPoint', 'm_flWidth', 'm_flHeight'],
+	CProjectedTractorBeamEntity: ['m_vecStartPoint', 'm_vecEndPoint'],
+	CTrigger_TractorBeam: ['m_vStart', 'm_vEnd', 'm_flRadius', 'm_bReversed', 'm_bDisabled'],
+	CTriggerPortalCleanser: ['m_bDisabled', 'm_bVisible'],
+};
 
 export interface AnimState {
 	sequence: number;
@@ -71,6 +82,7 @@ interface ClassFields {
 	rate: number;
 	clientSide: number;
 	parity: number;
+	extra: [string, number][];
 	model: number;          // m_nModelIndex
 	effects: number;        // m_fEffects
 	mins: number;
@@ -107,6 +119,7 @@ function fieldsFor(cls: ServerClass): ClassFields {
 		rate: find(cls, 'm_flPlaybackRate'),
 		clientSide: find(cls, 'm_bClientSideAnimation'),
 		parity: find(cls, 'm_nNewSequenceParity'),
+		extra: (EXTRA_PROPS[cls.name] ?? []).map(n => [n, cls.index.get(n) ?? -1] as [string, number]).filter(([, i]) => i >= 0),
 		cell: [find(cls, 'm_cellbits'), find(cls, 'm_cellX'), find(cls, 'm_cellY'), find(cls, 'm_cellZ')],
 		cellOrigin: origin >= 0 && (cls.flat[origin].prop.flags & (F.CELLCOORD | F.CELLCOORDLP | F.CELLCOORDINT)) !== 0,
 		angles: find(cls, 'm_angRotation', 'm_angAbsRotation'),
@@ -183,6 +196,11 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		const visible = e.inSnapshot && !(num(s[f.effects]) & EF_NODRAW);
 		const active = f.activated >= 0 ? num(s[f.activated]) !== 0 : undefined;
 		const eyeZ = f.viewOffset < 0 ? undefined : f.viewOffsetIsVec ? vec(s[f.viewOffset])?.[2] : num(s[f.viewOffset]);
+		let extra: Record<string, PropValue> | undefined;
+		if (f.extra.length) {
+			extra = {};
+			for (const [n, i] of f.extra) if (s[i] !== undefined) extra[n] = s[i];
+		}
 		const anim: AnimState | undefined = f.sequence < 0 ? undefined : {
 			sequence: num(s[f.sequence]),
 			cycle: num(s[f.cycle]),
@@ -197,9 +215,9 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		if (f.model >= 0) t.model = modelName(num(s[f.model]));
 		if (f.isPortal2 >= 0) t.orange = num(s[f.isPortal2]) !== 0;
 		const last = t.keys[t.keys.length - 1];
-		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim)) return;
+		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
 		if (last && last.tick === tick) t.keys.pop();
-		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim});
+		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim, extra});
 	};
 
 	const leave = (e: LiveEntity, tick: number, remove: boolean) => {
@@ -336,6 +354,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+const sameExtra = (a?: Record<string, PropValue>, b?: Record<string, PropValue>) => a === b || JSON.stringify(a) === JSON.stringify(b);
 const sameAnim = (a?: AnimState, b?: AnimState) => a === b || (!!a && !!b && a.sequence === b.sequence && a.cycle === b.cycle && a.rate === b.rate && a.clientSide === b.clientSide && a.parity === b.parity);
 
 // The key in effect at a tick (or undefined before the entity exists)

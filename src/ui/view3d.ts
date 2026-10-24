@@ -10,10 +10,11 @@ import type {StudioModel, ModelGroup} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
 import type {Skeleton} from '../game/anim.ts';
 import {AnimatedModel, bakePose, skinMatrices, skinnedGeometry} from './skinning.ts';
+import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3} from './effects.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
-import type {EntityTimeline, EntityTrack} from '../net/entities.ts';
+import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt} from '../net/entities.ts';
 import type {SegmentTrack, ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
@@ -33,8 +34,12 @@ const HIDDEN_CLASSES = new Set([
 	'CTeam', 'CPlayerResource', 'CPortal_PlayerResource', 'CWorld', 'CSun', 'CEnvTonemapController', 'CFunc_LiquidPortal',
 	'CEnvScreenOverlay', 'CEnvScreenEffect', 'CPointCamera', 'CPointCommentaryNode', 'CInfoLadderDismount', 'CFuncLadder',
 	'CPostProcessController', 'CColorCorrection', 'CColorCorrectionVolume', 'CShadowControl', 'CSceneEntity', 'CInfoOverlayAccessor',
-	'CBaseEntity', 'CProp_Portal', 'CLightGlow', 'CSlideshowDisplay', 'CTriggerPortalCleanser',
+	'CBaseEntity', 'CProp_Portal', 'CLightGlow', 'CSlideshowDisplay', 'CProjectedTractorBeamEntity',
 ]);
+
+// effects placed in world space from their props, not the entity's transform
+const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
+const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
 const toEuler = (a: Vec3) => new THREE.Euler(a[2] * Math.PI / 180, a[0] * Math.PI / 180, a[1] * Math.PI / 180, 'ZYX');
 
@@ -197,11 +202,16 @@ export class View3D {
 	private files: GameFiles | null = null;
 	private models = new Map<string, Promise<ModelAsset | null>>();
 	private interval = 1 / 60;
+	// portals seen this frame, by entity index, for views and laser hops
+	private portals = new Map<number, {obj: THREE.Object3D; link: number; halfW: number; halfH: number}>();
+	private portalCam = new THREE.PerspectiveCamera();
+	private portalTargets = new Map<THREE.Object3D, THREE.WebGLRenderTarget>();
 	private mapToken = 0;
 	onLoaded = () => {};
 
 	constructor(container: HTMLElement) {
 		this.container = container;
+		if (import.meta.env.DEV) (window as unknown as {THREE: typeof THREE}).THREE = THREE;  // for debugging in the console
 		this.camera.up.set(0, 0, 1);
 		this.scene.background = new THREE.Color(0x0c0e12);
 		this.scene.fog = new THREE.Fog(0x0c0e12, 6000, 30000);
@@ -481,15 +491,43 @@ export class View3D {
 		}
 		if (t.className === 'CProp_Portal') {
 			const group = new THREE.Group();
-			const color = t.orange ? 0xff8a1f : 0x3f9bff;
-			const disc = new THREE.Mesh(new THREE.CircleGeometry(1, 40), new THREE.MeshBasicMaterial({color, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false}));
-			const ring = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 40), new THREE.MeshBasicMaterial({color, side: THREE.DoubleSide}));
-			for (const m of [disc, ring]) {
-				// circle in the XY plane, facing +Z -> facing the portal's forward (+X)
-				m.rotation.y = Math.PI / 2;
-				m.scale.set(PORTAL_HALF_H, PORTAL_HALF_W, 1);
-				m.position.x = 0.6;
-				group.add(m);
+			const color = t.orange ? new THREE.Color(1.0, 0.45, 0.08) : new THREE.Color(0.15, 0.5, 1.0);
+			const material = portalMaterial(color);
+			const surface = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+			// plane in XY facing +Z -> facing the portal's forward (+X): its x
+			// runs up the portal, y across
+			surface.rotation.set(0, Math.PI / 2, 0);
+			surface.rotateZ(Math.PI / 2);
+			surface.scale.set(PORTAL_HALF_W, PORTAL_HALF_H, 1);
+			surface.position.x = 0.6;
+			group.add(surface);
+			group.userData.portalSurface = surface;
+			return group;
+		}
+		if (t.className === 'CPortalLaser') {
+			const laser = new Laser();
+			laser.group.userData.laser = laser;
+			return laser.group;
+		}
+		if (t.className === 'CProjectedWallEntity') {
+			const bridge = new Bridge();
+			bridge.mesh.userData.bridge = bridge;
+			return bridge.mesh;
+		}
+		if (t.className === 'CTrigger_TractorBeam') {
+			const funnel = new Funnel();
+			funnel.mesh.userData.funnel = funnel;
+			return funnel.mesh;
+		}
+		if (t.className === 'CTriggerPortalCleanser') {
+			const b = /^\*(\d+)$/.exec(t.model);
+			const m = b && this.bsp?.models[Number(b[1])];
+			if (!m) return null;
+			const group = new THREE.Group();
+			for (const g of m.groups) {
+				const mesh = new THREE.Mesh(geometry(g), fizzlerMaterial);
+				mesh.renderOrder = 2;
+				group.add(mesh);
 			}
 			return group;
 		}
@@ -522,6 +560,130 @@ export class View3D {
 			this.onLoaded();
 		});
 		return group;
+	}
+
+	// whether an entity's object is drawn at a key
+	private shows(t: EntityTrack, k: EntityKey): boolean {
+		const e = k.extra ?? {};
+		switch (t.className) {
+		case 'CProp_Portal': return k.visible && k.active === true;
+		case 'CPortalLaser': return Number(e.m_bLaserOn) === 1 && !!vec3(e.m_vEndPoint);
+		case 'CProjectedWallEntity': return !!vec3(e.m_vecStartPoint) && !!vec3(e.m_vecEndPoint);
+		case 'CTrigger_TractorBeam': return Number(e.m_bDisabled) !== 1 && !!vec3(e.m_vStart);
+		case 'CTriggerPortalCleanser': return Number(e.m_bVisible) === 1 && Number(e.m_bDisabled) !== 1;
+		default: return k.visible;
+		}
+	}
+
+	private placeEffect(t: EntityTrack, k: EntityKey, o: THREE.Object3D, time: number) {
+		const e = k.extra ?? {};
+		o.position.set(0, 0, 0);
+		o.rotation.set(0, 0, 0);
+		if (o.userData.laser) {
+			(o.userData.laser as Laser).set(this.laserPath(vec3(e.m_vStartPoint)!, vec3(e.m_vEndPoint)!));
+		} else if (o.userData.bridge) {
+			// across the bridge: the entity's right (-Y), turned by its angles
+			const right = new THREE.Vector3(0, -1, 0).applyEuler(toEuler(k.angles));
+			(o.userData.bridge as Bridge).set(vec3(e.m_vecStartPoint)!, vec3(e.m_vecEndPoint)!, right, Number(e.m_flWidth) || 64);
+		} else if (o.userData.funnel) {
+			(o.userData.funnel as Funnel).set(vec3(e.m_vStart)!, vec3(e.m_vEnd)!, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time);
+		}
+	}
+
+	// the matrix taking things in front of portal `from` to the same place
+	// relative to its linked portal (entering one, leaving the other)
+	private portalTransform(from: THREE.Object3D, to: THREE.Object3D): THREE.Matrix4 {
+		from.updateMatrixWorld();
+		to.updateMatrixWorld();
+		return to.matrixWorld.clone().multiply(R180Z).multiply(from.matrixWorld.clone().invert());
+	}
+
+	// a laser's beam, continued through any portals it ends on (traced
+	// against the map from the exit portal)
+	private laserPath(start: THREE.Vector3, end: THREE.Vector3): [THREE.Vector3, THREE.Vector3][] {
+		const out: [THREE.Vector3, THREE.Vector3][] = [[start, end]];
+		let a = start, b = end;
+		for (let hop = 0; hop < 4; hop++) {
+			const dir = b.clone().sub(a).normalize();
+			let through: {from: THREE.Object3D; to: THREE.Object3D} | null = null;
+			for (const p of this.portals.values()) {
+				const local = p.obj.worldToLocal(b.clone());
+				const linked = this.portals.get(p.link);
+				if (linked && Math.abs(local.x) < 4 && (local.y / p.halfW) ** 2 + (local.z / p.halfH) ** 2 <= 1.05) {
+					through = {from: p.obj, to: linked.obj};
+					break;
+				}
+			}
+			if (!through) break;
+			const m = this.portalTransform(through.from, through.to);
+			const origin = b.clone().applyMatrix4(m);
+			const newDir = dir.clone().transformDirection(m);
+			const ray = new THREE.Raycaster(origin.clone().addScaledVector(newDir, 2), newDir, 0, 16384);
+			const hit = ray.intersectObjects([this.mapGroup, this.propGroup], true)[0];
+			a = origin;
+			b = hit ? hit.point.clone() : origin.clone().addScaledVector(newDir, 16384);
+			out.push([a, b]);
+		}
+		return out;
+	}
+
+	// what each visible, linked portal shows: the scene from the camera moved
+	// through the portal pair, clipped at the exit portal
+	private renderPortalViews(r: THREE.WebGLRenderer) {
+		const size = r.getDrawingBufferSize(new THREE.Vector2());
+		const seen = new Set<THREE.Object3D>();
+		for (const p of this.portals.values()) {
+			const surface = p.obj.userData.portalSurface as THREE.Mesh;
+			const material = surface.material as THREE.ShaderMaterial;
+			const linked = this.portals.get(p.link);
+			seen.add(p.obj);
+			if (!linked) {
+				material.uniforms.hasView.value = 0;
+				continue;
+			}
+			let rt = this.portalTargets.get(p.obj);
+			if (!rt) {
+				rt = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType});
+				this.portalTargets.set(p.obj, rt);
+			}
+			if (rt.width !== size.x || rt.height !== size.y) rt.setSize(size.x, size.y);
+
+			// the main camera's pose moved through the portal pair, set as an
+			// ordinary position and rotation so three keeps its matrices
+			const m = this.portalTransform(p.obj, linked.obj).multiply(this.camera.matrixWorld);
+			const cam = this.portalCam;
+			cam.fov = this.camera.fov;
+			cam.aspect = this.camera.aspect;
+			cam.near = this.camera.near;
+			cam.far = this.camera.far;
+			cam.updateProjectionMatrix();
+			m.decompose(cam.position, cam.quaternion, cam.scale);
+			cam.updateMatrixWorld(true);
+
+			// clip away what's behind the exit portal's wall
+			const normal = new THREE.Vector3(1, 0, 0).transformDirection(linked.obj.matrixWorld);
+			const at = new THREE.Vector3().setFromMatrixPosition(linked.obj.matrixWorld);
+			r.clippingPlanes = [new THREE.Plane(normal, -normal.dot(at) + 0.5)];
+			const linkedSurface = linked.obj.userData.portalSurface as THREE.Mesh;
+			surface.visible = linkedSurface.visible = false;
+			this.sky.position.setFromMatrixPosition(cam.matrixWorld);
+			r.setRenderTarget(rt);
+			r.render(this.scene, cam);
+			r.setRenderTarget(null);
+			r.clippingPlanes = [];
+			surface.visible = linkedSurface.visible = true;
+
+			material.uniforms.view.value = rt.texture;
+			material.uniforms.hasView.value = 1;
+			material.uniforms.resolution.value.copy(size);
+		}
+		// targets of portals that are gone
+		for (const [obj, rt] of this.portalTargets) {
+			if (!seen.has(obj)) {
+				rt.dispose();
+				this.portalTargets.delete(obj);
+			}
+		}
 	}
 
 	// an entity's sequence and cycle at a tick: the server's cycle,
@@ -567,12 +729,19 @@ export class View3D {
 		this.resize();
 		const ents = this.entities;
 		if (ents) {
+			this.portals.clear();
+			const time = performance.now() / 1000;
+			fizzlerMaterial.uniforms.time.value = time;
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
-				const show = !!k && k.visible && (t.className !== 'CProp_Portal' || k.active === true);
+				const show = !!k && this.shows(t, k);
 				const o = show ? this.objectFor(t) : this.objects.get(t);
 				if (!o) continue;
 				o.visible = show;
+				if (show && k && WORLD_SPACE.has(t.className)) {
+					this.placeEffect(t, k, o, time);
+					continue;
+				}
 				if (show && k) {
 					const anim = o.userData.anim as AnimatedModel | undefined;
 					if (anim && k.anim) {
@@ -582,6 +751,14 @@ export class View3D {
 					o.position.set(k.origin[0], k.origin[1], k.origin[2]);
 					// players turn with their view but don't tilt
 					o.rotation.copy(toEuler(t.className === 'CPortal_Player' ? [0, k.angles[1], 0] : k.angles));
+					if (o.userData.portalSurface) {
+						const e = k.extra ?? {};
+						const surface = o.userData.portalSurface as THREE.Mesh;
+						const halfW = Number(e.m_fNetworkHalfWidth) || PORTAL_HALF_W, halfH = Number(e.m_fNetworkHalfHeight) || PORTAL_HALF_H;
+						surface.scale.set(halfW, halfH, 1);
+						(surface.material as THREE.ShaderMaterial).uniforms.time.value = time;
+						this.portals.set(t.index, {obj: o, link: Number(e.m_hLinkedPortal ?? -1) & 2047, halfW, halfH});
+					}
 				}
 			}
 		}
@@ -616,6 +793,8 @@ export class View3D {
 	render() {
 		const r = this.renderer;
 		if (!r) return;
+		this.camera.updateMatrixWorld();
+		if (this.portals.size) this.renderPortalViews(r);
 		// the sky stays centred on the camera, inside the far plane
 		this.sky.scale.setScalar(this.camera.far * 0.5);
 		const sc = this.skyCamera;
