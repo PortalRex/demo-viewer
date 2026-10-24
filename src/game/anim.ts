@@ -41,9 +41,17 @@ interface SourceModel {
 	ani: Uint8Array | null;     // the .ani file, for anim blocks
 }
 
+// a named point on a bone that other entities can be attached to
+export interface Attachment {
+	name: string;
+	bone: number;
+	local: number[];  // 3x4, row major (attachment -> bone space)
+}
+
 export interface Skeleton {
 	bones: Bone[];
 	sequences: Sequence[];
+	attachments: Attachment[];
 	ref?: Pose;      // reference pose, made on first use
 	scratch?: Pose;  // for the second frame when interpolating
 }
@@ -145,7 +153,18 @@ export async function loadSkeleton(files: GameFiles, mdl: Uint8Array): Promise<S
 			sequences.push(s);
 		}
 	}
-	return {bones: main.bones, sequences};
+	// attachments (mstudioattachment_t, 92 bytes)
+	const attachments: Attachment[] = [];
+	const nAtt = v.getInt32(240, true), attOffset = v.getInt32(244, true);
+	for (let i = 0; i < nAtt; i++) {
+		const o = attOffset + i * 92;
+		attachments.push({
+			name: cstr(mdl, o + v.getInt32(o, true)),
+			bone: v.getInt32(o + 8, true),
+			local: Array.from({length: 12}, (_, k) => v.getFloat32(o + 12 + k * 4, true)),
+		});
+	}
+	return {bones: main.bones, sequences, attachments};
 }
 
 // ---- sampling ----

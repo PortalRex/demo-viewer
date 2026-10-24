@@ -30,6 +30,10 @@ export interface EntityKey {
 	eyeZ?: number;     // players: view offset height
 	anim?: AnimState;  // animated models
 	extra?: Record<string, PropValue>;  // class-specific props (EXTRA_PROPS)
+	// attached to another entity: origin/angles are then relative to the
+	// parent (or to one of its model's attachments, 1-based)
+	parent?: number;
+	attachment?: number;
 }
 
 // Props kept for the classes the 3D view draws specially
@@ -103,6 +107,8 @@ interface ClassFields {
 	mins: number;
 	maxs: number;
 	activated: number;      // portals
+	moveParent: number;     // moveparent (EHANDLE)
+	parentAttachment: number;
 	isPortal2: number;
 }
 
@@ -143,6 +149,8 @@ function fieldsFor(cls: ServerClass): ClassFields {
 		mins: find(cls, 'm_Collision.m_vecMins', 'm_vecMins'),
 		maxs: find(cls, 'm_Collision.m_vecMaxs', 'm_vecMaxs'),
 		activated: find(cls, 'm_bActivated'),
+		moveParent: find(cls, 'moveparent', 'm_hMoveParent'),
+		parentAttachment: find(cls, 'm_iParentAttachment'),
 		isPortal2: find(cls, 'm_bIsPortal2'),
 	};
 }
@@ -238,6 +246,10 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 			clientSide: num(s[f.clientSide]) !== 0,
 			parity: num(s[f.parity]),
 		};
+		// handles: index in the low bits, 0x7ff... = none
+		const ph = f.moveParent >= 0 ? num(s[f.moveParent], -1) : -1;
+		const parentIndex = ph >= 0 && (ph & 2047) !== 2047 ? ph & 2047 : undefined;
+		const attachment = parentIndex !== undefined && f.parentAttachment >= 0 ? num(s[f.parentAttachment]) || undefined : undefined;
 		const t = e.track;
 		const mins = vec(s[f.mins]), maxs = vec(s[f.maxs]);
 		if (mins) t.mins = [mins[0], mins[1], mins[2]];
@@ -245,9 +257,9 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		if (f.model >= 0) t.model = modelName(num(s[f.model]));
 		if (f.isPortal2 >= 0) t.orange = num(s[f.isPortal2]) !== 0;
 		const last = t.keys[t.keys.length - 1];
-		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
+		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && last.parent === parentIndex && last.attachment === attachment && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
 		if (last && last.tick === tick) t.keys.pop();
-		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim, extra});
+		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim, extra, parent: parentIndex, attachment});
 	};
 
 	const leave = (e: LiveEntity, tick: number, remove: boolean) => {

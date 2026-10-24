@@ -8,8 +8,8 @@ import type {ModelGroup} from '../game/mdl.ts';
 
 const poseToBone = (m: number[]) => new THREE.Matrix4().set(...(m as [number, number, number, number, number, number, number, number, number, number, number, number]), 0, 0, 0, 1);
 
-// model space -> posed model space, per bone
-export function skinMatrices(sk: Skeleton, pose: Pose): THREE.Matrix4[] {
+// bone space -> model space, per bone, in a pose
+export function boneMatrices(sk: Skeleton, pose: Pose): THREE.Matrix4[] {
 	const world: THREE.Matrix4[] = [];
 	const v = new THREE.Vector3(), q = new THREE.Quaternion(), one = new THREE.Vector3(1, 1, 1);
 	sk.bones.forEach((b, i) => {
@@ -18,7 +18,20 @@ export function skinMatrices(sk: Skeleton, pose: Pose): THREE.Matrix4[] {
 		const local = new THREE.Matrix4().compose(v, q, one);
 		world.push(b.parent >= 0 && world[b.parent] ? world[b.parent].clone().multiply(local) : local);
 	});
+	return world;
+}
+
+// model space -> posed model space, per bone
+export function skinMatrices(sk: Skeleton, pose: Pose): THREE.Matrix4[] {
+	const world = boneMatrices(sk, pose);
 	return sk.bones.map((b, i) => world[i].clone().multiply(poseToBone(b.poseToBone)));
+}
+
+// an attachment's transform in model space
+export function attachmentMatrix(sk: Skeleton, bones: THREE.Matrix4[], index: number): THREE.Matrix4 | null {
+	const a = sk.attachments[index];
+	if (!a || !bones[a.bone]) return null;
+	return bones[a.bone].clone().multiply(poseToBone(a.local));
 }
 
 // positions and normals of a group in the pose (or null if the pose doesn't
@@ -61,7 +74,7 @@ export class AnimatedModel {
 	readonly group = new THREE.Group();
 	private sk: Skeleton;
 	private bones: THREE.Bone[];
-	private pose: Pose;
+	readonly pose: Pose;
 	private last = '';
 
 	constructor(sk: Skeleton, meshes: {geometry: THREE.BufferGeometry; material: THREE.Material}[]) {

@@ -128,6 +128,7 @@ export interface BspMap {
 	models: ModelMesh[];  // 0 = world
 	staticProps: StaticProp[];
 	lightmap: Lightmap | null;
+	skyFaces: Float32Array;  // the world's sky faces, triangles: the skybox is seen only through them
 	entities: Record<string, string>[];
 	materials: Map<string, MaterialInfo>;
 	pak: Uint8Array | null;
@@ -512,6 +513,17 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		return {p, uv, lm};
 	};
 
+	const skyTris: number[] = [];
+	{
+		const first = models.getInt32(40, true), count = models.getInt32(44, true);
+		for (let f = first; f < first + count; f++) {
+			const ti = faces.getInt16(f * 56 + 10, true);
+			if (ti < 0 || !(texinfo.getInt32(ti * 72 + 64, true) & (SURF_SKY | SURF_SKY2D))) continue;
+			const vs = faceVerts(f);
+			for (let i = 1; i + 1 < vs.length; i++) skyTris.push(...vs[0], ...vs[i], ...vs[i + 1]);
+		}
+	}
+
 	const nModels = models.byteLength / 48;
 	const meshes: ModelMesh[] = [];
 	let faceCount = 0;
@@ -562,7 +574,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 
 	const b = (i: number) => models.getFloat32(i, true);
 	return {
-		name, models: meshes, staticProps, lightmap, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
+		name, models: meshes, staticProps, lightmap, skyFaces: new Float32Array(skyTris), paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }

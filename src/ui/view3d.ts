@@ -11,7 +11,7 @@ import {loadModel} from '../game/mdl.ts';
 import type {StudioModel, ModelGroup} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
 import type {Skeleton} from '../game/anim.ts';
-import {AnimatedModel, bakePose, skinMatrices, skinnedGeometry} from './skinning.ts';
+import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
 import {paintUniforms, ditherUniforms, fogUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
@@ -260,7 +260,7 @@ export class View3D {
 		const sun = new THREE.DirectionalLight(0xffffff, 0.4);
 		sun.position.set(0.35, 0.25, 1);
 		this.scene.add(hemi, sun, this.mapGroup, this.propGroup, this.entityGroup, this.sky);
-		this.sky.renderOrder = -1;
+		this.sky.renderOrder = 2;
 
 		const body = new THREE.CapsuleGeometry(16, 40, 4, 12);
 		body.rotateX(Math.PI / 2);
@@ -271,7 +271,7 @@ export class View3D {
 
 	private ensureRenderer() {
 		if (this.renderer) return this.renderer;
-		this.renderer = new THREE.WebGLRenderer({antialias: true});
+		this.renderer = new THREE.WebGLRenderer({antialias: true, stencil: true});
 		// HDR lighting needs its highlights rolled off, as the game's tone
 		// mapping does
 		this.renderer.toneMapping = THREE.LinearToneMapping;
@@ -406,6 +406,20 @@ export class View3D {
 		this.exposure = 3;
 
 		this.mapGroup.add(this.brushModel(bsp.models[0]));
+		// the sky faces mark (in the stencil) where the 2D skybox shows, as in
+		// the game: elsewhere, e.g. the backs of walls when out of bounds,
+		// it's the fog colour
+		if (bsp.skyFaces.length) {
+			const g = new THREE.BufferGeometry();
+			g.setAttribute('position', new THREE.BufferAttribute(bsp.skyFaces, 3));
+			const mask = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+				colorWrite: false, depthWrite: false, side: THREE.DoubleSide, fog: false,
+				stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp,
+			}));
+			mask.renderOrder = 1;
+			mask.name = 'sky mask';
+			this.mapGroup.add(mask);
+		}
 		this.collision = worldCollision(bsp.models[0]);
 		this.loadSky(bsp, token);
 		this.worldFog = this.scene.fog as THREE.Fog | null;
@@ -473,9 +487,13 @@ export class View3D {
 				const g = new THREE.BufferGeometry();
 				g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
 				g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-				const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide, depthTest: false, depthWrite: false, fog: false}));
+				const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+					map: tex, side: THREE.DoubleSide, depthTest: false, depthWrite: false, fog: false,
+					// only through the sky faces (drawn just before, see setMap)
+					stencilWrite: true, stencilRef: 1, stencilFunc: THREE.EqualStencilFunc,
+				}));
 				mesh.frustumCulled = false;
-				mesh.renderOrder = -1;
+				mesh.renderOrder = 2;
 				this.sky.add(mesh);
 				this.onLoaded();
 			});
@@ -636,6 +654,13 @@ export class View3D {
 				group.userData.skeleton = asset.skeleton;
 			} else {
 				group.add(this.staticObject(asset));
+				// as drawn: posed with sequence 0, for anything attached to it
+				if (asset.skeleton) {
+					group.userData.skeleton = asset.skeleton;
+					const pose = referencePose(asset.skeleton);
+					if (asset.skeleton.sequences.length) samplePose(asset.skeleton, 0, 0, pose);
+					group.userData.staticBones = boneMatrices(asset.skeleton, pose);
+				}
 			}
 			this.onLoaded();
 		});
@@ -772,6 +797,59 @@ export class View3D {
 	// an entity's sequence and cycle at a tick: the server's cycle,
 	// interpolated between updates, or for client-side animation advanced from
 	// when the sequence (re)started
+	// Entities attached to others (panels on robot arms, things carried by
+	// moving platforms): their origin and angles are relative to the parent,
+	// or to an attachment point on the parent's posed model
+	private placeAttached(tick: number) {
+		for (const [t, o] of this.objects) {
+			if (!o.visible) continue;
+			const k = keyAt(t, tick);
+			if (!k || k.parent === undefined) {
+				o.matrixAutoUpdate = true;
+				continue;
+			}
+			const m = this.worldMatrix(t, k, tick, 0);
+			if (!m) continue;
+			o.matrixAutoUpdate = false;
+			o.matrix.copy(m);
+			o.matrixWorldNeedsUpdate = true;
+		}
+	}
+
+	private worldMatrix(t: EntityTrack, k: EntityKey, tick: number, depth: number): THREE.Matrix4 | null {
+		const local = new THREE.Matrix4().compose(
+			new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]),
+			new THREE.Quaternion().setFromEuler(toEuler(t.className === 'CPortal_Player' ? [0, k.angles[1], 0] : k.angles)),
+			new THREE.Vector3(1, 1, 1));
+		if (k.parent === undefined || depth > 8) return local;
+		let pt: EntityTrack | undefined, pk: EntityKey | undefined;
+		for (const c of this.tracksByIndex.get(k.parent) ?? []) {
+			const ck = keyAt(c, tick);
+			if (ck) {
+				pt = c;
+				pk = ck;
+				break;
+			}
+		}
+		if (!pt || !pk) return local;
+		const parent = this.worldMatrix(pt, pk, tick, depth + 1);
+		if (!parent) return null;
+		if (k.attachment) {
+			const po = this.objects.get(pt) ?? this.objectFor(pt);
+			const sk = po?.userData.skeleton as Skeleton | undefined;
+			if (!sk) return null;  // until the parent's model loads
+			const anim = po!.userData.anim as AnimatedModel | undefined;
+			if (anim && pk.anim) {
+				const [seq, cycle] = this.animAt(pt, tick, sk);
+				anim.setPose(seq, cycle);
+			}
+			const bones = anim ? boneMatrices(sk, anim.pose) : po!.userData.staticBones as THREE.Matrix4[];
+			const att = bones && attachmentMatrix(sk, bones, k.attachment - 1);
+			if (att) parent.multiply(att);
+		}
+		return parent.multiply(local);
+	}
+
 	// the entity at a network index at a tick (indices get reused)
 	private entityAt(index: number, tick: number, className: string): EntityKey | undefined {
 		for (const t of this.tracksByIndex.get(index) ?? []) {
@@ -972,6 +1050,8 @@ export class View3D {
 				}
 			}
 		}
+
+		if (ents) this.placeAttached(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		const pk = ents?.player ? keyAt(ents.player, tick) : undefined;
