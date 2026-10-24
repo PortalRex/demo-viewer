@@ -23,6 +23,14 @@ const FOG_FRAGMENT = `
 #endif
 `;
 
+// backs of one-sided world faces, when they're drawn (orbit and free
+// camera): darker, so the outside of a room reads as a solid shell
+const BACKFACE_FRAGMENT = `
+#ifdef BACKFACE_SHADE
+	if (!gl_FrontFacing) diffuseColor.rgb *= 0.55;
+#endif
+`;
+
 export const ditherUniforms = {
 	ditherOn: {value: 0},
 	ditherTarget: {value: new THREE.Vector3()},
@@ -87,9 +95,9 @@ function hook(material: THREE.Material, paint: boolean) {
 		shader.fragmentShader = DITHER_FRAGMENT_HEAD + 'uniform float fogMaxDensity;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
-			.replace('#include <map_fragment>', '#include <map_fragment>\n' + (paint ? PAINT_FRAGMENT : ''));
+			.replace('#include <map_fragment>', '#include <map_fragment>\n' + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

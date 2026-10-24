@@ -91,7 +91,11 @@ class MaterialLibrary {
 		} else if (info.alphaTest) {
 			mat.alphaTest = 0.5;
 		}
-		if (info.noCull || info.translucent || info.alphaTest) mat.side = THREE.DoubleSide;
+		if (info.noCull || info.translucent || info.alphaTest) {
+			mat.side = THREE.DoubleSide;
+			mat.userData.twoSided = true;
+			if (mat.defines) delete mat.defines.BACKFACE_SHADE;
+		}
 		if (!info.baseTexture) {
 			// refraction only (glass): a faint tint of what's behind
 			if (info.shader === 'refract') {
@@ -126,6 +130,24 @@ class MaterialLibrary {
 		return t;
 	}
 
+	// draw the backs of the world's one-sided faces too (shaded darker), or not
+	setBackFaces(on: boolean) {
+		this.backFaces = on;
+		for (const m of this.world.values()) this.applyBackFaces(m);
+	}
+	private backFaces = false;
+
+	private applyBackFaces(m: THREE.Material) {
+		if (m.userData.twoSided || m.transparent) return;
+		const want = this.backFaces;
+		if ((m.side === THREE.DoubleSide) === want) return;
+		m.side = want ? THREE.DoubleSide : THREE.FrontSide;
+		m.defines ??= {};
+		if (want) m.defines.BACKFACE_SHADE = '';
+		else delete m.defines.BACKFACE_SHADE;
+		m.needsUpdate = true;
+	}
+
 	forWorld(group: MaterialGroup): THREE.Material {
 		const cached = this.world.get(group.material);
 		if (cached) return cached;
@@ -144,9 +166,11 @@ class MaterialLibrary {
 				mat.lightMapIntensity = Math.PI * LIGHTMAP_EXPOSURE;
 			}
 			this.apply(mat, info);
+			this.applyBackFaces(mat);
 			mat.needsUpdate = true;
 			this.onChange();
 		});
+		this.applyBackFaces(mat);
 		return mat;
 	}
 
@@ -287,6 +311,7 @@ export class View3D {
 	}
 
 	setMode(mode: CameraMode) {
+		this.library?.setBackFaces(mode !== 'eyes');
 		if (mode === 'free' && this.mode !== 'free') {
 			// start from wherever the camera is, looking the same way
 			const dir = this.camera.getWorldDirection(new THREE.Vector3());
@@ -381,6 +406,7 @@ export class View3D {
 		this.styleValues.clear();
 		this.tracksByIndex.clear();
 		this.library = new MaterialLibrary(files, materials, lightTex);
+		this.library.setBackFaces(this.mode !== 'eyes');
 		this.library.onChange = () => this.onLoaded();
 		this.effects = new EffectAssets(materials, this.library.textures);
 		this.fizzlers.clear();
