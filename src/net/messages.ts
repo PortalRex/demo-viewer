@@ -25,6 +25,8 @@ export interface NetHandlers {
 	onTableChange?: (t: StringTable) => void;
 	onPacketEntities?: (h: PacketEntitiesHeader) => void;
 	trace?: (type: number, bitPos: number) => void;
+	onUserMessage?: (type: number, data: BitReader) => void;
+	onPaintmap?: (data: BitReader) => void;
 }
 
 // reads a length, then skips that many units (pos += u() would read pos first)
@@ -161,7 +163,13 @@ export function walkPacket(data: Uint8Array, nbits: number, h: NetHandlers) {
 			break;
 		}
 		case 22: br.pos += 2 + MAX_EDICT_BITS; break;  // split screen
-		case 23: br.pos += 8; skipLength(br, USER_MSG_LEN_BITS, 1); break;  // user message
+		case 23: {  // user message
+			const msgType = br.u(8);
+			const n = br.u(USER_MSG_LEN_BITS);
+			const data = sub(br, n);
+			h.onUserMessage?.(msgType, data);
+			break;
+		}
 		case 24: br.pos += MAX_EDICT_BITS + 9; skipLength(br, 11, 1); break;  // entity message
 		case 25: skipLength(br, 11, 1); break;  // game event
 		case 26: {  // packet entities
@@ -182,7 +190,12 @@ export function walkPacket(data: Uint8Array, nbits: number, h: NetHandlers) {
 		case 30: br.pos += 9; skipLength(br, 20, 1); break;  // game event list
 		case 31: br.pos += 32; skipString(br); break;  // get cvar value
 		case 32: skipLength(br, 32, 8); break;  // cmd key values
-		case 33: skipLength(br, 32, 1); break;  // paint map data
+		case 33: {  // paint map data
+			const n = br.u(32);
+			const data = sub(br, n);
+			h.onPaintmap?.(data);
+			break;
+		}
 		default: throw new Error(`unknown net message ${type}`);
 		}
 		if (br.pos > br.end) throw new RangeError(`net message ${type} runs past the end of the packet`);

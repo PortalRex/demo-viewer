@@ -10,7 +10,9 @@ import type {StudioModel, ModelGroup} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
 import type {Skeleton} from '../game/anim.ts';
 import {AnimatedModel, bakePose, skinMatrices, skinnedGeometry} from './skinning.ts';
-import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3} from './effects.ts';
+import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
+import {PaintLayer} from './paint.ts';
+import {paintUniforms, ditherUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -60,8 +62,8 @@ const LIGHTMAP_EXPOSURE = 2.5;
 // three.js materials for the map's materials: textured once the texture
 // loads (flat colour until then), lit by the lightmap atlas for the world
 class MaterialLibrary {
-	private materials: Materials;
-	private textures: TextureCache;
+	readonly materials: Materials;
+	readonly textures: TextureCache;
 	private lightmap: THREE.Texture | null;
 	private world = new Map<string, THREE.Material>();
 	private model = new Map<string, THREE.Material>();
@@ -122,6 +124,7 @@ class MaterialLibrary {
 		const cached = this.world.get(group.material);
 		if (cached) return cached;
 		const mat = new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.FrontSide});
+		hookWorldMaterial(mat);
 		if (group.surface === 'glass' || group.surface === 'liquid') {
 			mat.transparent = true;
 			mat.opacity = 0.35;
@@ -156,6 +159,7 @@ class MaterialLibrary {
 		} else {
 			mat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
 		}
+		hookModelMaterial(mat);
 		cache.set(key, mat);
 		(async () => {
 			for (const c of candidates) {
@@ -206,6 +210,9 @@ export class View3D {
 	private portals = new Map<number, {obj: THREE.Object3D; link: number; halfW: number; halfH: number}>();
 	private portalCam = new THREE.PerspectiveCamera();
 	private portalTargets = new Map<THREE.Object3D, THREE.WebGLRenderTarget>();
+	private effects: EffectAssets | null = null;
+	private fizzlers = new Map<string, THREE.ShaderMaterial>();
+	private paint: PaintLayer | null = null;
 	private mapToken = 0;
 	onLoaded = () => {};
 
@@ -332,6 +339,10 @@ export class View3D {
 		}
 		this.library = new MaterialLibrary(files, materials, lightTex);
 		this.library.onChange = () => this.onLoaded();
+		this.effects = new EffectAssets(materials, this.library.textures);
+		this.fizzlers.clear();
+		this.paint = null;
+		paintUniforms.paintOn.value = 0;
 
 		// fog, from the map's fog controller
 		const fog = bsp.entities.find(e => e.classname === 'env_fog_controller' && e.fogenable !== '0');
@@ -449,6 +460,9 @@ export class View3D {
 	setSegment(track: SegmentTrack, entities: EntityTimeline | null) {
 		this.entities = entities;
 		this.interval = track.seg.intervalPerTick;
+		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint) : null;
+		paintUniforms.paintMap.value = this.paint?.texture ?? null;
+		paintUniforms.paintOn.value = this.paint ? 1 : 0;
 		this.clearEntities();
 		// the path as line segments, broken at teleports
 		if (this.pathLine) this.scene.remove(this.pathLine);
@@ -505,17 +519,17 @@ export class View3D {
 			return group;
 		}
 		if (t.className === 'CPortalLaser') {
-			const laser = new Laser();
+			const laser = new Laser(this.effects);
 			laser.group.userData.laser = laser;
 			return laser.group;
 		}
 		if (t.className === 'CProjectedWallEntity') {
-			const bridge = new Bridge();
+			const bridge = new Bridge(this.effects);
 			bridge.mesh.userData.bridge = bridge;
 			return bridge.mesh;
 		}
 		if (t.className === 'CTrigger_TractorBeam') {
-			const funnel = new Funnel();
+			const funnel = new Funnel(this.effects);
 			funnel.mesh.userData.funnel = funnel;
 			return funnel.mesh;
 		}
@@ -525,7 +539,13 @@ export class View3D {
 			if (!m) return null;
 			const group = new THREE.Group();
 			for (const g of m.groups) {
-				const mesh = new THREE.Mesh(geometry(g), fizzlerMaterial);
+				// each face's own material (fizzler, fizzler_center, edges...)
+				let mat = this.fizzlers.get(g.material);
+				if (!mat) {
+					mat = fizzlerMaterial(this.effects, g.material);
+					this.fizzlers.set(g.material, mat);
+				}
+				const mesh = new THREE.Mesh(geometry(g), mat);
 				mesh.renderOrder = 2;
 				group.add(mesh);
 			}
@@ -580,11 +600,11 @@ export class View3D {
 		o.position.set(0, 0, 0);
 		o.rotation.set(0, 0, 0);
 		if (o.userData.laser) {
-			(o.userData.laser as Laser).set(this.laserPath(vec3(e.m_vStartPoint)!, vec3(e.m_vEndPoint)!));
+			(o.userData.laser as Laser).set(this.laserPath(vec3(e.m_vStartPoint)!, vec3(e.m_vEndPoint)!), this.camera.position);
 		} else if (o.userData.bridge) {
 			// across the bridge: the entity's right (-Y), turned by its angles
 			const right = new THREE.Vector3(0, -1, 0).applyEuler(toEuler(k.angles));
-			(o.userData.bridge as Bridge).set(vec3(e.m_vecStartPoint)!, vec3(e.m_vecEndPoint)!, right, Number(e.m_flWidth) || 64);
+			(o.userData.bridge as Bridge).set(vec3(e.m_vecStartPoint)!, vec3(e.m_vecEndPoint)!, right, Number(e.m_flWidth) || 64, time);
 		} else if (o.userData.funnel) {
 			(o.userData.funnel as Funnel).set(vec3(e.m_vStart)!, vec3(e.m_vEnd)!, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time);
 		}
@@ -631,6 +651,8 @@ export class View3D {
 	// through the portal pair, clipped at the exit portal
 	private renderPortalViews(r: THREE.WebGLRenderer) {
 		const size = r.getDrawingBufferSize(new THREE.Vector2());
+		const dither = ditherUniforms.ditherOn.value;
+		ditherUniforms.ditherOn.value = 0;
 		const seen = new Set<THREE.Object3D>();
 		for (const p of this.portals.values()) {
 			const surface = p.obj.userData.portalSurface as THREE.Mesh;
@@ -677,6 +699,7 @@ export class View3D {
 			material.uniforms.hasView.value = 1;
 			material.uniforms.resolution.value.copy(size);
 		}
+		ditherUniforms.ditherOn.value = dither;
 		// targets of portals that are gone
 		for (const [obj, rt] of this.portalTargets) {
 			if (!seen.has(obj)) {
@@ -731,7 +754,8 @@ export class View3D {
 		if (ents) {
 			this.portals.clear();
 			const time = performance.now() / 1000;
-			fizzlerMaterial.uniforms.time.value = time;
+			for (const m of this.fizzlers.values()) m.uniforms.time.value = time;
+			this.paint?.seek(tick);
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
 				const show = !!k && this.shows(t, k);
@@ -766,6 +790,9 @@ export class View3D {
 		// player: the decoded entity where there is one, else the recorded view
 		const pk = ents?.player ? keyAt(ents.player, tick) : undefined;
 		const feet = pk ? new THREE.Vector3(...pk.origin) : view ? new THREE.Vector3(...view.origin) : null;
+		// screen-door dissolve of whatever is between the orbit camera and the player
+		ditherUniforms.ditherOn.value = feet && this.mode === 'orbit' ? 1 : 0;
+		if (feet) ditherUniforms.ditherTarget.value.copy(feet).add(new THREE.Vector3(0, 0, 36));
 		if (feet) {
 			this.player.position.copy(feet);
 			this.player.visible = this.mode === 'orbit';
@@ -822,7 +849,10 @@ export class View3D {
 		this.sky.position.copy(this.skyView.position);
 		for (const o of hidden) o.visible = false;
 		this.scene.fog = sc.fog;
+		const dither = ditherUniforms.ditherOn.value;
+		ditherUniforms.ditherOn.value = 0;
 		r.render(this.scene, this.skyView);
+		ditherUniforms.ditherOn.value = dither;
 		for (const o of hidden) o.visible = true;
 
 		r.clearDepth();

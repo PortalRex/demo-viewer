@@ -13,6 +13,8 @@ import type {PropValue} from './props.ts';
 import {walkPacket} from './messages.ts';
 import type {PacketEntitiesHeader} from './messages.ts';
 import {readStringTableSnapshot} from './stringtables.ts';
+import {readPaintMessage, readPaintmap} from './paint.ts';
+import type {PaintEvent} from './paint.ts';
 import type {StringTable} from './stringtables.ts';
 
 const MAX_EDICT_BITS = 11;
@@ -63,6 +65,7 @@ export interface EntityTimeline {
 	classCounts: Map<string, number>;
 	errors: string[];
 	player?: EntityTrack;
+	paint: PaintEvent[];
 }
 
 // per-class indices of the props the viewer uses
@@ -155,6 +158,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 	const tracks: EntityTrack[] = [];
 	const classCounts = new Map<string, number>();
 	const backdoorSeen = seg.net.some(r => r.kind === 'entities');
+	const paint: PaintEvent[] = [];
 
 	const modelName = (index: number) => tableByName.get('modelprecache')?.entries[index]?.name ?? '';
 
@@ -298,6 +302,14 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 					if (backdoorSeen && r.backdoor) return;
 					applyPacketEntities(h, r.tick);
 				},
+				onUserMessage: (type, data) => {
+					const e = readPaintMessage(type, data, r.tick);
+					if (e) paint.push(e);
+				},
+				onPaintmap: data => {
+					const e = readPaintmap(data, r.tick);
+					if (e) paint.push(e);
+				},
 			});
 			break;
 		case 'entities':
@@ -350,7 +362,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 			}
 		}
 	}
-	return {tracks, classCounts, errors, player};
+	return {tracks, classCounts, errors, player, paint};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];

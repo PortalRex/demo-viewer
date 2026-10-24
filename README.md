@@ -28,7 +28,13 @@ map's fog controller; the 2D skybox and the 3D skybox (`sky_camera`, drawn in
 its own pass at 1/scale with its own fog) are drawn behind the map. Without
 textures (before they load) surfaces are light where portals can go and dark
 where they can't, from each material's `%noportal`.
-Camera: the player's eyes, or orbit around the player.
+Gameplay: portals show the view through their partner; lasers, light bridges,
+excursion funnels and fizzlers use the game's own materials (SolidEnergy,
+flowmaps) from their networked state; gel comes from the paint map and the
+paint user messages, painted into a layer aligned with the lightmaps.
+Camera: the player's eyes, or orbit around the player; in orbit, whatever
+stands between the camera and the player dissolves with a screen-door
+(ordered dither) pattern.
 
     npm install
     npm run dev                     # http://localhost:5173

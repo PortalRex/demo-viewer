@@ -1,8 +1,11 @@
 // Gameplay visuals: lasers, light bridges, excursion funnels, fizzlers and
 // the portal surface material (the portal views themselves are rendered in
-// View3D). All of them come from the entities' networked state.
+// View3D). Their shapes come from the entities' networked state; their looks
+// from the game's own materials (SolidEnergy, sprites), approximated here.
 import * as THREE from 'three';
 import type {PropValue} from '../net/props.ts';
+import type {Materials} from '../game/materials.ts';
+import type {TextureCache} from './textures.ts';
 
 export const vec3 = (v: PropValue | undefined): THREE.Vector3 | null =>
 	Array.isArray(v) && v.length >= 3 && typeof v[0] === 'number' ? new THREE.Vector3(v[0] as number, v[1] as number, v[2] as number) : null;
@@ -18,166 +21,315 @@ function placeBetween(o: THREE.Object3D, a: THREE.Vector3, b: THREE.Vector3, rad
 	o.scale.set(radius, Math.max(len, 0.001), radius);
 }
 
-// ---- lasers ----
+const num = (p: Map<string, string>, key: string, d: number) => {
+	const v = Number((p.get(key) ?? '').replace(/["[\]{}]/g, '').trim().split(/\s+/)[0]);
+	return isFinite(v) ? v : d;
+};
+const vec = (p: Map<string, string>, key: string, d: [number, number, number]): [number, number, number] => {
+	const v = (p.get(key) ?? '').replace(/["[\]{}]/g, ' ').trim().split(/\s+/).map(Number);
+	return v.length >= 3 && v.every(isFinite) ? [v[0], v[1], v[2]] : d;
+};
+// "$outputintensity" comes per platform ("!srgb?$outputintensity", ...)
+const outputIntensity = (p: Map<string, string>) => {
+	for (const k of ['srgb_pc?$outputintensity', '!srgb?$outputintensity', '$outputintensity']) if (p.has(k)) return num(p, k, 1);
+	return 1;
+};
 
-const laserCore = new THREE.MeshBasicMaterial({color: 0xffd0c8, fog: false});
-const laserGlow = new THREE.MeshBasicMaterial({color: 0xff2a10, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false, fog: false});
-const unitCylinder = new THREE.CylinderGeometry(1, 1, 1, 10, 1, true);
+// Loads effect materials and textures for the current map
+export class EffectAssets {
+	readonly materials: Materials;
+	readonly textures: TextureCache;
+	white: THREE.Texture;
 
-export class Laser {
-	readonly group = new THREE.Group();
-	private segments: {core: THREE.Mesh; glow: THREE.Mesh}[] = [];
+	constructor(materials: Materials, textures: TextureCache) {
+		this.materials = materials;
+		this.textures = textures;
+		this.white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+		this.white.needsUpdate = true;
+	}
 
-	// segments: pairs of points (the emitter's beam, then continuations
-	// through portals)
-	set(points: [THREE.Vector3, THREE.Vector3][]) {
-		while (this.segments.length < points.length) {
-			const core = new THREE.Mesh(unitCylinder, laserCore);
-			const glow = new THREE.Mesh(unitCylinder, laserGlow);
-			glow.renderOrder = 2;
-			this.group.add(core, glow);
-			this.segments.push({core, glow});
-		}
-		this.segments.forEach((s, i) => {
-			const p = points[i];
-			s.core.visible = s.glow.visible = !!p;
-			if (!p) return;
-			placeBetween(s.core, p[0], p[1], 0.8);
-			placeBetween(s.glow, p[0], p[1], 4);
-		});
+	async texture(path: string | undefined): Promise<THREE.Texture> {
+		if (!path) return this.white;
+		return (await this.textures.get(path.toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''))) ?? this.white;
 	}
 }
 
-// ---- light bridges ----
+// ---- SolidEnergy (light bridges, funnels) ----
+// base x detail1 (x2, or blended by base alpha) then detail2 (added or
+// multiplied), each with its own scrolling texture transform; additive.
 
-const bridgeMaterial = new THREE.ShaderMaterial({
-	uniforms: {time: {value: 0}},
-	transparent: true,
-	depthWrite: false,
-	side: THREE.DoubleSide,
-	blending: THREE.AdditiveBlending,
-	vertexShader: `
-		varying vec2 vUv;
-		void main() {
-			vUv = uv;
-			gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-		}`,
-	fragmentShader: `
-		uniform float time;
-		varying vec2 vUv;
-		void main() {
-			// brighter edges, faint moving bands along the length
-			float edge = smoothstep(0.42, 0.5, abs(vUv.x - 0.5));
-			float bands = 0.5 + 0.5 * sin(vUv.y * 0.35 - time * 2.0);
-			float a = 0.22 + 0.5 * edge + 0.06 * bands;
-			gl_FragColor = vec4(vec3(0.35, 0.75, 1.0) * a, 1.0);
-		}`,
-});
-
-export class Bridge {
-	readonly mesh: THREE.Mesh;
-	private geometry = new THREE.BufferGeometry();
-
-	constructor() {
-		this.mesh = new THREE.Mesh(this.geometry, bridgeMaterial);
-		this.mesh.renderOrder = 2;
-		this.mesh.frustumCulled = false;
-	}
-
-	// start/end along the bridge, `right` across it, `width` in units
-	set(start: THREE.Vector3, end: THREE.Vector3, right: THREE.Vector3, width: number) {
-		const h = right.clone().multiplyScalar(width / 2);
-		const len = start.distanceTo(end);
-		const p = [start.clone().sub(h), start.clone().add(h), end.clone().add(h), end.clone().sub(h)];
-		const pos: number[] = [], uv: number[] = [];
-		const uvs = [[0, 0], [1, 0], [1, len / 8], [0, len / 8]];
-		for (const i of [0, 1, 2, 0, 2, 3]) {
-			pos.push(p[i].x, p[i].y, p[i].z);
-			uv.push(uvs[i][0], uvs[i][1]);
-		}
-		this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-		this.geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-	}
-}
-
-// ---- excursion funnels ----
-
-function funnelMaterial(color: THREE.Color) {
+function solidEnergyMaterial(): THREE.ShaderMaterial {
 	return new THREE.ShaderMaterial({
-		uniforms: {time: {value: 0}, color: {value: color}, reversed: {value: 0}},
+		uniforms: {
+			base: {value: null}, detail1: {value: null}, detail2: {value: null},
+			baseOffset: {value: new THREE.Vector2()}, detail1Offset: {value: new THREE.Vector2()}, detail2Offset: {value: new THREE.Vector2()},
+			detail1Mode: {value: 0}, detail2Mode: {value: 0}, hasDetail1: {value: 0}, hasDetail2: {value: 0},
+			intensity: {value: 1}, color: {value: new THREE.Color(1, 1, 1)}, edgeFade: {value: 0},
+		},
 		transparent: true,
 		depthWrite: false,
 		side: THREE.DoubleSide,
 		blending: THREE.AdditiveBlending,
 		vertexShader: `
 			varying vec2 vUv;
-			varying float vLen;
+			varying vec3 vNormalV;
+			varying vec3 vViewDir;
 			void main() {
 				vUv = uv;
-				vLen = length((modelMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
-				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+				vec4 mv = modelViewMatrix * vec4(position, 1.0);
+				vNormalV = normalize(normalMatrix * normal);
+				vViewDir = normalize(-mv.xyz);
+				gl_Position = projectionMatrix * mv;
 			}`,
 		fragmentShader: `
-			uniform float time;
+			uniform sampler2D base, detail1, detail2;
+			uniform vec2 baseOffset, detail1Offset, detail2Offset;
+			uniform float detail1Mode, detail2Mode, hasDetail1, hasDetail2, intensity, edgeFade;
 			uniform vec3 color;
-			uniform float reversed;
 			varying vec2 vUv;
-			varying float vLen;
+			varying vec3 vNormalV;
+			varying vec3 vViewDir;
 			void main() {
-				// rings travelling along the funnel, a spiral around it
-				float along = vUv.y * vLen / 40.0;
-				float dir = reversed > 0.5 ? 1.0 : -1.0;
-				float rings = 0.5 + 0.5 * sin((along + dir * time * 1.5) * 6.2831);
-				float spiral = 0.5 + 0.5 * sin((vUv.x * 3.0 + along * 0.5 + dir * time) * 6.2831);
-				float a = 0.08 + 0.12 * rings * spiral;
-				gl_FragColor = vec4(color * a, 1.0);
+				vec4 c = texture2D(base, vUv + baseOffset);
+				if (hasDetail1 > 0.5) {
+					vec3 d1 = texture2D(detail1, vUv + detail1Offset).rgb;
+					c.rgb = detail1Mode < 0.5 ? c.rgb * 2.0 * d1 : mix(c.rgb * d1, c.rgb, c.a);
+				}
+				if (hasDetail2 > 0.5) {
+					vec3 d2 = texture2D(detail2, vUv + detail2Offset).rgb;
+					c.rgb = detail2Mode < 0.5 ? c.rgb + d2 : c.rgb * d2;
+				}
+				// funnels fade where the surface faces the viewer
+				float facing = abs(dot(normalize(vNormalV), normalize(vViewDir)));
+				float a = mix(1.0, 1.0 - pow(facing, 2.0) * 0.85, edgeFade);
+				gl_FragColor = vec4(c.rgb * color * intensity * a, 1.0);
+				#include <tonemapping_fragment>
+				#include <colorspace_fragment>
 			}`,
 	});
 }
 
-export class Funnel {
-	readonly mesh: THREE.Mesh;
-	private blue = funnelMaterial(new THREE.Color(0.25, 0.55, 1.0));
-	private orange = funnelMaterial(new THREE.Color(1.0, 0.5, 0.12));
+async function loadSolidEnergy(assets: EffectAssets, name: string, m: THREE.ShaderMaterial) {
+	const raw = await assets.materials.raw(name);
+	if (!raw) return;
+	const p = raw.params;
+	const u = m.uniforms;
+	u.base.value = await assets.texture(p.get('$basetexture'));
+	if (p.has('$detail1')) {
+		u.detail1.value = await assets.texture(p.get('$detail1'));
+		u.hasDetail1.value = 1;
+		u.detail1Mode.value = num(p, '$detail1blendmode', 0);
+	}
+	if (p.has('$detail2')) {
+		u.detail2.value = await assets.texture(p.get('$detail2'));
+		u.hasDetail2.value = 1;
+		u.detail2Mode.value = num(p, '$detail2blendmode', 0);
+	}
+	u.intensity.value = outputIntensity(p);
+	u.color.value.setRGB(...vec(p, '$color', [1, 1, 1]));
+}
 
-	constructor() {
-		this.mesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 24, 1, true), this.blue);
-		this.mesh.renderOrder = 2;
+// ---- lasers ----
+
+export class Laser {
+	readonly group = new THREE.Group();
+	private segments: THREE.Mesh[] = [];
+	private material: THREE.MeshBasicMaterial;
+
+	constructor(assets: EffectAssets | null) {
+		this.material = new THREE.MeshBasicMaterial({color: 0xff4020, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false});
+		assets?.texture('effects/redlaser1').then(t => {
+			if (t === assets.white) return;
+			const tex = t.clone();
+			tex.wrapS = THREE.RepeatWrapping;
+			tex.wrapT = THREE.ClampToEdgeWrapping;
+			tex.needsUpdate = true;
+			this.material.map = tex;
+			this.material.color.setRGB(1, 1, 1);
+			this.material.needsUpdate = true;
+		});
 	}
 
-	set(start: THREE.Vector3, end: THREE.Vector3, radius: number, reversed: boolean, time: number) {
-		const m = reversed ? this.orange : this.blue;
-		this.mesh.material = m;
-		m.uniforms.time.value = time;
-		m.uniforms.reversed.value = reversed ? 1 : 0;
-		placeBetween(this.mesh, start, end, radius);
+	// segments: pairs of points (the beam, then its continuations through
+	// portals), drawn as ribbons turned towards the camera
+	set(points: [THREE.Vector3, THREE.Vector3][], camera: THREE.Vector3) {
+		while (this.segments.length < points.length) {
+			const g = new THREE.BufferGeometry();
+			g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(18), 3));
+			g.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(12), 2));
+			const mesh = new THREE.Mesh(g, this.material);
+			mesh.frustumCulled = false;
+			mesh.renderOrder = 2;
+			this.group.add(mesh);
+			this.segments.push(mesh);
+		}
+		const width = 12;
+		this.segments.forEach((mesh, i) => {
+			const p = points[i];
+			mesh.visible = !!p;
+			if (!p) return;
+			const [a, b] = p;
+			const dir = b.clone().sub(a);
+			const len = dir.length();
+			const mid = a.clone().add(b).multiplyScalar(0.5);
+			const side = dir.clone().cross(camera.clone().sub(mid)).normalize().multiplyScalar(width / 2);
+			const q = [a.clone().sub(side), a.clone().add(side), b.clone().add(side), b.clone().sub(side)];
+			const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+			const uv = mesh.geometry.getAttribute('uv') as THREE.BufferAttribute;
+			const uvs = [[0, 0], [0, 1], [len / 64, 1], [len / 64, 0]];
+			[0, 1, 2, 0, 2, 3].forEach((k, j) => {
+				pos.setXYZ(j, q[k].x, q[k].y, q[k].z);
+				uv.setXY(j, uvs[k][0], uvs[k][1]);
+			});
+			pos.needsUpdate = uv.needsUpdate = true;
+		});
 	}
 }
 
-// ---- fizzlers ----
+// ---- light bridges (effects/projected_wall) ----
 
-export const fizzlerMaterial = new THREE.ShaderMaterial({
-	uniforms: {time: {value: 0}},
-	transparent: true,
-	depthWrite: false,
-	side: THREE.DoubleSide,
-	blending: THREE.AdditiveBlending,
-	vertexShader: `
-		varying vec3 vWorld;
-		void main() {
-			vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
-			gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-		}`,
-	fragmentShader: `
-		uniform float time;
-		varying vec3 vWorld;
-		void main() {
-			// drifting vertical streaks, as the field's shimmer
-			float streaks = 0.5 + 0.5 * sin(vWorld.x * 0.21 + vWorld.y * 0.21 + time * 1.3) * sin(vWorld.z * 0.05 - time * 2.1);
-			float a = 0.06 + 0.1 * streaks;
-			gl_FragColor = vec4(vec3(0.45, 0.7, 1.0) * a, 1.0);
-		}`,
-});
+export class Bridge {
+	readonly mesh: THREE.Mesh;
+	private geometry = new THREE.BufferGeometry();
+	private material = solidEnergyMaterial();
+
+	constructor(assets: EffectAssets | null) {
+		this.mesh = new THREE.Mesh(this.geometry, this.material);
+		this.mesh.renderOrder = 2;
+		this.mesh.frustumCulled = false;
+		if (assets) loadSolidEnergy(assets, 'effects/projected_wall', this.material);
+	}
+
+	// start/end along the bridge, `right` across it, `width` in units
+	set(start: THREE.Vector3, end: THREE.Vector3, right: THREE.Vector3, width: number, time: number) {
+		const h = right.clone().multiplyScalar(width / 2);
+		const len = start.distanceTo(end);
+		const p = [start.clone().sub(h), start.clone().add(h), end.clone().add(h), end.clone().sub(h)];
+		const pos: number[] = [], uv: number[] = [], nrm: number[] = [];
+		const n = right.clone().cross(end.clone().sub(start)).normalize();
+		// one texture repeat per bridge width along its length
+		const uvs = [[0, 0], [1, 0], [1, len / width], [0, len / width]];
+		for (const i of [0, 1, 2, 0, 2, 3]) {
+			pos.push(p[i].x, p[i].y, p[i].z);
+			uv.push(uvs[i][0], uvs[i][1]);
+			nrm.push(n.x, n.y, n.z);
+		}
+		this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+		this.geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+		this.geometry.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+		// projected_wall's proxies: base drifts along, detail1 sweeps and
+		// races, detail2 creeps
+		const u = this.material.uniforms;
+		u.baseOffset.value.set(0, 0.15 * time);
+		u.detail1Offset.value.set(0.47 + 0.47 * Math.sin((time + 3) * 2 * Math.PI / 5), -3 * time);
+		u.detail2Offset.value.set(0, 0.18 * time);
+	}
+}
+
+// ---- excursion funnels (effects/tractor_beam) ----
+
+export class Funnel {
+	readonly mesh: THREE.Mesh;
+	private material = solidEnergyMaterial();
+
+	constructor(assets: EffectAssets | null) {
+		this.mesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 32, 1, true), this.material);
+		this.mesh.renderOrder = 2;
+		this.material.uniforms.edgeFade.value = 1;
+		if (assets) loadSolidEnergy(assets, 'effects/tractor_beam', this.material);
+	}
+
+	set(start: THREE.Vector3, end: THREE.Vector3, radius: number, reversed: boolean, time: number) {
+		placeBetween(this.mesh, start, end, radius);
+		// texture scrolls along the funnel with its flow; orange when reversed
+		const rate = (reversed ? -1 : 1) * 0.25;
+		const len = start.distanceTo(end);
+		const g = this.mesh.geometry as THREE.CylinderGeometry;
+		const uv = g.getAttribute('uv') as THREE.BufferAttribute;
+		if (g.userData.len !== len) {
+			g.userData.len = len;
+			// around the funnel: u; along it: v, one repeat per diameter
+			const base = (g.userData.baseUv ??= Float32Array.from(uv.array as Float32Array)) as Float32Array;
+			for (let i = 0; i < uv.count; i++) uv.setXY(i, base[i * 2], base[i * 2 + 1] * len / (radius * 2));
+			uv.needsUpdate = true;
+		}
+		const u = this.material.uniforms;
+		u.baseOffset.value.set(0, -rate * time);
+		u.detail1Offset.value.set(0.017 * rate * time, 0.1 * rate * time);
+		u.detail2Offset.value.set(0, -1.15 * rate * time);
+		u.color.value.setRGB(...(reversed ? [1.0, 0.45, 0.12] as const : [1, 1, 1] as const));
+	}
+}
+
+// ---- fizzlers (SolidEnergy flowmap materials on the trigger's faces) ----
+// The ripple texture, in world space, is pushed along the flow map in two
+// phases that cross-fade; its alpha tints the flow colour; the bounds
+// texture (in the face's own texture space) fades it out at the edges.
+
+export function fizzlerMaterial(assets: EffectAssets | null, name: string): THREE.ShaderMaterial {
+	const m = new THREE.ShaderMaterial({
+		uniforms: {
+			base: {value: null}, flow: {value: null}, bounds: {value: null},
+			time: {value: 0}, interval: {value: 1.2}, scroll: {value: 0.25}, worldScale: {value: 0.008},
+			flowColor: {value: new THREE.Color(0.025, 0.08, 0.1)}, intensity: {value: 2.0},
+		},
+		transparent: true,
+		depthWrite: false,
+		side: THREE.DoubleSide,
+		blending: THREE.AdditiveBlending,
+		vertexShader: `
+			varying vec2 vUv;
+			varying vec2 vWorldUv;
+			void main() {
+				vUv = uv;
+				vec3 w = (modelMatrix * vec4(position, 1.0)).xyz;
+				vec3 n = abs(normalize(mat3(modelMatrix) * normal));
+				// world coordinates on the plane the face mostly lies in
+				vWorldUv = n.x > n.y && n.x > n.z ? w.yz : n.y > n.z ? w.xz : w.xy;
+				gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+			}`,
+		fragmentShader: `
+			uniform sampler2D base, flow, bounds;
+			uniform float time, interval, scroll, worldScale, intensity;
+			uniform vec3 flowColor;
+			varying vec2 vUv;
+			varying vec2 vWorldUv;
+			void main() {
+				vec4 b = texture2D(bounds, vUv);
+				vec2 f = (texture2D(flow, vUv).rg * 2.0 - 1.0) * b.r;
+				float t1 = fract(time / interval), t2 = fract(t1 + 0.5);
+				float w1 = 1.0 - abs(t1 * 2.0 - 1.0);
+				vec2 uv = vWorldUv * worldScale;
+				vec4 c = texture2D(base, uv + f * t1 * scroll) * w1 + texture2D(base, uv + f * t2 * scroll) * (1.0 - w1);
+				vec3 rgb = (c.a * flowColor + b.g * flowColor * 4.0) * b.b * intensity;
+				gl_FragColor = vec4(rgb, 1.0);
+				#include <tonemapping_fragment>
+				#include <colorspace_fragment>
+			}`,
+	});
+	if (assets) {
+		assets.materials.raw(name).then(async raw => {
+			if (!raw) return;
+			const p = raw.params;
+			const u = m.uniforms;
+			const repeat = (t: THREE.Texture) => {
+				const c = t.clone();
+				c.wrapS = c.wrapT = THREE.RepeatWrapping;
+				c.needsUpdate = true;
+				return c;
+			};
+			u.base.value = repeat(await assets.texture(p.get('$basetexture')));
+			u.flow.value = await assets.texture(p.get('$flowmap'));
+			u.bounds.value = await assets.texture(p.get('$flowbounds'));
+			u.interval.value = num(p, '$flow_timeintervalinseconds', 1.2);
+			u.scroll.value = num(p, '$flow_uvscrolldistance', 0.25);
+			u.worldScale.value = num(p, '$flow_worlduvscale', 0.008);
+			u.flowColor.value.setRGB(...vec(p, '$flow_color', [0.025, 0.08, 0.1]));
+			u.intensity.value = outputIntensity(p);
+		});
+	}
+	return m;
+}
 
 // ---- portal surfaces ----
 

@@ -50,8 +50,24 @@ export interface StaticProp {
 	index: number;  // in the map's list (its vertex lighting file is sp_hdr_<index>.vhv)
 }
 
+// A lit world face, for painting: where its luxels are in the lightmap atlas
+// and how world positions map onto them
+export interface PaintFace {
+	x: number;          // block position in the atlas (luxel 0,0)
+	y: number;
+	w: number;          // luxels
+	h: number;
+	mins: [number, number];
+	lmVecs: number[];   // lightmap s/t vectors (2 x 4)
+	normal: [number, number, number];
+	dist: number;
+	center: [number, number, number];
+	radius: number;     // bounding sphere of its vertices
+}
+
 export interface BspMap {
 	name: string;
+	paintFaces: Map<number, PaintFace>;  // by face index (= the engine's surface index)
 	models: ModelMesh[];  // 0 = world
 	staticProps: StaticProp[];
 	lightmap: Lightmap | null;
@@ -382,6 +398,26 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		lightmap = {width: W, height: H, data};
 	}
 
+	// faces that can carry paint: lit world faces (model 0)
+	const paintFaces = new Map<number, PaintFace>();
+	{
+		const first = models.getInt32(40, true), count = models.getInt32(44, true);
+		for (let f = first; f < first + count; f++) {
+			const b = blocks.get(f);
+			if (!b) continue;
+			const o = f * 56;
+			const tex = texInfoOf(faces.getInt16(o + 10, true));
+			const vs = faceVerts(f);
+			const c: [number, number, number] = [0, 0, 0];
+			for (const v of vs) for (let k = 0; k < 3; k++) c[k] += v[k] / vs.length;
+			const radius = Math.max(...vs.map(v => Math.hypot(v[0] - c[0], v[1] - c[1], v[2] - c[2])));
+			const pn = faces.getUint16(o, true);
+			const flip = faces.getUint8(o + 2) ? -1 : 1;
+			const n: [number, number, number] = [planes.getFloat32(pn * 20, true) * flip, planes.getFloat32(pn * 20 + 4, true) * flip, planes.getFloat32(pn * 20 + 8, true) * flip];
+			paintFaces.set(f, {x: b.x, y: b.y, w: b.w, h: b.h, mins: b.mins, lmVecs: tex.lmVecs, normal: n, dist: planes.getFloat32(pn * 20 + 12, true) * flip, center: c, radius});
+		}
+	}
+
 	const vertexFor = (p: number[], tex: TexInfo, f: number, base = p): Vert => {
 		const tv = tex.vecs, lv = tex.lmVecs;
 		const uv: [number, number] = [
@@ -448,7 +484,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 
 	const b = (i: number) => models.getFloat32(i, true);
 	return {
-		name, models: meshes, staticProps, lightmap, entities, materials, pak, materialsRead, faceCount, warnings,
+		name, models: meshes, staticProps, lightmap, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }

@@ -95,6 +95,11 @@ export class Materials {
 		return p;
 	}
 
+	// a material's shader and parameters (lower-case keys), patches resolved
+	raw(name: string): Promise<{shader: string; params: Map<string, string>} | null> {
+		return this.params(`materials/${name.toLowerCase().replace(/\\/g, '/').replace(/\.vmt$/, '')}.vmt`, 0);
+	}
+
 	private async params(path: string, depth: number): Promise<{shader: string; params: Map<string, string>} | null> {
 		const text = await this.files.text(path);
 		if (!text) return null;
