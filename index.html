@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>SAR Run Viewer</title>
+	<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+	<div id="app">
+		<header class="bar">
+			<div class="brand">SAR Run Viewer</div>
+			<div id="run-title" class="run-title"></div>
+			<div id="badges" class="badges"></div>
+			<label class="open-btn">
+				<input id="file-input" type="file" accept=".sarp,.dem" hidden>
+				Open file
+			</label>
+		</header>
+
+		<section id="drop" class="drop">
+			<div class="drop-inner">
+				<h1>Watch a Portal 2 run in your browser</h1>
+				<p>Drop a SAR proof (<code>.sarp</code>) or a demo (<code>.dem</code>) here, or use <b>Open file</b>.</p>
+				<p class="muted">The file is read in this page and never uploaded anywhere.</p>
+			</div>
+		</section>
+
+		<main id="viewer" class="viewer" hidden>
+			<aside class="segments">
+				<div class="panel-title">Segments <span id="total-time" class="muted"></span></div>
+				<ol id="segment-list"></ol>
+			</aside>
+
+			<section class="stage">
+				<div class="view-tools">
+					<div class="seg-toggle" id="view-mode">
+						<button data-mode="top" class="on">Top</button>
+						<button data-mode="side">Side</button>
+					</div>
+					<button id="follow" class="toggle on" title="Keep the player in view">Follow</button>
+					<button id="fit" title="Fit the whole path">Fit</button>
+					<div class="readout" id="readout"></div>
+				</div>
+				<canvas id="path"></canvas>
+				<div class="hud">
+					<div id="inputs" class="inputs"></div>
+					<div id="speed-now" class="speed-now"></div>
+				</div>
+			</section>
+
+			<aside class="side">
+				<div class="tabs" id="tabs">
+					<button data-tab="events" class="on">Events</button>
+					<button data-tab="console">Console</button>
+					<button data-tab="splits">Splits</button>
+					<button data-tab="file">File</button>
+				</div>
+				<div id="tab-events" class="tab"></div>
+				<div id="tab-console" class="tab" hidden></div>
+				<div id="tab-splits" class="tab" hidden></div>
+				<div id="tab-file" class="tab" hidden></div>
+			</aside>
+
+			<footer class="transport">
+				<div class="controls">
+					<button id="play" title="Play / pause (Space)">▶</button>
+					<button id="back" title="Back 1 s (Shift+←)">−1s</button>
+					<button id="fwd" title="Forward 1 s (Shift+→)">+1s</button>
+					<select id="rate" title="Playback speed">
+						<option value="0.25">0.25×</option>
+						<option value="0.5">0.5×</option>
+						<option value="1" selected>1×</option>
+						<option value="2">2×</option>
+						<option value="4">4×</option>
+						<option value="8">8×</option>
+					</select>
+					<div id="clock" class="clock"></div>
+				</div>
+				<canvas id="timeline"></canvas>
+				<canvas id="speed"></canvas>
+			</footer>
+		</main>
+
+		<div id="error" class="error" hidden></div>
+	</div>
+	<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
