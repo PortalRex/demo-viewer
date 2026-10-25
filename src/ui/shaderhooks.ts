@@ -60,6 +60,7 @@ export const ditherUniforms = {
 
 const DITHER_FRAGMENT_HEAD = `
 varying vec3 vDitherWorld;
+varying float vDitherUp;
 uniform float ditherOn;
 uniform vec3 ditherTarget;
 uniform float ditherRadius;
@@ -79,8 +80,10 @@ const DITHER_FRAGMENT = `
 		vec3 dir = toTarget / max(len, 0.001);
 		vec3 rel = vDitherWorld - cameraPosition;
 		float along = dot(rel, dir);
-		// only between the camera and (a little short of) the player
-		if (along > 0.0 && along < len - 20.0) {
+		// only between the camera and (a little short of) the player, and
+		// not floors (they never hide the player, and holes in them show
+		// the void)
+		if (along > 0.0 && along < len - 20.0 && vDitherUp < 0.7) {
 			float across = length(rel - dir * along);
 			float radius = ditherRadius * (0.35 + 0.65 * along / len);
 			float fade = 1.0 - smoothstep(radius * 0.55, radius, across);
@@ -109,9 +112,9 @@ function hook(material: THREE.Material, paint: boolean) {
 	material.onBeforeCompile = shader => {
 		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms);
 		if (paint) Object.assign(shader.uniforms, paintUniforms);
-		shader.vertexShader = 'varying vec3 vDitherWorld;\n' + shader.vertexShader.replace(
+		shader.vertexShader = 'varying vec3 vDitherWorld;\nvarying float vDitherUp;\n' + shader.vertexShader.replace(
 			'#include <project_vertex>',
-			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
+			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n\tvDitherUp = normalize(mat3(modelMatrix) * normal).z;',
 		);
 		shader.fragmentShader = DITHER_FRAGMENT_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)

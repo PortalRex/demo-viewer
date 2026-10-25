@@ -344,12 +344,15 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 // of scrolling noise, coloured by a 1D gradient texture, brighter towards
 // the bottom; an unlinked portal fills with them.
 
-export function portalMaterial(assets: EffectAssets | null, orange: boolean): THREE.ShaderMaterial {
+// `tint`: co-op portals (the tinted variant): the flames run from black to
+// the player's portal colour instead of through the colour texture
+export function portalMaterial(assets: EffectAssets | null, orange: boolean, tint: number[] | null = null): THREE.ShaderMaterial {
 	const m = new THREE.ShaderMaterial({
 		uniforms: {
 			view: {value: null}, hasView: {value: 0}, resolution: {value: new THREE.Vector2(1, 1)},
 			noise: {value: assets?.white ?? null}, gradient: {value: assets?.white ?? null},
-			open: {value: 1}, time: {value: 0}, exposure: {value: 1}, colorScale: {value: 4},
+			open: {value: 1}, time: {value: 0}, exposure: {value: 1}, colorScale: {value: tint ? 1.5 : 4},
+			tint: {value: new THREE.Vector3(...(tint ?? [1, 1, 1]))}, tinted: {value: tint ? 1 : 0},
 		},
 		transparent: true,
 		depthWrite: false,
@@ -363,7 +366,8 @@ export function portalMaterial(assets: EffectAssets | null, orange: boolean): TH
 			}`,
 		fragmentShader: `
 			uniform sampler2D view, noise, gradient;
-			uniform float hasView, open, time, exposure, colorScale;
+			uniform float hasView, open, time, exposure, colorScale, tinted;
+			uniform vec3 tint;
 			uniform vec2 resolution;
 			varying vec2 vBase;
 			float linearstep(float a, float b, float x) { return clamp((x - a) / (b - a), 0.0, 1.0); }
@@ -392,7 +396,8 @@ export function portalMaterial(assets: EffectAssets | null, orange: boolean): TH
 				mask *= border;
 				float alpha = clamp(mask + hole * (1.0 - activeNoise), 0.0, 1.0) * 1.5;
 				float shift = pow(abs(uv.y), 1.5) * 0.8 + 0.2;
-				vec3 flameColor = texture2D(gradient, vec2(pow(border, 0.5) * shift * alpha, 0.5)).rgb * colorScale;
+				float sampleAt = pow(border, 0.5) * shift * alpha;
+				vec3 flameColor = (tinted > 0.5 ? tint * clamp(sampleAt, 0.0, 1.0) : texture2D(gradient, vec2(sampleAt, 0.5)).rgb) * colorScale;
 				alpha = clamp(alpha, 0.0, 1.0);
 
 				vec3 inside = hasView > 0.5 ? texture2D(view, gl_FragCoord.xy / resolution).rgb * exposure : vec3(0.0);

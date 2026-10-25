@@ -56,6 +56,16 @@ if (import.meta.env.DEV) {
 		const len = Math.hypot(d[0], d[1], d[2]);
 		return (w.shot as (n: string, e: number[], a: number[]) => Promise<string>)(name, eye, [-Math.asin(d[2] / len) * 180 / Math.PI, Math.atan2(d[1], d[0]) * 180 / Math.PI]);
 	};
+	// frames of a tick range into fixtures/shots/<name>/ (as JPEGs), for videos
+	w.record = async (name: string, from: number, to: number, step = 2, width = 960, height = 540) => {
+		let n = 0;
+		for (let t = from; t <= to; t += step) {
+			seekTo(t);
+			const url = view3d.snapshot(width, height, undefined, undefined, 'image/jpeg');
+			await fetch(`/__shot?name=${name}/${String(n++).padStart(4, '0')}&ext=jpg`, {method: 'POST', body: url});
+		}
+		return n;
+	};
 	w.shot = (name: string, eye?: number[], ang?: number[]) => {
 		const url = view3d.snapshot(1600, 900, eye, ang);
 		return fetch(`/__shot?name=${name}`, {method: 'POST', body: url}).then(r => r.text());
@@ -162,6 +172,7 @@ async function load3dMap() {
 		files.mapPak = mapPaks.get(seg.map) ?? null;
 		view3d.setMap(bsp, files, mats);
 		view3d.setSegment(pb.tracks[currentSeg], entitiesFor(currentSeg));
+		showViewAs();
 		message3d(null);
 		render();
 	} catch (e) {
@@ -289,12 +300,33 @@ $('view-mode').onclick = e => {
 	$('path').hidden = is3d;
 	$('view3d').hidden = !is3d;
 	$('cam-mode').hidden = !is3d;
+	if (!is3d) $('view-as').hidden = true;
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
 	if (is3d) load3dMap();
 	else pathView.setMode(viewMode as 'top' | 'side');
 	render();
 };
+// co-op: which player the camera follows
+function showViewAs() {
+	const box = $('view-as');
+	const players = view3d.players();
+	box.hidden = players.length < 2;
+	box.innerHTML = '';
+	for (const p of players) {
+		const b = document.createElement('button');
+		b.textContent = p.name;
+		b.title = p.recording ? `${p.name} (recorded this demo)` : `${p.name} (from the demo's network data)`;
+		b.classList.toggle('on', p.recording);
+		b.onclick = () => {
+			for (const x of box.querySelectorAll('button')) x.classList.toggle('on', x === b);
+			view3d.follow(p.recording ? null : p.index);
+			render();
+		};
+		box.appendChild(b);
+	}
+}
+
 $('cam-mode').onclick = e => {
 	const b = (e.target as HTMLElement).closest('button');
 	if (!b) return;

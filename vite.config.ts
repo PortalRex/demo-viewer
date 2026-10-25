@@ -16,13 +16,14 @@ function devGameFiles(): Plugin {
 		configureServer(server) {
 			// debugging: POST a PNG data URL to /__shot?name=x to save it in fixtures/shots
 			server.middlewares.use('/__shot', (req, res) => {
-				const name = (/name=([\w-]+)/.exec(req.url ?? '')?.[1]) ?? 'shot';
+				const name = (/name=([\w/-]+)/.exec(req.url ?? '')?.[1]) ?? 'shot';
+				const ext = /ext=jpg/.test(req.url ?? '') ? 'jpg' : 'png';
 				const parts: Buffer[] = [];
 				req.on('data', (c: Buffer) => parts.push(c));
 				req.on('end', () => {
-					mkdirSync('fixtures/shots', {recursive: true});
+					mkdirSync(`fixtures/shots/${name}`.replace(/\/[^/]*$/, ''), {recursive: true});
 					const data = Buffer.concat(parts).toString().replace(/^data:image\/\w+;base64,/, '');
-					writeFileSync(`fixtures/shots/${name}.png`, Buffer.from(data, 'base64'));
+					writeFileSync(`fixtures/shots/${name}.${ext}`, Buffer.from(data, 'base64'));
 					res.end('ok');
 				});
 			});

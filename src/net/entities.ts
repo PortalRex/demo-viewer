@@ -26,6 +26,11 @@ export interface EntityKey {
 	origin: Vec3;
 	angles: Vec3;
 	visible: boolean;  // in the snapshot and not EF_NODRAW
+	// out of the recording player's view (not sent, its last state kept) or
+	// deleted; `nodraw`: EF_NODRAW as last sent
+	dormant?: boolean;
+	removed?: boolean;
+	nodraw?: boolean;
 	active?: boolean;  // portals: m_bActivated
 	eyeZ?: number;     // players: view offset height
 	anim?: AnimState;  // animated models
@@ -46,7 +51,7 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CTrigger_TractorBeam: ['m_vStart', 'm_vEnd', 'm_flRadius', 'm_bReversed', 'm_bDisabled'],
 	CTriggerPortalCleanser: ['m_bDisabled', 'm_bVisible'],
 	// which fog and tonemap controllers apply to the player
-	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController'],
+	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController', 'm_hAttachedObject', 'm_bUseVMGrab', 'm_bUsingVMGrabState', 'm_fFlags'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
 	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],
@@ -191,6 +196,7 @@ interface LiveEntity {
 	state: PropValue[];
 	track: EntityTrack;
 	inSnapshot: boolean;
+	removed?: boolean;
 	originCopy?: number;  // which of the class's origin copies this entity gets sent (players)
 }
 
@@ -271,7 +277,10 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 		const a = vec(s[f.angles]);
 		const angles: Vec3 = f.eyeYaw >= 0 ? [num(s[f.eyePitch]), num(s[f.eyeYaw]), 0] : [a?.[0] ?? 0, a?.[1] ?? 0, a?.[2] ?? 0];
-		const visible = e.inSnapshot && !(num(s[f.effects]) & EF_NODRAW);
+		const nodraw = (num(s[f.effects]) & EF_NODRAW) !== 0;
+		const visible = e.inSnapshot && !nodraw;
+		const dormant = !e.inSnapshot && !e.removed ? true : undefined;
+		const removed = e.removed ? true : undefined;
 		const active = f.activated >= 0 ? num(s[f.activated]) !== 0 : undefined;
 		const eyeZ = f.viewOffset < 0 ? undefined : f.viewOffsetIsVec ? vec(s[f.viewOffset])?.[2] : num(s[f.viewOffset]);
 		let extra: Record<string, PropValue> | undefined;
@@ -298,13 +307,14 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		if (f.model >= 0) t.model = modelName(num(s[f.model]));
 		if (f.isPortal2 >= 0) t.orange = num(s[f.isPortal2]) !== 0;
 		const last = t.keys[t.keys.length - 1];
-		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && last.parent === parentIndex && last.attachment === attachment && last.skin === skin && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
+		if (last && last.visible === visible && last.dormant === dormant && last.removed === removed && last.active === active && last.eyeZ === eyeZ && last.parent === parentIndex && last.attachment === attachment && last.skin === skin && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
 		if (last && last.tick === tick) t.keys.pop();
-		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim, extra, parent: parentIndex, attachment, skin});
+		t.keys.push({tick, origin, angles, visible, dormant, removed, nodraw, active, eyeZ, anim, extra, parent: parentIndex, attachment, skin});
 	};
 
 	const leave = (e: LiveEntity, tick: number, remove: boolean) => {
 		e.inSnapshot = false;
+		e.removed = remove;
 		record(e, tick);
 		if (remove) live.delete(e.track.index);
 	};
@@ -345,6 +355,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 					live.set(index, e);
 				}
 				e.inSnapshot = true;
+				e.removed = false;
 				noteOriginCopy(e, readEntityProps(br, cls.flat, e.state));
 				if (h.updateBaseline) baselines[1 - h.baseline].set(index, {classIndex, state: e.state.slice()});
 				record(e, tick);
