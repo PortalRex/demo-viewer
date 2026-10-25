@@ -51,6 +51,10 @@ const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_T
 const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
 const toEuler = (a: Vec3) => new THREE.Euler(a[2] * Math.PI / 180, a[0] * Math.PI / 180, a[1] * Math.PI / 180, 'ZYX');
+// held objects sit about 70 units in front of the eye; further than this
+// they're held through a portal (see placeHeld)
+const HOLD_MAX = 120;
+const HOLD_OFFSET = new THREE.Vector3(70, 0, -15);
 // an angle in [-180, 180)
 const normPitch = (p: number) => ((p + 180) % 360 + 360) % 360 - 180;
 
@@ -1564,8 +1568,11 @@ export class View3D {
 	}
 
 	// Held objects (m_hAttachedObject): kept where they are relative to the
-	// holder's view at the latest update, moved with the holder's smooth view
-	// (the network copy trails the view by a few ticks and steps)
+	// holder's view at the object's latest update (the holder as of that same
+	// update), moved with the holder's smooth view. Held through a portal the
+	// object is really on the other side (far off), and the game draws it in
+	// front of the holder anyway: then the last offset that was in front of
+	// them, or the usual hold distance.
 	private placeHeld(tick: number) {
 		const ents = this.entities!;
 		for (const p of ents.tracks) {
@@ -1578,12 +1585,15 @@ export class View3D {
 			const ok = ot && keyAt(ot, Math.floor(tick));
 			if (!o || !ok) continue;
 			o.visible = true;
-			// the object in the holder's eye space at the update the object last had
+			const hk = keyAt(p, ok.tick) ?? k;
 			const holderThen = new THREE.Matrix4().compose(
-				new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2] + (k.eyeZ ?? DEFAULT_EYE)),
-				new THREE.Quaternion().setFromEuler(toEuler([k.angles[0], k.angles[1], 0])), new THREE.Vector3(1, 1, 1));
+				new THREE.Vector3(hk.origin[0], hk.origin[1], hk.origin[2] + (hk.eyeZ ?? DEFAULT_EYE)),
+				new THREE.Quaternion().setFromEuler(toEuler([hk.angles[0], hk.angles[1], 0])), new THREE.Vector3(1, 1, 1));
 			const objThen = new THREE.Matrix4().compose(new THREE.Vector3(...ok.origin), new THREE.Quaternion().setFromEuler(toEuler(ok.angles)), new THREE.Vector3(1, 1, 1));
 			const local = holderThen.invert().multiply(objThen);
+			const offset = new THREE.Vector3().setFromMatrixPosition(local);
+			if (offset.length() <= HOLD_MAX) o.userData.heldOffset = offset.clone();
+			else local.setPosition(o.userData.heldOffset ?? HOLD_OFFSET);
 			const now = this.eyeMatrix(p, tick, this.mode === 'eyes' && p === this.followTrack).multiply(local);
 			o.matrixAutoUpdate = false;
 			o.matrix.copy(now);
