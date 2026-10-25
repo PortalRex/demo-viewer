@@ -10,6 +10,8 @@ GAME = r"C:\Program Files (x86)\Steam\steamapps\common\Portal 2"
 CDB = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe"
 SAR = r"H:\Claude\sar-deploy\sar.dll"  # the renderer build
 AUTORENDER = r"H:\Claude\sar-perf\autorender.cfg"
+# old recordings (before build 8873) are fixed with this before playing
+DEMOFIXUP = r"C:\Users\Rex\Documents\GitHub\demofixup\zig-out\bin\demofixup.exe"
 # the demo player only plays recordings whose game folder's name matches
 # the running one's, so the isolated folder is a "portal2" inside refshots
 GAMEDIR = "refshots/portal2"
@@ -42,6 +44,22 @@ def say(text):
         pass
 
 
+def copy_demos():
+    """The recordings into the game folder; the old ones (whose data tables
+    the game no longer has: it stops with a Host_Error) through demofixup."""
+    paths = [os.path.join(FIXTURES, name) for name, _ in SHOTS]
+    out = subprocess.run(["node", "--experimental-strip-types", os.path.join(HERE, "needsfixup.ts"), *paths],
+                         capture_output=True, text=True, check=True, cwd=os.path.join(HERE, "..")).stdout
+    old = {line.split(" ", 1)[1] for line in out.splitlines() if line.startswith("old ")}
+    for path in paths:
+        dest = os.path.join(GD, os.path.basename(path))
+        if path in old:
+            say("fixing up " + os.path.basename(path))
+            subprocess.run([DEMOFIXUP, path, dest], check=True, capture_output=True)
+        else:
+            shutil.copy(path, dest)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if portal_pids():
@@ -65,8 +83,7 @@ def main():
                 "sar_render_skip_coop_videos 1\nsar_disable_no_focus_sleep 1\njoystick 0\nvolume 0\n"
                 # --histogram: the engine prints its exposure (target and current scalar) on screen
                 + ("developer 1\nmat_show_histogram 1\n" if "--histogram" in sys.argv else "") + "echo [ref] ready\n")
-    for name, _ in SHOTS:
-        shutil.copy(os.path.join(FIXTURES, name), os.path.join(GD, name))
+    copy_demos()
 
     port = 27100 + random.randint(0, 800)
     pw = "".join(random.choice(string.ascii_letters) for _ in range(16))
