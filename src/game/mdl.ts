@@ -116,6 +116,9 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 		for (let mi = 0; mi < Math.min(meshes, vMeshes); mi++) {
 			const mesh = meshOffset + mi * 116;
 			const ref = m.getInt32(mesh, true);
+			// an eyeball (materialtype 1): its texture coordinates are the iris
+			// projected along the eye's right and up axes
+			const eye = m.getInt32(mesh + 24, true) === 1 ? eyeballProjection(m, model, m.getInt32(mesh + 28, true)) : null;
 			const meshVertexBase = modelVertexBase + m.getInt32(mesh + 12, true);
 			const meshListIndex = firstMesh + mi;
 			let g = groups.get(ref);
@@ -144,7 +147,10 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 						const vo = vertex(meshVertexBase + orig);
 						g.pos.push(d.getFloat32(vo + 16, true), d.getFloat32(vo + 20, true), d.getFloat32(vo + 24, true));
 						g.nrm.push(d.getFloat32(vo + 28, true), d.getFloat32(vo + 32, true), d.getFloat32(vo + 36, true));
-						g.uv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
+						if (eye) {
+							const px = d.getFloat32(vo + 16, true), py = d.getFloat32(vo + 20, true), pz = d.getFloat32(vo + 24, true);
+							g.uv.push(eye[0][0] * px + eye[0][1] * py + eye[0][2] * pz + eye[0][3], eye[1][0] * px + eye[1][1] * py + eye[1][2] * pz + eye[1][3]);
+						} else g.uv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
 						const nb = Math.min(3, d.getUint8(vo + 15));
 						for (let k = 0; k < 4; k++) {
 							g.si.push(k < nb ? d.getUint8(vo + 12 + k) : 0);
@@ -175,6 +181,41 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 
 // Strip group headers are 25 bytes, or 33 in files with topology data
 // (newer branches). Pick the size whose second group has sane offsets.
+// An eyeball's iris projection (as R_StudioEyeballPosition, looking where
+// the eye points): rows mapping model-space positions to u and v, from the
+// eyeball (mstudioeyeball_t) brought out of its bone into the bind pose
+function eyeballProjection(m: DataView, model: number, index: number): number[][] | null {
+	if (index < 0 || index >= m.getInt32(model + 100, true)) return null;
+	const e = model + m.getInt32(model + 104, true) + index * 172;
+	const f = (o: number) => m.getFloat32(e + o, true);
+	const bone = m.getInt32(e + 4, true);
+	if (bone < 0 || bone >= m.getInt32(156, true)) return null;
+	// pose-to-bone (3x4) of the bone, inverted: bone space -> model space
+	const b = m.getInt32(160, true) + bone * 216 + 96;
+	const p = Array.from({length: 12}, (_, k) => m.getFloat32(b + k * 4, true));
+	const rot = (v: number[]) => [0, 1, 2].map(i => p[i] * v[0] + p[4 + i] * v[1] + p[8 + i] * v[2]);  // R^T v
+	const org = rot([f(8) - p[3], f(12) - p[7], f(16) - p[11]]);
+	const up0 = rot([f(28), f(32), f(36)]), fwd0 = rot([f(40), f(44), f(48)]).map(x => -x);
+	const norm = (v: number[]) => {
+		const l = Math.hypot(v[0], v[1], v[2]) || 1;
+		return v.map(x => x / l);
+	};
+	const cross = (a: number[], c: number[]) => [a[1] * c[2] - a[2] * c[1], a[2] * c[0] - a[0] * c[2], a[0] * c[1] - a[1] * c[0]];
+	let right = norm(cross(fwd0, up0));
+	const zoffset = f(20);
+	const fwd = norm(fwd0.map((x, i) => x + 2 * zoffset * right[i]));
+	right = norm(cross(fwd, up0));
+	const up = norm(cross(right, fwd));
+	const irisScale = f(60);
+	if (!irisScale) return null;
+	const scale = irisScale;  // 1 / (1 / iris_scale)
+	const row = (axis: number[]) => {
+		const r = axis.map(x => -x * scale);
+		return [r[0], r[1], r[2], -(r[0] * org[0] + r[1] * org[1] + r[2] * org[2]) + 0.5];
+	};
+	return [row(right), row(up)];
+}
+
 function guessStripGroupSize(x: DataView, bodyPartOffset: number): number {
 	try {
 		const vModel = bodyPartOffset + x.getInt32(bodyPartOffset + 4, true);

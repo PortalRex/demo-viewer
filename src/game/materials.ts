@@ -161,7 +161,8 @@ export class Materials {
 			noPortal: truthy(p.get('%noportal')),
 			translucent: truthy(p.get('$translucent')) || shader === 'refract' || truthy(p.get('$additive')),
 			liquid: shader === 'water' || /water|goo/.test(name) && shader !== 'lightmappedgeneric',
-			baseTexture: (p.get('$basetexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			// (eyes: the iris texture, projected by the model loader)
+			baseTexture: (p.get('$basetexture') ?? (/^eye/.test(shader) ? p.get('$iris') : undefined) ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			alphaTest,
 			additive: truthy(p.get('$additive')),
 			noCull: truthy(p.get('$nocull')),
