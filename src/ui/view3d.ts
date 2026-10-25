@@ -263,7 +263,8 @@ class MaterialLibrary {
 		mat.depthWrite = false;
 		mat.side = THREE.DoubleSide;
 		mat.userData.twoSided = true;
-		mat.userData.textureless = true;
+		// (models' own copies are made once there's a texture: wait for the tint's)
+		mat.userData.textureless = !info.refractTintTexture;
 		mat.vertexColors = false;
 		mat.blending = THREE.CustomBlending;
 		mat.blendEquation = THREE.AddEquation;
@@ -279,7 +280,10 @@ class MaterialLibrary {
 		mat.needsUpdate = true;
 		if (info.refractTintTexture) {
 			this.textures.get(info.refractTintTexture).then(tex => {
-				if (!tex) return;
+				if (!tex) {
+					mat.userData.textureless = true;
+					return;
+				}
 				mat.map = tex;
 				mat.needsUpdate = true;
 				this.onChange();

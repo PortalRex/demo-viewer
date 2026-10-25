@@ -282,6 +282,8 @@ const NEUTRAL: ModelLighting = {cube: new Array(18).fill(0.1), lights: []};
 // share one); its texture and settings are copied from the shared one
 export function ownLitMaterial(shared: THREE.Material): THREE.Material {
 	const m = shared.clone();
+	// (three's copy leaves out a built-in material's defines: Refract, goo...)
+	m.defines = {...shared.defines};
 	m.userData = {ambientLit: true, modelEnv: shared.userData.modelEnv, selfIllum: shared.userData.selfIllum, phong: shared.userData.phong};
 	hook(m, false);
 	return m;
