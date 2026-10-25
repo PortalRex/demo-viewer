@@ -2,7 +2,7 @@
 // geometry (static props, which the game draws posed with sequence 0), and
 // live skinned models for animated entities.
 import * as THREE from 'three';
-import type {Skeleton, Pose} from '../game/anim.ts';
+import type {Skeleton, Pose, Gesture} from '../game/anim.ts';
 import {referencePose, samplePose} from '../game/anim.ts';
 import type {ModelGroup} from '../game/mdl.ts';
 
@@ -96,11 +96,11 @@ export class AnimatedModel {
 		this.setPose(0, 0);
 	}
 
-	setPose(sequence: number, cycle: number, params?: Record<string, number>) {
-		const key = `${sequence}:${cycle.toFixed(4)}:${params ? Object.values(params).map(v => v.toFixed(1)).join(',') : ''}`;
+	setPose(sequence: number, cycle: number, params?: Record<string, number>, gestures: Gesture[] = []) {
+		const key = `${sequence}:${cycle.toFixed(4)}:${params ? Object.values(params).map(v => v.toFixed(1)).join(',') : ''}:${gestures.map(g => `${g.seq}/${g.cycle.toFixed(3)}/${g.weight.toFixed(2)}`).join(',')}`;
 		if (key === this.last) return;
 		this.last = key;
-		samplePose(this.sk, sequence, cycle, this.pose, params);
+		samplePose(this.sk, sequence, cycle, this.pose, params, gestures);
 		this.bones.forEach((bone, i) => {
 			bone.position.fromArray(this.pose.pos, i * 3);
 			bone.quaternion.fromArray(this.pose.quat, i * 4);

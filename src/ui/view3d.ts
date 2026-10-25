@@ -12,7 +12,7 @@ import {readVtfCube, decodeVtf, VtfFormat} from '../game/vtf.ts';
 import {loadModel} from '../game/mdl.ts';
 import type {StudioModel, ModelGroup} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
-import type {Skeleton} from '../game/anim.ts';
+import type {Gesture, Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
@@ -66,6 +66,8 @@ const HOLD_MAX = 120;
 const HOLD_OFFSET = new THREE.Vector3(70, 0, -15);
 // an angle in [-180, 180)
 const normPitch = (p: number) => ((p + 180) % 360 + 360) % 360 - 180;
+// (the same wrap, for yaws: AngleNormalize)
+const normYaw = normPitch;
 
 function geometry(m: MeshData) {
 	const g = new THREE.BufferGeometry();
@@ -511,6 +513,19 @@ interface ModelAsset {
 	model: StudioModel;
 	skeleton: Skeleton | null;
 	parts: {group: ModelGroup; raw: THREE.BufferGeometry; baked: THREE.BufferGeometry; material: THREE.Material; name: string}[];
+}
+
+// a player's animation, tick by tick from their track's first (see playerMotion)
+interface PlayerMotion {
+	start: number;
+	land: number;            // the landing gesture's sequence (-1: none)
+	seq: Int16Array;
+	phase: Float64Array;     // the sequence's cycle (unwrapped)
+	moveX: Float32Array;
+	moveY: Float32Array;
+	landAt: Int32Array;      // the tick index of the latest landing (-1: none yet)
+	feetYaw: Float32Array;
+	bodyYaw: Float32Array;   // the body_yaw pose parameter
 }
 
 // a model's parsed data, kept from map to map (the materials are the map's)
@@ -2748,20 +2763,37 @@ export class View3D {
 	// animation state does: idle, run or crouch-walk (blended by direction
 	// relative to where they face), or floating in the air; the upper body
 	// aims where they look (the sequences' aim-matrix layer)
-	private playerAnim(t: EntityTrack, tick: number, sk: Skeleton): [number, number, Record<string, number>] {
+	private playerAnim(t: EntityTrack, tick: number, sk: Skeleton): {seq: number; cycle: number; params: Record<string, number>; gestures: Gesture[]; feetYaw: number} {
 		const m = this.playerMotion(t, sk);
 		// (ticks between network updates are fractional)
 		const i = Math.min(m.seq.length - 1, Math.max(0, Math.floor(tick) - m.start)) || 0;
 		const k = keyAt(t, tick)!;
 		const c = m.phase[i];
-		return [m.seq[i], c - Math.floor(c), {move_x: m.moveX[i], move_y: m.moveY[i], body_pitch: -normPitch(k.angles[0]), body_yaw: 0}];
+		// the landing gesture, once through (blending in and out)
+		const gestures: Gesture[] = [];
+		if (m.landAt[i] >= 0 && m.land >= 0) {
+			const s = sk.sequences[m.land];
+			const elapsed = (i - m.landAt[i]) * this.interval;
+			const length = 1 / sequenceRate(sk, m.land);
+			if (elapsed < length) {
+				const weight = Math.min(1, s.fadeIn > 0 ? elapsed / s.fadeIn : 1, s.fadeOut > 0 ? (length - elapsed) / s.fadeOut : 1);
+				gestures.push({seq: m.land, cycle: elapsed / length, weight});
+			}
+		}
+		const params = {move_x: m.moveX[i], move_y: m.moveY[i], body_pitch: -normPitch(k.angles[0]), body_yaw: m.bodyYaw[i]};
+		return {seq: m.seq[i], cycle: c - Math.floor(c), params, gestures, feetYaw: m.feetYaw[i]};
 	}
 
-	// a player's movement animation for every tick of their track: the
-	// sequence, its direction, and its cycle (advanced tick by tick at the
-	// speed-matched rate, so speed changes don't jump the legs)
-	private motions = new WeakMap<EntityTrack, {start: number; seq: Int16Array; phase: Float64Array; moveX: Float32Array; moveY: Float32Array}>();
-	private playerMotion(t: EntityTrack, sk: Skeleton) {
+	// A player's animation for every tick of their track, as the game's
+	// player animation state (CPortalPlayerAnimState) picks it: idle, run or
+	// crouch-walk by speed (the cycle advanced at the speed-matched rate, so
+	// speed changes don't jump the legs); in the air the jump's start for
+	// 0.2 s, then the air walk; floating in a funnel, a long fall after one;
+	// the landing gesture on touching down. The feet stay put while standing
+	// until the view turns 45 degrees past them, then catch up (moving, they
+	// follow the view); the upper body turns the rest (body_yaw).
+	private motions = new WeakMap<EntityTrack, PlayerMotion>();
+	private playerMotion(t: EntityTrack, sk: Skeleton): PlayerMotion {
 		const have = this.motions.get(t);
 		if (have) return have;
 		const seqs = new Map(sk.sequences.map((s, i) => [s.label, i]));
@@ -2772,14 +2804,41 @@ export class View3D {
 			}
 			return 0;
 		};
-		// Chell's float is portalgun_jump_float, the robots' portalgun_jumpfloat
-		const FLOAT = pick('portalgun_jump_float', 'portalgun_jumpfloat'), RUN = pick('portalgun_run'), CROUCHWALK = pick('portalgun_crouchwalk');
+		// by activity: the holding-the-gun version where there's one
+		const act = (name: string, fallback: number) => {
+			const i = sk.sequences.findIndex(s => s.activity === `${name}_PRIMARY`);
+			const j = i >= 0 ? i : sk.sequences.findIndex(s => s.activity === name);
+			return j >= 0 ? j : fallback;
+		};
+		const RUN = pick('portalgun_run'), CROUCHWALK = pick('portalgun_crouchwalk');
 		const IDLE = pick('portalgun_standing_idle'), CROUCH = pick('portalgun_crouch_idle');
+		// (Chell's float is portalgun_jump_float, the robots' portalgun_jumpfloat)
+		const FLOAT = act('ACT_MP_JUMP_FLOAT', pick('portalgun_jump_float', 'portalgun_jumpfloat'));
+		const JUMP = act('ACT_MP_JUMP_START', FLOAT), AIRWALK = act('ACT_MP_AIRWALK', FLOAT);
+		const TRACTOR = act('ACT_MP_TRACTORBEAM_FLOAT', FLOAT), LONG_FALL = act('ACT_MP_LONG_FALL', FLOAT);
+		const LAND = act('ACT_MP_JUMP_LAND', -1);
+		const funnels = this.entities!.tracks.filter(f => f.className === 'CTrigger_TractorBeam');
+		const inFunnel = (tick: number, p: number[]) => funnels.some(f => {
+			const fk = keyAt(f, tick);
+			const e = fk?.extra;
+			if (!fk || fk.removed || !e || Number(e.m_bDisabled) === 1) return false;
+			const a = vec3(e.m_vStart), b = vec3(e.m_vEnd);
+			if (!a || !b) return false;
+			// (the player's middle within the column)
+			const mid = new THREE.Vector3(p[0], p[1], p[2] + 36);
+			return new THREE.Line3(a, b).closestPointToPoint(mid, true, new THREE.Vector3()).distanceTo(mid) < (Number(e.m_flRadius) || 55);
+		});
+
 		const start = t.keys[0].tick, n = Math.max(1, t.keys[t.keys.length - 1].tick - start + 1);
-		const seq = new Int16Array(n), phase = new Float64Array(n), moveX = new Float32Array(n), moveY = new Float32Array(n);
-		let ki = 0, cycle = 0;
+		const m: PlayerMotion = {
+			start, land: LAND, seq: new Int16Array(n), phase: new Float64Array(n), moveX: new Float32Array(n), moveY: new Float32Array(n),
+			landAt: new Int32Array(n).fill(-1), feetYaw: new Float32Array(n), bodyYaw: new Float32Array(n),
+		};
+		let ki = 0, cycle = 0, last = -1, landAt = -1;
+		let jumping = false, jumpStart = 0, inAirWalk = false, landing = false, wasInFunnel = false, wasOnGround = true;
+		let feet = NaN, goalFeet = NaN;
 		for (let i = 0; i < n; i++) {
-			const tick = start + i;
+			const tick = start + i, now = i * this.interval;
 			while (ki + 1 < t.keys.length && t.keys[ki + 1].tick <= tick) ki++;
 			const k = t.keys[ki];
 			const before = keyAt(t, tick - 6) ?? k;
@@ -2788,22 +2847,79 @@ export class View3D {
 			const speed = Math.hypot(v[0], v[1]);
 			const flags = Number(k.extra?.m_fFlags ?? NaN);
 			// FL_ONGROUND and FL_DUCKING when recorded, else guessed from motion
-			const air = Number.isNaN(flags) ? Math.abs(v[2]) > 40 : !(flags & 1);
+			const onGround = Number.isNaN(flags) ? Math.abs(v[2]) <= 40 : (flags & 1) !== 0;
 			const crouched = Number.isNaN(flags) ? k.eyeZ !== undefined && k.eyeZ < 50 : !!(flags & 2);
+			const tractorHandle = Number(k.extra?.['m_PortalLocal.m_hTractorBeam'] ?? NaN);
+			const inTractor = Number.isNaN(tractorHandle) ? !onGround && inFunnel(tick, k.origin) : tractorHandle >= 0 && (tractorHandle & 2047) !== 2047;
+
+			// a jump (the animation event the client gets): leaving the ground
+			// going up; it starts the jump's sequence over
+			let restart = false;
+			if (wasOnGround && !onGround && v[2] > 100) {
+				inAirWalk = false;
+				landing = false;
+				jumping = true;
+				jumpStart = now;
+				restart = true;
+			}
+			wasOnGround = onGround;
+
 			let s: number, rate = 1;
-			if (air) s = FLOAT;
+			// the base: jumping, ducking, or by speed
+			if (jumping && now - jumpStart > 0.2) {
+				jumping = false;
+				inAirWalk = true;
+			}
+			if (jumping) s = JUMP;
+			else if (!onGround && inAirWalk) s = AIRWALK;
 			else if (speed > 15) {
 				s = crouched ? CROUCHWALK : RUN;
 				rate = Math.min(2, Math.max(0.4, speed / (crouched ? 63 : 175)));
 				const yaw = k.angles[1] * Math.PI / 180;
-				moveX[i] = (v[0] * Math.cos(yaw) + v[1] * Math.sin(yaw)) / speed;
-				moveY[i] = (-v[0] * Math.sin(yaw) + v[1] * Math.cos(yaw)) / speed;
+				m.moveX[i] = (v[0] * Math.cos(yaw) + v[1] * Math.sin(yaw)) / speed;
+				m.moveY[i] = (-v[0] * Math.sin(yaw) + v[1] * Math.cos(yaw)) / speed;
 			} else s = crouched ? CROUCH : IDLE;
-			seq[i] = s;
+			// then Portal's: landing, the funnel, the air
+			if (landing && onGround) {
+				jumping = inAirWalk = landing = wasInFunnel = false;
+				restart = true;
+				landAt = i;
+			} else if (inTractor) {
+				wasInFunnel = true;
+				s = TRACTOR;
+			} else if (!onGround && wasInFunnel) {
+				landing = true;
+				s = LONG_FALL;
+			} else if (!onGround && (v[2] > 300 || inAirWalk)) {
+				jumping = false;
+				inAirWalk = landing = true;
+				s = AIRWALK;
+			}
+			if (s !== last || restart) cycle = 0;
+			last = s;
+			m.seq[i] = s;
 			cycle += this.interval * sequenceRate(sk, s) * rate;
-			phase[i] = cycle;
+			m.phase[i] = cycle;
+			m.landAt[i] = landAt;
+
+			// the feet (ComputePoseParam_AimYaw, ConvergeYawAngles at 720/s)
+			const eye = k.angles[1];
+			if (Number.isNaN(feet)) feet = goalFeet = eye;
+			if (Math.hypot(v[0], v[1], v[2]) > 1) goalFeet = eye;
+			else {
+				const delta = normYaw(goalFeet - eye);
+				if (Math.abs(delta) > 45) goalFeet += delta > 0 ? -45 : 45;
+			}
+			goalFeet = normYaw(goalFeet);
+			if (goalFeet !== feet) {
+				// (the engine takes the size of the turn before wrapping it)
+				const deltaAbs = Math.abs(goalFeet - feet), delta = normYaw(goalFeet - feet);
+				const step = 720 * this.interval * Math.min(1, Math.max(0.01, deltaAbs / 60));
+				feet = deltaAbs < step ? goalFeet : normYaw(feet + (delta < 0 ? -step : step));
+			}
+			m.feetYaw[i] = feet;
+			m.bodyYaw[i] = -normYaw(eye - feet);
 		}
-		const m = {start, seq, phase, moveX, moveY};
 		this.motions.set(t, m);
 		return m;
 	}
@@ -3077,15 +3193,18 @@ export class View3D {
 					if (anim && k.anim) {
 						const [seq, cycle] = this.animAt(t, tick, o.userData.skeleton);
 						anim.setPose(seq, cycle);
-					} else if (anim && t.className === 'CPortal_Player') {
-						const [seq, cycle, params] = this.playerAnim(t, tick, o.userData.skeleton);
-						anim.setPose(seq, cycle, params);
+					}
+					let feetYaw: number | null = null;
+					if (anim && !k.anim && t.className === 'CPortal_Player') {
+						const a = this.playerAnim(t, tick, o.userData.skeleton);
+						anim.setPose(a.seq, a.cycle, a.params, a.gestures);
+						feetYaw = a.feetYaw;
 					}
 					// between network updates, moving things are interpolated
 					const pose = this.entityPose(t, tick);
 					o.position.copy(pose.origin);
-					// players turn with their view but don't tilt
-					o.rotation.copy(toEuler(t.className === 'CPortal_Player' ? [0, pose.angles[1], 0] : pose.angles));
+					// players face where their feet point (see playerMotion) and don't tilt
+					o.rotation.copy(toEuler(t.className === 'CPortal_Player' ? [0, feetYaw ?? pose.angles[1], 0] : pose.angles));
 					if (o.userData.portalSurface) {
 						const e = k.extra ?? {};
 						const surface = o.userData.portalSurface as THREE.Mesh;

@@ -28,6 +28,7 @@ interface AnimDesc {
 
 export interface Sequence {
 	label: string;
+	activity: string;       // its activity's name (ACT_...), upper case; '' if none
 	looping: boolean;
 	anim: AnimDesc | null;  // the first blend
 	// blend grid over up to two pose parameters (e.g. a run's move_x/move_y):
@@ -42,6 +43,15 @@ export interface Sequence {
 	post: boolean;
 	weights: Float32Array | null;      // per (main model) bone; null = all 1
 	autolayers: string[];              // sequences layered on top (by label)
+	fadeIn: number;                    // seconds a gesture of it blends in and out over
+	fadeOut: number;
+}
+
+// a sequence played over the main one (a gesture: a landing), at its weight
+export interface Gesture {
+	seq: number;
+	cycle: number;
+	weight: number;
 }
 
 interface SourceModel {
@@ -169,6 +179,7 @@ function readSequences(src: SourceModel): Sequence[] {
 		}
 		out.push({
 			label: cstr(src.bytes, o + v.getInt32(o + 4, true)).toLowerCase(),
+			activity: cstr(src.bytes, o + v.getInt32(o + 8, true)).toUpperCase(),
 			looping: (flags & STUDIO_LOOPING) !== 0,
 			delta: (flags & STUDIO_DELTA) !== 0,
 			post: (flags & STUDIO_POST) !== 0,
@@ -177,6 +188,7 @@ function readSequences(src: SourceModel): Sequence[] {
 			blends, groupSize,
 			params: [poseName(v.getInt32(o + 76, true)), poseName(v.getInt32(o + 80, true))],
 			paramRange: [[v.getFloat32(o + 84, true), v.getFloat32(o + 92, true)], [v.getFloat32(o + 88, true), v.getFloat32(o + 96, true)]],
+			fadeIn: v.getFloat32(o + 104, true), fadeOut: v.getFloat32(o + 108, true),
 		});
 	}
 	return out;
@@ -519,7 +531,8 @@ function addDelta(out: Pose, d: Pose, s: Sequence, weight: number, n: number) {
 }
 
 // A sequence's pose with its auto-layers (e.g. an aim matrix over a run)
-export function samplePose(sk: Skeleton, seq: number, cycle: number, out: Pose, params?: Record<string, number>) {
+// (and gestures over all of it)
+export function samplePose(sk: Skeleton, seq: number, cycle: number, out: Pose, params?: Record<string, number>, gestures: Gesture[] = []) {
 	const ref = (sk.ref ??= referencePose(sk));
 	const s = sk.sequences[seq];
 	if (!s) {
@@ -528,23 +541,36 @@ export function samplePose(sk: Skeleton, seq: number, cycle: number, out: Pose, 
 		return;
 	}
 	sampleSequence(sk, s, cycle, out, params, 0);
-	if (!s.autolayers.length) return;
-	const labels = ((sk as Skeleton & {labelIndex?: Map<string, number>}).labelIndex ??= new Map(sk.sequences.map((q, i) => [q.label, i])));
 	const layer = scratch(sk, 3);
-	for (const name of s.autolayers) {
-		const l = sk.sequences[labels.get(name) ?? -1];
-		if (!l || l === s) continue;
-		sampleSequence(sk, l, cycle, layer, params, 4);
-		if (l.delta) addDelta(out, layer, l, 1, sk.bones.length);
-		else {
-			// a full layer replaces what's under it, by bone weight
-			for (let i = 0; i < sk.bones.length; i++) {
-				const w = l.weights?.[i] ?? 1;
-				if (w <= 0) continue;
-				for (let k = 0; k < 3; k++) out.pos[i * 3 + k] += (layer.pos[i * 3 + k] - out.pos[i * 3 + k]) * w;
-				slerp(out.quat, layer.quat, i * 4, w);
-			}
+	if (s.autolayers.length) {
+		const labels = ((sk as Skeleton & {labelIndex?: Map<string, number>}).labelIndex ??= new Map(sk.sequences.map((q, i) => [q.label, i])));
+		for (const name of s.autolayers) {
+			const l = sk.sequences[labels.get(name) ?? -1];
+			if (!l || l === s) continue;
+			sampleSequence(sk, l, cycle, layer, params, 4);
+			addLayer(sk, out, layer, l, 1);
 		}
+	}
+	for (const g of gestures) {
+		const l = sk.sequences[g.seq];
+		if (!l || g.weight <= 0) continue;
+		sampleSequence(sk, l, g.cycle, layer, params, 4);
+		addLayer(sk, out, layer, l, g.weight);
+	}
+}
+
+// a layer added onto a pose: a delta added, a full layer replacing what's
+// under it, by bone weight
+function addLayer(sk: Skeleton, out: Pose, layer: Pose, l: Sequence, weight: number) {
+	if (l.delta) {
+		addDelta(out, layer, l, weight, sk.bones.length);
+		return;
+	}
+	for (let i = 0; i < sk.bones.length; i++) {
+		const w = weight * (l.weights?.[i] ?? 1);
+		if (w <= 0) continue;
+		for (let k = 0; k < 3; k++) out.pos[i * 3 + k] += (layer.pos[i * 3 + k] - out.pos[i * 3 + k]) * w;
+		slerp(out.quat, layer.quat, i * 4, w);
 	}
 }
 
