@@ -1,6 +1,6 @@
 // Static prop vertex lighting (.vhv, in a map's pak file as sp_hdr_<n>.vhv or
 // sp_<n>.vhv): vrad's light at every vertex of each LOD 0 mesh, as BGR bytes
-// (gamma-encoded and halved: linear^(1/2.2) x 2) and the sun's share in A.
+// (gamma-encoded and halved: linear^(1/2.2) x 0.5) and the sun's share in A.
 
 export interface VertexLighting {
 	checksum: number;            // the model's

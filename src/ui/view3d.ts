@@ -71,7 +71,7 @@ const LIGHTMAP_EXPOSURE = 2;
 
 // a static prop's stored vertex light (a byte) as linear light, in the
 // lightmaps' units
-const vertexLight = (b: number) => Math.pow(b / 255 / 2, 2.2);
+const vertexLight = (b: number) => Math.pow(b / 255 * 2, 2.2);
 
 // three.js materials for the map's materials: textured once the texture
 // loads (flat colour until then), lit by the lightmap atlas for the world
@@ -706,7 +706,7 @@ export class View3D {
 				const vl = light.meshes[Math.floor(mv[i] / 1048576)];
 				const k = (mv[i] % 1048576) * 4;
 				if (!vl || k + 3 > vl.length) return null;
-				// stored BGRA, as vrad writes vertex light: linear^(1/2.2) x 2
+				// stored BGRA, as vrad writes vertex light: linear^(1/2.2) x 0.5
 				colors[i * 3] = vertexLight(vl[k + 2]);
 				colors[i * 3 + 1] = vertexLight(vl[k + 1]);
 				colors[i * 3 + 2] = vertexLight(vl[k]);
@@ -1596,6 +1596,19 @@ export class View3D {
 			for (const o of overlays) o.visible = false;
 			r.setRenderTarget(this.meter);
 			r.render(this.scene, this.camera);
+			// the view model counts too (the game meters the whole frame, and
+			// the gun is often its brightest part)
+			if (this.mode === 'eyes' && this.vmShown) {
+				this.vmCam.position.copy(this.camera.position);
+				this.vmCam.quaternion.copy(this.camera.quaternion);
+				this.vmCam.aspect = this.camera.aspect;
+				this.vmCam.updateProjectionMatrix();
+				const auto = r.autoClear;
+				r.autoClear = false;
+				r.clearDepth();
+				r.render(this.vmScene, this.vmCam);
+				r.autoClear = auto;
+			}
 			r.setRenderTarget(null);
 			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
