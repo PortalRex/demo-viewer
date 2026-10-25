@@ -70,6 +70,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)
 	CEnvProjectedTexture: ['m_hTargetEntity', 'm_bCameraSpace', 'm_bState', 'm_flLightFOV', 'm_LightColor', 'm_flBrightnessScale', 'm_SpotlightTextureName', 'm_flNearZ', 'm_flFarZ', 'm_bEnableShadows', 'm_bLightWorld'],
+	// ropes: their ends and how they hang (see Ropes)
+	CRopeKeyframe: ['m_hStartPoint', 'm_hEndPoint', 'm_iStartAttachment', 'm_iEndAttachment', 'm_Slack', 'm_RopeLength', 'm_fLockedPoints', 'm_RopeFlags', 'm_nSegments', 'm_Subdiv', 'm_TextureScale', 'm_Width'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax', 'm_bUseCustomBloomScale', 'm_flCustomBloomScale'],
 };
 
@@ -196,7 +198,8 @@ function fieldsFor(cls: ServerClass): ClassFields {
 		cell: [find(cls, 'm_cellbits'), find(cls, 'm_cellX'), find(cls, 'm_cellY'), find(cls, 'm_cellZ')],
 		cellOrigin: origin >= 0 && (cls.flat[origin].prop.flags & (F.CELLCOORD | F.CELLCOORDLP | F.CELLCOORDINT)) !== 0,
 		angles: find(cls, 'm_angRotation', 'm_angAbsRotation'),
-		model: find(cls, 'm_nModelIndex'),
+		// (a rope's material is in the model table too)
+		model: cls.name === 'CRopeKeyframe' ? find(cls, 'm_iRopeMaterialModelIndex') : find(cls, 'm_nModelIndex'),
 		effects: find(cls, 'm_fEffects'),
 		mins: find(cls, 'm_Collision.m_vecMins', 'm_vecMins'),
 		maxs: find(cls, 'm_Collision.m_vecMaxs', 'm_vecMaxs'),

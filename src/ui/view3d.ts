@@ -23,6 +23,7 @@ import {TextureCache, compressedSupport} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
 import {PaintBlobs, type Sprayer} from './paintblobs.ts';
+import {Ropes, type RopeSpec} from './ropes.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
@@ -893,6 +894,10 @@ export class View3D {
 			return hit && hit.distance <= len ? hit.distance : Infinity;
 		});
 		this.scene.add(this.paintBlobs.group);
+		this.ropes?.dispose();
+		if (this.ropes) this.scene.remove(this.ropes.group);
+		this.ropes = this.effects ? new Ropes(this.effects) : null;
+		if (this.ropes) this.scene.add(this.ropes.group);
 		this.loadSky(bsp, token);
 		this.worldFog = this.scene.fog as THREE.Fog | null;
 
@@ -1391,6 +1396,7 @@ export class View3D {
 		disposeOwn(this.entityGroup);
 		this.turretLasers.clear();
 		this.paintBlobs?.clear();
+		this.ropes?.clear();
 		this.windowedKids = [];
 		this.entityGroup.clear();
 		this.frozen.clear();
@@ -1650,6 +1656,49 @@ export class View3D {
 			});
 		}
 		this.paintBlobs.update(sprayers, tick * this.interval);
+	}
+
+	// ropes and cables: each from its start entity (or attachment) to its
+	// end's, hung by Ropes; lit by the light at their nodes (the ambient
+	// cube's average, as rope_averagelight 1)
+	private ropes: Ropes | null = null;
+	private updateRopes(tick: number) {
+		if (!this.ropes) return;
+		const amb = this.bsp?.ambient;
+		const point = (handle: number, attachment: number): THREE.Vector3 | null => {
+			const index = handle & 2047;
+			if (handle < 0 || index === 2047) return null;
+			if (attachment > 0) {
+				const m = this.attachmentAt(index, attachment, tick, false);
+				if (m) return new THREE.Vector3().setFromMatrixPosition(m);
+			}
+			for (const t of this.tracksByIndex.get(index) ?? []) if (keyAt(t, tick)) return this.entityPose(t, tick).origin.clone();
+			return null;
+		};
+		const light = (p: THREE.Vector3): [number, number, number] => {
+			const cube = amb?.at([p.x, p.y, p.z]).cube;
+			if (!cube) return [0.3, 0.3, 0.3];
+			const c: [number, number, number] = [0, 0, 0];
+			for (let f = 0; f < 6; f++) for (let i = 0; i < 3; i++) c[i] += cube[f * 3 + i] / 6 * AMBIENT_SCALE;
+			return c;
+		};
+		const specs: RopeSpec[] = [];
+		for (const t of this.entities!.tracks) {
+			if (t.className !== 'CRopeKeyframe') continue;
+			const k = keyAt(t, tick);
+			if (!k || k.removed || k.nodraw) continue;
+			const e = k.extra ?? {};
+			const start = point(Number(e.m_hStartPoint ?? -1), Number(e.m_iStartAttachment ?? 0)) ?? this.entityPose(t, tick).origin.clone();
+			const end = point(Number(e.m_hEndPoint ?? -1), Number(e.m_iEndAttachment ?? 0));
+			const locked = Number(e.m_fLockedPoints ?? 3);
+			specs.push({
+				key: `${t.index}:${t.serial}`, start, end, startLocked: (locked & 1) !== 0, endLocked: (locked & 2) !== 0,
+				length: Number(e.m_RopeLength ?? 0), slack: Number(e.m_Slack ?? 0), segments: Number(e.m_nSegments ?? 5),
+				subdiv: Number(e.m_Subdiv ?? 2), width: Number(e.m_Width ?? 2), textureScale: Number(e.m_TextureScale ?? 4),
+				material: (k.model ?? t.model).replace(/\.vmt$/i, '') || 'cable/cable', light,
+			});
+		}
+		this.ropes.update(specs);
 	}
 
 	// Turrets' laser sights (C_NPC_Portal_FloorTurret): a thin red beam from
@@ -2935,6 +2984,7 @@ export class View3D {
 		if (ents) this.placeAttached(tick);
 		if (ents) this.updateTurretLasers(tick);
 		if (ents) this.updatePaintBlobs(tick);
+		if (ents) this.updateRopes(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
