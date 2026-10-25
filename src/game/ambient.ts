@@ -93,6 +93,38 @@ export class AmbientLighting {
 		return {cube: out, lights: this.lightsAt(p, out, visible, style)};
 	}
 
+	// The switchable lights (light styles) reaching a static prop: vrad
+	// leaves them out of static props' vertex light and the engine adds them
+	// at the prop's lighting origin as it runs (its light cache), so these
+	// are each light's position and colour there, at its style's value
+	switchableAt(p: number[], visible: (from: number[], to: [number, number, number]) => boolean, style: (s: number) => number): ModelLight['lights'] {
+		const out: ModelLight['lights'] = [];
+		for (const l of this.lights) {
+			if (!l.style || (l.type !== 1 && l.type !== 2)) continue;
+			const k = this.reach(l, p) * style(l.style);
+			if (k <= 0) continue;
+			const color: [number, number, number] = [l.color[0] * k, l.color[1] * k, l.color[2] * k];
+			if (color[0] + color[1] + color[2] < 1e-5 || !visible(p, l.origin)) continue;
+			out.push({pos: l.origin, color});
+		}
+		return out;
+	}
+
+	// a point or spot light's falloff (and cone) at a point
+	private reach(l: WorldLight, p: number[]): number {
+		const d = [l.origin[0] - p[0], l.origin[1] - p[1], l.origin[2] - p[2]];
+		const dist = Math.hypot(d[0], d[1], d[2]);
+		if (l.radius > 0 && dist > l.radius) return 0;
+		let k = 1 / Math.max(1e-3, l.attn[0] + l.attn[1] * dist + l.attn[2] * dist * dist);
+		if (l.type === 2) {
+			const dot = -(d[0] * l.normal[0] + d[1] * l.normal[1] + d[2] * l.normal[2]) / Math.max(dist, 1e-3);
+			if (dot <= l.stopdot2) return 0;
+			if (dot < l.stopdot) k *= (dot - l.stopdot2) / Math.max(1e-3, l.stopdot - l.stopdot2);
+			if (l.exponent > 0) k *= Math.pow(Math.max(dot, 0), l.exponent);
+		}
+		return k;
+	}
+
 	private cubeAt(p: number[]): number[] | null {
 		const cube = new Array(18).fill(0);
 		let leaf = this.leafAt(p);

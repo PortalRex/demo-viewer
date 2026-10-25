@@ -116,6 +116,7 @@ export interface StaticProp {
 	angles: [number, number, number];
 	skin: number;
 	index: number;  // in the map's list (its vertex lighting file is sp_hdr_<index>.vhv)
+	flags: number;  // STATIC_PROP_* (0x2 use lighting origin, 0x40 no per-vertex lighting...)
 }
 
 // A lit world face, for painting: where its luxels are in the lightmap atlas
@@ -716,6 +717,7 @@ async function readStaticProps(fs: GameFS, path: string, lump: {offset: number; 
 				angles: [f(12), f(16), f(20)],
 				model: dict[v.getUint16(p + 24, true)] ?? '',
 				skin: size >= 36 ? v.getInt32(p + 32, true) : 0,
+				flags: v.getUint8(p + 31),
 			});
 		}
 		return props;

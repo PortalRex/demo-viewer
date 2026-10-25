@@ -863,7 +863,8 @@ export class View3D {
 				pak ? pak.read(`sp_hdr_${prop.index}.vhv`).then(b => b ?? pak.read(`sp_${prop.index}.vhv`)) : null,
 			]).then(([asset, vhv]) => {
 				if (!asset || token !== this.mapToken) return;
-				const o = this.litProp(asset, vhv) ?? this.staticObject(asset);
+				const world = new THREE.Matrix4().compose(new THREE.Vector3(...prop.origin), new THREE.Quaternion().setFromEuler(toEuler(prop.angles)), new THREE.Vector3(1, 1, 1));
+				const o = this.litProp(asset, vhv, world) ?? this.staticObject(asset);
 				o.position.set(...prop.origin);
 				o.rotation.copy(toEuler(prop.angles));
 				o.updateMatrixWorld(true);
@@ -1203,9 +1204,20 @@ export class View3D {
 	}
 
 	// a static prop with its baked vertex light, or null without (usable) data
-	private litProp(asset: ModelAsset, vhv: Uint8Array | null): THREE.Object3D | null {
+	private litProp(asset: ModelAsset, vhv: Uint8Array | null, world: THREE.Matrix4): THREE.Object3D | null {
 		const light = vhv ? readVhv(vhv) : null;
 		if (!light || light.checksum !== asset.model.checksum || !this.library) return null;
+		// the switchable lights that reach it (left out of the .vhv), at its
+		// middle, lighting each vertex by its normal
+		const box = new THREE.Box3();
+		for (const part of asset.parts) {
+			part.raw.computeBoundingBox();
+			if (part.raw.boundingBox) box.union(part.raw.boundingBox);
+		}
+		const centre = (box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3())).applyMatrix4(world);
+		const switchable = this.bsp?.ambient?.switchableAt([centre.x, centre.y, centre.z], this.lightReaches, this.styleNow) ?? [];
+		const normalMat = new THREE.Matrix3().getNormalMatrix(world);
+		const wp = new THREE.Vector3(), wn = new THREE.Vector3(), l = new THREE.Vector3();
 		const out = new THREE.Group();
 		for (const part of asset.parts) {
 			const mv = part.group.meshVertex;
@@ -1218,6 +1230,20 @@ export class View3D {
 				colors[i * 3] = vertexLight(vl[k + 2]);
 				colors[i * 3 + 1] = vertexLight(vl[k + 1]);
 				colors[i * 3 + 2] = vertexLight(vl[k]);
+			}
+			if (switchable.length) {
+				const pos = part.baked.getAttribute('position'), nrm = part.baked.getAttribute('normal');
+				for (let i = 0; i < mv.length && nrm; i++) {
+					wp.fromBufferAttribute(pos, i).applyMatrix4(world);
+					wn.fromBufferAttribute(nrm, i).applyMatrix3(normalMat).normalize();
+					for (const s of switchable) {
+						const ndl = wn.dot(l.set(s.pos[0] - wp.x, s.pos[1] - wp.y, s.pos[2] - wp.z).normalize());
+						if (ndl <= 0) continue;
+						colors[i * 3] += s.color[0] * ndl;
+						colors[i * 3 + 1] += s.color[1] * ndl;
+						colors[i * 3 + 2] += s.color[2] * ndl;
+					}
+				}
 			}
 			const g = part.baked.clone();
 			g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -2620,6 +2646,7 @@ export class View3D {
 		r.toneMappingExposure = this.exposure;
 		exposureUniforms.sceneExposure.value = this.exposure;
 	}
+	private capturing = false;
 	private meterTarget: number | null = null;
 	private meterPending = false;
 	private meterTick = 0;
@@ -2862,14 +2889,18 @@ export class View3D {
 	private updateFlashlight(tick: number) {
 		const ents = this.entities, r = this.renderer;
 		const u = flashUniforms;
-		let best: {k: EntityKey; d: number} | null = null;
+		// (where it is in the world: lights are often parented, like
+		// Wheatley's flashlight)
+		let best: {k: EntityKey; d: number; m: THREE.Matrix4} | null = null;
 		const cam = this.camera.position;
 		for (const t of ents?.tracks ?? []) {
 			if (t.className !== 'CEnvProjectedTexture') continue;
 			const k = keyAt(t, Math.floor(tick));
 			if (!k || k.removed || Number(k.extra?.m_bState ?? 0) !== 1) continue;
-			const d = cam.distanceTo(new THREE.Vector3(...k.origin));
-			if (!best || d < best.d) best = {k, d};
+			const m = this.worldMatrix(t, k, tick, 0);
+			if (!m) continue;
+			const d = cam.distanceTo(new THREE.Vector3().setFromMatrixPosition(m));
+			if (!best || d < best.d) best = {k, d, m};
 		}
 		if (!best || !r || !this.library) {
 			u.flashOn.value = 0;
@@ -2903,10 +2934,11 @@ export class View3D {
 		fc.far = far;
 		fc.updateProjectionMatrix();
 		// Source's basis: x forward, y left, z up
-		const basis = new THREE.Matrix4().makeRotationFromEuler(toEuler(k.angles));
 		const fwd = new THREE.Vector3(), left = new THREE.Vector3(), up = new THREE.Vector3();
-		basis.extractBasis(fwd, left, up);
-		fc.position.set(k.origin[0], k.origin[1], k.origin[2]);
+		best.m.extractBasis(fwd, left, up);
+		fwd.normalize();
+		up.normalize();
+		fc.position.setFromMatrixPosition(best.m);
 		fc.up.copy(up);
 		fc.lookAt(fc.position.clone().add(fwd));
 		fc.updateMatrixWorld();
@@ -2915,7 +2947,7 @@ export class View3D {
 		u.flashFar.value = far;
 		u.flashShadows.value = Number(e.m_bEnableShadows ?? 1) === 1 ? 1 : 0;
 		u.flashOn.value = 1;
-		const key = `${Math.floor(tick)}|${k.origin.join(',')}|${k.angles.join(',')}|${fc.fov}`;
+		const key = `${Math.floor(tick)}|${fc.position.toArray().join(',')}|${fwd.toArray().join(',')}|${fc.fov}`;
 		if (!u.flashShadows.value || key === this.flashKey) return;
 		this.flashKey = key;
 		const size = 1024;
@@ -3029,7 +3061,8 @@ export class View3D {
 			for (const m of r.compile(this.scene, this.camera)) this.compiling.add(m);
 			for (const m of r.compile(this.vmScene, this.vmCam)) this.compiling.add(m);
 		}
-		const waiting = this.notReady(r);
+		// (a snapshot waits for every shader instead of leaving things out)
+		const waiting = this.capturing ? [] : this.notReady(r);
 		for (const o of waiting) o.visible = false;
 		if (this.bsp) {
 			if (!this.skyCamera) this.sky.position.copy(this.camera.position);
@@ -3212,7 +3245,9 @@ export class View3D {
 		r.setSize(w, h, false);
 		this.camera.aspect = w / h;
 		this.camera.updateProjectionMatrix();
+		this.capturing = true;
 		this.render();
+		this.capturing = false;
 		const url = r.domElement.toDataURL(type, 0.9);
 		r.setSize(size.x, size.y, false);
 		this.camera.aspect = aspect;

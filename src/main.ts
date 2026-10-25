@@ -310,10 +310,25 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 	}
 }
 
-// the challenge mode HUD (Eyes view of a challenge mode recording), as the game draws it
+// the challenge mode HUD (Eyes view of a challenge mode recording), as the
+// game draws it; its toggle shows with it and is remembered per browser
+let cmShown = true;
+try {
+	cmShown = localStorage.getItem('cmHud') !== 'off';
+} catch {}
+$('cm-toggle').classList.toggle('on', cmShown);
+$('cm-toggle').onclick = () => {
+	cmShown = !cmShown;
+	try {
+		localStorage.setItem('cmHud', cmShown ? 'on' : 'off');
+	} catch {}
+	$('cm-toggle').classList.toggle('on', cmShown);
+	render();
+};
 function showCmHud(stats: {portals: number; seconds: number} | null) {
-	$('cm-hud').hidden = !stats;
-	if (!stats) return;
+	$('cm-toggle').hidden = !stats;
+	$('cm-hud').hidden = !stats || !cmShown;
+	if (!stats || !cmShown) return;
 	const cs = Math.floor(stats.seconds * 100 + 1e-6);
 	const pad = (n: number) => String(n).padStart(2, '0');
 	$('cm-portals').textContent = String(stats.portals);
