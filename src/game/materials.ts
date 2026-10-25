@@ -60,11 +60,13 @@ export interface MaterialInfo {
 	unlit: boolean;         // not lightmapped (UnlitGeneric, sprites, ...)
 	alpha: number;          // $alpha
 	color: [number, number, number];  // $color / $color2 tint
+	bumpMap: string;        // $bumpmap (a normal map, or a self-shadowed one with $ssbump)
+	ssbump: boolean;
 }
 
 const MISSING: MaterialInfo = {
 	noPortal: false, translucent: false, liquid: false, found: false, shader: '', baseTexture: '', alphaTest: false,
-	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1],
+	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1], bumpMap: '', ssbump: false,
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -141,6 +143,8 @@ export class Materials {
 			unlit: /unlitgeneric|unlittwotexture|sprite|monitorscreen|^sky$/.test(shader),
 			alpha: p.has('$alpha') ? Number(p.get('$alpha')) || 0 : 1,
 			color: parseColor(p.get('$color')) ?? parseColor(p.get('$color2')) ?? parseColor(p.get('$refracttint')) ?? [1, 1, 1],
+			bumpMap: (p.get('$bumpmap') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			ssbump: truthy(p.get('$ssbump')),
 		};
 	}
 }

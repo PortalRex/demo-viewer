@@ -13,18 +13,18 @@ export class TextureCache {
 		this.maxSize = maxSize;
 	}
 
-	// `path` under materials/, without .vtf
-	get(path: string): Promise<THREE.Texture | null> {
-		const key = path.toLowerCase();
+	// `path` under materials/, without .vtf; `linear`: data, not colour (normal maps)
+	get(path: string, linear = false): Promise<THREE.Texture | null> {
+		const key = path.toLowerCase() + (linear ? '|linear' : '');
 		let p = this.cache.get(key);
 		if (!p) {
-			p = this.load(key).catch(() => null);
+			p = this.load(path.toLowerCase(), linear).catch(() => null);
 			this.cache.set(key, p);
 		}
 		return p;
 	}
 
-	private async load(path: string): Promise<THREE.Texture | null> {
+	private async load(path: string, linear: boolean): Promise<THREE.Texture | null> {
 		const bytes = await this.files.read(`materials/${path}.vtf`);
 		if (!bytes) return null;
 		const img = readVtf(bytes, this.maxSize);
@@ -32,7 +32,7 @@ export class TextureCache {
 		const rgba = decodeVtf(img);
 		const tex = new THREE.DataTexture(rgba, img.width, img.height, THREE.RGBAFormat, THREE.UnsignedByteType);
 		tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-		tex.colorSpace = THREE.SRGBColorSpace;
+		tex.colorSpace = linear ? THREE.NoColorSpace : THREE.SRGBColorSpace;
 		tex.magFilter = THREE.LinearFilter;
 		const pot = (n: number) => (n & (n - 1)) === 0;
 		tex.generateMipmaps = pot(img.width) && pot(img.height);

@@ -39,7 +39,7 @@ export const gooUniforms = {
 };
 
 const GOO_FRAGMENT = `
-#ifdef GOO
+#if defined(GOO) && defined(USE_MAP)
 	{
 		vec2 guv = vDitherWorld.xy / 400.0;
 		float phase = fract(gooTime / 6.0);
@@ -108,10 +108,145 @@ const PAINT_FRAGMENT = `
 	#endif
 `;
 
+// Models that move are lit as the engine lights them: an ambient cube (six
+// colours by normal direction) plus up to two local lights, per object (set
+// just before each draw, as the materials are shared)
+export interface ModelLighting {
+	cube: number[];  // 6 x rgb: +x -x +y -y +z -z, linear lightmap units
+	lights: {pos: number[]; color: number[]}[];
+}
+
+export const AMBIENT_SCALE = 16;  // the lightmap scale (see view3d)
+
+const AMBIENT_FRAGMENT_HEAD = `
+uniform vec3 ambCube[6];
+uniform vec3 ambLightPos[2];
+uniform vec3 ambLightColor[2];
+uniform float ambScale;
+varying vec3 vAmbN;
+`;
+
+const AMBIENT_FRAGMENT = `
+	{
+		vec3 n = normalize(vAmbN);
+		vec3 n2 = n * n;
+		vec3 amb = n2.x * (n.x >= 0.0 ? ambCube[0] : ambCube[1])
+			+ n2.y * (n.y >= 0.0 ? ambCube[2] : ambCube[3])
+			+ n2.z * (n.z >= 0.0 ? ambCube[4] : ambCube[5]);
+		for (int i = 0; i < 2; i++) {
+			vec3 l = ambLightPos[i] - vDitherWorld;
+			amb += ambLightColor[i] * max(dot(n, normalize(l)), 0.0);
+		}
+		reflectedLight.directDiffuse = vec3(0.0);
+		reflectedLight.directSpecular = vec3(0.0);
+		reflectedLight.indirectDiffuse = diffuseColor.rgb * amb * ambScale;
+	}
+`;
+
+const NEUTRAL: ModelLighting = {cube: new Array(18).fill(0.012), lights: []};
+
+// a lit model material of its own for one mesh (three uploads a material's
+// uniforms only when the material changes between draws, so objects can't
+// share one); its texture and settings are copied from the shared one
+export function ownLitMaterial(shared: THREE.Material): THREE.Material {
+	const m = shared.clone();
+	m.userData = {ambientLit: true};
+	hook(m, false);
+	return m;
+}
+
+// draws `mesh` with its object's lighting (userData.lighting on it or an ancestor)
+export function useModelLighting(mesh: THREE.Object3D) {
+	mesh.onBeforeRender = (_r, _s, _c, _g, material) => {
+		const u = (material as THREE.Material).userData.ambUniforms as Record<string, {value: unknown}> | undefined;
+		if (!u) return;
+		let o: THREE.Object3D | null = mesh, lighting: ModelLighting | undefined;
+		while (o && !(lighting = o.userData.lighting as ModelLighting | undefined)) o = o.parent;
+		const l = lighting ?? NEUTRAL;
+		const cube = u.ambCube.value as THREE.Vector3[];
+		for (let i = 0; i < 6; i++) cube[i].set(l.cube[i * 3], l.cube[i * 3 + 1], l.cube[i * 3 + 2]);
+		const pos = u.ambLightPos.value as THREE.Vector3[], col = u.ambLightColor.value as THREE.Vector3[];
+		for (let i = 0; i < 2; i++) {
+			const light = l.lights[i];
+			pos[i].set(light?.pos[0] ?? 0, light?.pos[1] ?? 0, light?.pos[2] ?? 0);
+			col[i].set(light?.color[0] ?? 0, light?.color[1] ?? 0, light?.color[2] ?? 0);
+		}
+		(material as THREE.Material & {uniformsNeedUpdate: boolean}).uniformsNeedUpdate = true;
+	};
+}
+
+// Bump-mapped world surfaces: vrad stores the light arriving along three
+// directions in the face's texture space as well as the flat light; the
+// surface's normal map picks the mix per pixel (as LightmappedGeneric does)
+export const bumpLightUniforms = {
+	bumpLight0: {value: null as THREE.Texture | null},
+	bumpLight1: {value: null as THREE.Texture | null},
+	bumpLight2: {value: null as THREE.Texture | null},
+};
+
+const BUMP_FRAGMENT_HEAD = `
+uniform sampler2D bumpLight0;
+uniform sampler2D bumpLight1;
+uniform sampler2D bumpLight2;
+uniform sampler2D bumpNormal;
+`;
+
+const BUMP_FRAGMENT = `
+		vec3 lmColor = lightMapTexel.rgb;
+	#if defined(BUMPLIGHT) && defined(USE_MAP)
+		{
+			vec3 b0 = texture2D(bumpLight0, vLightMapUv).rgb;
+			vec3 b1 = texture2D(bumpLight1, vLightMapUv).rgb;
+			vec3 b2 = texture2D(bumpLight2, vLightMapUv).rgb;
+			vec3 bn = texture2D(bumpNormal, vMapUv).rgb;
+		#ifdef SSBUMP
+			// self-shadowed: the texture holds each direction's weight directly
+			lmColor = (bn.x * b0 + bn.y * b1 + bn.z * b2) * 0.57735;
+		#else
+			bn = normalize(bn * 2.0 - 1.0);
+			vec3 dp = clamp(vec3(
+				dot(bn, vec3(0.81649658, 0.0, 0.57735027)),
+				dot(bn, vec3(-0.40824830, 0.70710678, 0.57735027)),
+				dot(bn, vec3(-0.40824830, -0.70710678, 0.57735027))), 0.0, 1.0);
+			dp *= dp;
+			lmColor = (dp.x * b0 + dp.y * b1 + dp.z * b2) / max(dp.x + dp.y + dp.z, 1e-4);
+		#endif
+		}
+	#endif
+		reflectedLight.indirectDiffuse += lmColor * lightMapIntensity * RECIPROCAL_PI;
+`;
+
 function hook(material: THREE.Material, paint: boolean) {
+	const lit = !!material.userData.ambientLit;
+	if (lit) {
+		material.userData.ambUniforms = {
+			ambCube: {value: Array.from({length: 6}, () => new THREE.Vector3())},
+			ambLightPos: {value: [new THREE.Vector3(), new THREE.Vector3()]},
+			ambLightColor: {value: [new THREE.Vector3(), new THREE.Vector3()]},
+			ambScale: {value: AMBIENT_SCALE},
+		};
+	}
 	material.onBeforeCompile = shader => {
 		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms);
-		if (paint) Object.assign(shader.uniforms, paintUniforms);
+		if (paint) {
+			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms);
+			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
+			shader.fragmentShader = BUMP_FRAGMENT_HEAD + shader.fragmentShader.replace(
+				'reflectedLight.indirectDiffuse += lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;',
+				BUMP_FRAGMENT,
+			);
+		}
+		if (lit) {
+			Object.assign(shader.uniforms, material.userData.ambUniforms);
+			shader.vertexShader = 'varying vec3 vAmbN;\n' + shader.vertexShader.replace(
+				'#include <defaultnormal_vertex>',
+				'#include <defaultnormal_vertex>\n\tvAmbN = normalize(mat3(modelMatrix) * objectNormal);',
+			);
+			shader.fragmentShader = AMBIENT_FRAGMENT_HEAD + shader.fragmentShader.replace(
+				'#include <lights_fragment_end>',
+				'#include <lights_fragment_end>\n' + AMBIENT_FRAGMENT,
+			);
+		}
 		shader.vertexShader = 'varying vec3 vDitherWorld;\nvarying float vDitherUp;\n' + shader.vertexShader.replace(
 			'#include <project_vertex>',
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n\tvDitherUp = normalize(mat3(modelMatrix) * normal).z;',
@@ -121,7 +256,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

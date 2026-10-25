@@ -16,7 +16,7 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints} from './particles.ts';
-import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
+import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -107,6 +107,7 @@ class MaterialLibrary {
 			if (mat.defines) delete mat.defines.BACKFACE_SHADE;
 		}
 		if (!info.baseTexture) {
+			mat.userData.textureless = true;
 			// refraction only (glass): a faint tint of what's behind
 			if (info.shader === 'refract') {
 				mat.vertexColors = false;
@@ -174,6 +175,16 @@ class MaterialLibrary {
 			if (!info.unlit && this.lightmap) {
 				mat.lightMap = this.lightmap;
 				mat.lightMapIntensity = Math.PI * LIGHTMAP_EXPOSURE;
+				if (info.bumpMap && bumpLightUniforms.bumpLight0.value) {
+					this.textures.get(info.bumpMap, true).then(tex => {
+						if (!tex) return;
+						mat.userData.bumpNormal = tex;
+						mat.defines = {...mat.defines, BUMPLIGHT: ''};
+						if (info.ssbump) mat.defines.SSBUMP = '';
+						mat.needsUpdate = true;
+						this.onChange();
+					});
+				}
 			}
 			this.apply(mat, info);
 			this.applyBackFaces(mat);
@@ -198,6 +209,8 @@ class MaterialLibrary {
 			mat.color.setScalar(LIGHTMAP_EXPOSURE);
 		} else {
 			mat = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
+			// lit per object from the map's ambient cubes and lights (see View3D.lightModels)
+			mat.userData.ambientLit = true;
 		}
 		hookModelMaterial(mat);
 		cache.set(key, mat);
@@ -261,6 +274,7 @@ export class View3D {
 	private fizzlers = new Map<string, THREE.ShaderMaterial>();
 	private paint: PaintLayer | null = null;
 	private lightTex: THREE.DataTexture | null = null;
+	private bumpTex: THREE.DataTexture[] = [];  // the bump directions' lightmaps
 	private styleValues = new Map<number, number>();  // what the lightmap texture was composed with
 	// fog (colour 0..255, gamma) and auto exposure: the map's defaults until
 	// the player's controllers say otherwise
@@ -435,6 +449,18 @@ export class View3D {
 			lightTex.needsUpdate = true;
 		}
 		this.lightTex = lightTex;
+		this.bumpTex = bsp.lightmap ? bsp.lightmap.bump.map(d => {
+			const t = new THREE.DataTexture(new Uint16Array(d.length), bsp.lightmap!.width, bsp.lightmap!.height, THREE.RGBAFormat, THREE.HalfFloatType);
+			const half = t.image.data as unknown as Uint16Array;
+			for (let i = 0; i < d.length; i++) half[i] = THREE.DataUtils.toHalfFloat(d[i]);
+			t.magFilter = t.minFilter = THREE.LinearFilter;
+			t.flipY = false;
+			t.needsUpdate = true;
+			return t;
+		}) : [];
+		bumpLightUniforms.bumpLight0.value = this.bumpTex[0] ?? null;
+		bumpLightUniforms.bumpLight1.value = this.bumpTex[1] ?? null;
+		bumpLightUniforms.bumpLight2.value = this.bumpTex[2] ?? null;
 		this.styleValues.clear();
 		this.tracksByIndex.clear();
 		this.library = new MaterialLibrary(files, materials, lightTex);
@@ -1211,6 +1237,52 @@ export class View3D {
 		this.vmShown = g;
 	}
 
+	// Moving models' lighting: the ambient cube and local lights at each
+	// object's centre (recomputed when it moves), for the shader to use
+	private lightModels() {
+		const amb = this.bsp?.ambient;
+		if (!amb) return;
+		const hookMeshes = (o: THREE.Object3D) => {
+			if (o.userData.ambAllHooked) return;
+			let pending = false, hooked = 0;
+			o.traverse(c => {
+				const mesh = c as THREE.Mesh;
+				if (!mesh.isMesh || mesh.userData.ambHooked) return;
+				const shared = mesh.material as THREE.Material;
+				if (!shared.userData?.ambientLit) return;
+				// once the shared material has its texture: a copy of it for this mesh
+				if (!(shared as THREE.MeshLambertMaterial).map && !shared.userData.textureless) {
+					pending = true;
+					return;
+				}
+				mesh.material = ownLitMaterial(shared);
+				mesh.userData.ambHooked = true;
+				useModelLighting(mesh);
+				hooked++;
+			});
+			// done once its model has loaded and every part is hooked
+			if (!pending && (hooked || o.userData.ambSomeHooked)) o.userData.ambAllHooked = true;
+			if (hooked) o.userData.ambSomeHooked = true;
+		};
+		const apply = (o: THREE.Object3D) => {
+			hookMeshes(o);
+			const box = new THREE.Box3().setFromObject(o);
+			const p = box.isEmpty() ? new THREE.Vector3().setFromMatrixPosition(o.matrixWorld) : box.getCenter(new THREE.Vector3());
+			const key = `${Math.round(p.x / 4)},${Math.round(p.y / 4)},${Math.round(p.z / 4)}`;
+			if (o.userData.lightingKey === key) return;
+			o.userData.lightingKey = key;
+			o.userData.lighting = amb.at([p.x, p.y, p.z]);
+		};
+		for (const o of this.objects.values()) if (o.visible) apply(o);
+		for (const o of this.propGroup.children) if (!o.userData.ambAllHooked) apply(o);
+		if (this.vmShown) {
+			// the view model is lit where the eye is
+			const lighting = amb.at(this.camera.position.toArray());
+			this.vmShown.userData.lighting = lighting;
+			hookMeshes(this.vmShown);
+		}
+	}
+
 	// An entity's origin and angles at a (fractional) tick: between network
 	// updates they're interpolated, as the game's client does, over gaps of
 	// up to a few updates (longer gaps are teleports or things appearing)
@@ -1440,9 +1512,14 @@ export class View3D {
 			for (let y = 0; y < b.h; y++) {
 				const start = ((b.y + y) * lm.width + b.x) * 4;
 				for (let i = start; i < start + b.w * 4; i++) half[i] = THREE.DataUtils.toHalfFloat(lm.data[i]);
+				this.bumpTex.forEach((t, k) => {
+					const h = t.image.data as unknown as Uint16Array, src = lm.bump[k];
+					for (let i = start; i < start + b.w * 4; i++) h[i] = THREE.DataUtils.toHalfFloat(src[i]);
+				});
 			}
 		}
 		tex.needsUpdate = true;
+		for (const t of this.bumpTex) t.needsUpdate = true;
 	}
 
 	private animAt(t: EntityTrack, tick: number, sk: Skeleton): [number, number] {
@@ -1585,6 +1662,7 @@ export class View3D {
 		}
 		// after the camera: what the recording player holds follows their view
 		if (ents) this.placeHeld(tick);
+		this.lightModels();
 		this.render();
 	}
 

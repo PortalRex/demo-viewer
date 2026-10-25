@@ -3,11 +3,14 @@
 // lightmap coordinates; the baked lighting packed into one atlas; static props.
 import type {GameFS} from './gamefs.ts';
 import type {MaterialInfo} from './materials.ts';
+import {AmbientLighting} from './ambient.ts';
 
 const LUMP = {
 	ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7, LIGHTING: 8, EDGES: 12, SURFEDGES: 13,
 	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
 	LIGHTING_HDR: 53, FACES_HDR: 58,
+	NODES: 5, LEAFS: 10, WORLDLIGHTS: 15, LEAF_AMBIENT_INDEX_HDR: 51, LEAF_AMBIENT_INDEX: 52, WORLDLIGHTS_HDR: 54,
+	LEAF_AMBIENT_LIGHTING_HDR: 55, LEAF_AMBIENT_LIGHTING: 56,
 } as const;
 
 const SURF_SKY2D = 0x2, SURF_SKY = 0x4, SURF_TRIGGER = 0x40, SURF_NODRAW = 0x80, SURF_HINT = 0x100, SURF_SKIP = 0x200;
@@ -42,6 +45,9 @@ export interface ModelMesh {
 export interface LightmapLayer {
 	style: number;
 	rgb: Float32Array;
+	// bump-mapped faces: the light arriving along each of the three bump
+	// basis directions (in the face's texture space)
+	bump?: Float32Array[];
 }
 
 export interface LightmapBlock {
@@ -56,6 +62,7 @@ export interface Lightmap {
 	width: number;
 	height: number;
 	data: Float32Array;  // RGBA, linear: the layers summed at the current style values
+	bump: Float32Array[];  // the same for the three bump directions (flat light for faces without)
 	blocks: LightmapBlock[];
 	styles: number[];    // the switchable styles in use (not 0)
 }
@@ -71,19 +78,23 @@ export function composeLightmap(lm: Lightmap, value: (style: number) => number, 
 		for (let y = 0; y < b.h; y++) {
 			for (let x = 0; x < b.w; x++) {
 				const i = y * b.w + x, o = ((b.y + y) * lm.width + b.x + x) * 4;
-				let r = 0, g = 0, bl = 0;
-				for (let k = 0; k < b.layers.length; k++) {
-					const s = scale[k];
-					if (!s) continue;
-					const rgb = b.layers[k].rgb;
-					r += rgb[i * 3] * s;
-					g += rgb[i * 3 + 1] * s;
-					bl += rgb[i * 3 + 2] * s;
+				for (let layer = -1; layer < 3; layer++) {
+					let r = 0, g = 0, bl = 0;
+					for (let k = 0; k < b.layers.length; k++) {
+						const s = scale[k];
+						if (!s) continue;
+						const L = b.layers[k];
+						const rgb = layer < 0 ? L.rgb : L.bump?.[layer] ?? L.rgb;
+						r += rgb[i * 3] * s;
+						g += rgb[i * 3 + 1] * s;
+						bl += rgb[i * 3 + 2] * s;
+					}
+					const out = layer < 0 ? lm.data : lm.bump[layer];
+					out[o] = r;
+					out[o + 1] = g;
+					out[o + 2] = bl;
+					out[o + 3] = 1;
 				}
-				lm.data[o] = r;
-				lm.data[o + 1] = g;
-				lm.data[o + 2] = bl;
-				lm.data[o + 3] = 1;
 			}
 		}
 		done.push(b);
@@ -129,6 +140,7 @@ export interface BspMap {
 	staticProps: StaticProp[];
 	lightmap: Lightmap | null;
 	skyFaces: Float32Array;  // the world's sky faces, triangles: the skybox is seen only through them
+	ambient: AmbientLighting | null;  // lighting for moving models
 	entities: Record<string, string>[];
 	materials: Map<string, MaterialInfo>;
 	pak: Uint8Array | null;
@@ -467,12 +479,9 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			// each style's samples follow the previous style's (four sets
 			// for bump-mapped faces: flat first, then the three bump bases)
 			const ti = faces.getInt16(o + 10, true);
-			const perStyle = b.w * b.h * ((texinfo.getInt32(ti * 72 + 64, true) & SURF_BUMPLIGHT) ? 4 : 1) * 4;
-			const layers: LightmapLayer[] = [];
-			for (let k = 0; k < 4; k++) {
-				const style = lightFaces.getUint8(o + 16 + k);
-				if (style === 255) break;
-				const start = base + k * perStyle;
+			const bumped = (texinfo.getInt32(ti * 72 + 64, true) & SURF_BUMPLIGHT) !== 0;
+			const perStyle = b.w * b.h * (bumped ? 4 : 1) * 4;
+			const read = (start: number) => {
 				const rgb = new Float32Array((b.w + 2) * (b.h + 2) * 3);
 				for (let y = -1; y <= b.h; y++) {
 					for (let x = -1; x <= b.w; x++) {
@@ -485,12 +494,22 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 						rgb[j + 2] = lbytes[i + 2] * e;
 					}
 				}
-				layers.push({style, rgb});
+				return rgb;
+			};
+			const layers: LightmapLayer[] = [];
+			for (let k = 0; k < 4; k++) {
+				const style = lightFaces.getUint8(o + 16 + k);
+				if (style === 255) break;
+				const start = base + k * perStyle;
+				const layer: LightmapLayer = {style, rgb: read(start)};
+				if (bumped) layer.bump = [1, 2, 3].map(n => read(start + n * b.w * b.h * 4));
+				layers.push(layer);
 				if (style) styleSet.add(style);
 			}
 			lmBlocks.push({x: b.x - 1, y: b.y - 1, w: b.w + 2, h: b.h + 2, layers});
 		}
-		lightmap = {width: W, height: H, data, blocks: lmBlocks, styles: [...styleSet]};
+		const bump = [0, 1, 2].map(() => data.slice());
+		lightmap = {width: W, height: H, data, bump, blocks: lmBlocks, styles: [...styleSet]};
 		composeLightmap(lightmap, defaultStyle);
 	}
 
@@ -586,8 +605,17 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 	}
 
 	const b = (i: number) => models.getFloat32(i, true);
+	// ambient cubes and world lights (HDR where the map has them)
+	const [nodes, leaves, ambIndexHdr, ambLightHdr, lightsHdr] = await Promise.all([
+		read(LUMP.NODES), read(LUMP.LEAFS), read(LUMP.LEAF_AMBIENT_INDEX_HDR), read(LUMP.LEAF_AMBIENT_LIGHTING_HDR), read(LUMP.WORLDLIGHTS_HDR),
+	]);
+	const ambIndex = ambIndexHdr.byteLength ? ambIndexHdr : await read(LUMP.LEAF_AMBIENT_INDEX);
+	const ambLight = ambLightHdr.byteLength ? ambLightHdr : await read(LUMP.LEAF_AMBIENT_LIGHTING);
+	const worldLights = lightsHdr.byteLength ? lightsHdr : await read(LUMP.WORLDLIGHTS);
+	const ambient = new AmbientLighting(planes, nodes, leaves, models, ambIndex, ambLight, worldLights);
+
 	return {
-		name, models: meshes, staticProps, lightmap, skyFaces: new Float32Array(skyTris), paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
+		name, models: meshes, staticProps, lightmap, skyFaces: new Float32Array(skyTris), ambient: ambient.available ? ambient : null, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }
