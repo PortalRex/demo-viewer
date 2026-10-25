@@ -125,6 +125,36 @@ if (import.meta.env.DEV) {
 		}
 		return done.length;
 	};
+	// open a fixture (unless it's open), wait for the 3D view to finish
+	// loading at `tick`, and save a shot as fixtures/shots/<name>.jpg
+	w.shootAt = async (path: string, tick: number, name: string, width = 640, height = 360) => {
+		if (!document.title.startsWith(path.split('/').pop()!)) {
+			const prev = pb;
+			await openPath(path);
+			for (let i = 0; i < 80 && pb === prev; i++) await new Promise(r => setTimeout(r, 100));
+		}
+		if (viewMode !== '3d') [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === '3D')?.click();
+		let quiet = performance.now();
+		const orig = view3d.onLoaded;
+		view3d.onLoaded = () => {
+			quiet = performance.now();
+			orig();
+		};
+		const t0 = performance.now();
+		while (performance.now() - t0 < 40000) {
+			seekTo(tick);
+			await new Promise(r => setTimeout(r, 250));
+			if (view3d.debugPlayer() && performance.now() - quiet > 2000) break;
+		}
+		view3d.onLoaded = orig;
+		for (let i = 0; i < 4; i++) {
+			seekTo(tick);
+			await new Promise(r => setTimeout(r, 250));
+		}
+		const url = view3d.snapshot(width, height, undefined, undefined, 'image/jpeg');
+		await fetch(`/__shot?name=${name}&ext=jpg`, {method: 'POST', body: url});
+		return name;
+	};
 	// frames of a tick range into fixtures/shots/<name>/ (as JPEGs), for videos
 	w.record = async (name: string, from: number, to: number, step = 2, width = 960, height = 540) => {
 		let n = 0;

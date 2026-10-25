@@ -7,7 +7,7 @@ import {AmbientLighting} from './ambient.ts';
 
 const LUMP = {
 	ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7, LIGHTING: 8, EDGES: 12, SURFEDGES: 13,
-	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, CUBEMAPS: 42, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
+	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, CUBEMAPS: 42, OVERLAYS: 45, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
 	LIGHTING_HDR: 53, FACES_HDR: 58,
 	NODES: 5, LEAFS: 10, WORLDLIGHTS: 15, LEAF_AMBIENT_INDEX_HDR: 51, LEAF_AMBIENT_INDEX: 52, WORLDLIGHTS_HDR: 54,
 	LEAF_AMBIENT_LIGHTING_HDR: 55, LEAF_AMBIENT_LIGHTING: 56,
@@ -138,6 +138,7 @@ export interface BspMap {
 	name: string;
 	paintFaces: Map<number, PaintFace>;  // by face index (= the engine's surface index)
 	models: ModelMesh[];  // 0 = world
+	overlays: MaterialGroup[];  // info_overlays laid on the faces they cover (uv in texture repeats)
 	staticProps: StaticProp[];
 	lightmap: Lightmap | null;
 	skyFaces: Float32Array;  // the world's sky faces, triangles: the skybox is seen only through them
@@ -191,6 +192,50 @@ interface Vert {
 	p: number[];
 	uv: [number, number];
 	lm: [number, number];
+}
+
+// Sutherland-Hodgman: a 2D polygon clipped to a convex one (counter-clockwise)
+function clipConvex(subject: number[][], clip: number[][]): number[][] {
+	let out = subject;
+	for (let i = 0; i < clip.length && out.length; i++) {
+		const a = clip[i], b = clip[(i + 1) % clip.length];
+		const inside = (p: number[]) => (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= -1e-4;
+		const input = out;
+		out = [];
+		for (let j = 0; j < input.length; j++) {
+			const p = input[j], q = input[(j + 1) % input.length];
+			const pin = inside(p), qin = inside(q);
+			if (pin) out.push(p);
+			if (pin !== qin) {
+				const dx = q[0] - p[0], dy = q[1] - p[1];
+				const den = (b[0] - a[0]) * dy - (b[1] - a[1]) * dx;
+				if (Math.abs(den) > 1e-9) {
+					const t = ((b[1] - a[1]) * (p[0] - a[0]) - (b[0] - a[0]) * (p[1] - a[1])) / den;
+					out.push([p[0] + dx * t, p[1] + dy * t]);
+				}
+			}
+		}
+	}
+	return out;
+}
+
+// where a point is in a quad A B C D (A to B is s, A to D is t), inverting
+// the bilinear map
+function invBilinear(p: number[], a: number[], b: number[], c: number[], d: number[]): [number, number] {
+	const e = [b[0] - a[0], b[1] - a[1]], f = [d[0] - a[0], d[1] - a[1]];
+	const g = [a[0] - b[0] + c[0] - d[0], a[1] - b[1] + c[1] - d[1]], h = [p[0] - a[0], p[1] - a[1]];
+	const cross = (u: number[], v: number[]) => u[0] * v[1] - u[1] * v[0];
+	const k2 = cross(g, f), k1 = cross(e, f) + cross(h, g), k0 = cross(h, e);
+	let t: number;
+	if (Math.abs(k2) < 1e-9) t = Math.abs(k1) > 1e-12 ? -k0 / k1 : 0;
+	else {
+		const w = Math.sqrt(Math.max(0, k1 * k1 - 4 * k0 * k2));
+		t = (-k1 - w) / (2 * k2);
+		if (t < -0.01 || t > 1.01) t = (-k1 + w) / (2 * k2);
+	}
+	const den = [e[0] + g[0] * t, e[1] + g[1] * t];
+	const s = Math.abs(den[0]) > Math.abs(den[1]) ? (h[0] - f[0] * t) / den[0] : (h[1] - f[1] * t) / (den[1] || 1e-12);
+	return [s, t];
 }
 
 class Builder {
@@ -606,6 +651,81 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		meshes.push({groups: out, edges: new Float32Array(edgeList)});
 	}
 
+	// info_overlays, as the engine's overlay manager builds them: the quad
+	// (four uv points in the overlay's own plane: basis U packed in the
+	// points' z, V = normal x U, negated when point 3's z is 1) clipped to each
+	// face it covers, its texture coordinates by where each point falls in the
+	// quad (bilinearly), then laid on the face along the overlay's normal
+	const overlayLump = await read(LUMP.OVERLAYS);
+	const overlayGroups = new Map<string, {tex: TexInfo; b: Builder}>();
+	const OVERLAY_SIZE = 352;
+	for (let o = 0; o + OVERLAY_SIZE <= overlayLump.byteLength; o += OVERLAY_SIZE) {
+		const fv = (k: number) => overlayLump.getFloat32(o + k, true);
+		const ti = overlayLump.getInt16(o + 4, true);
+		const faceCount = overlayLump.getUint16(o + 6, true) & 0x3fff;
+		if (ti < 0 || ti * 72 >= texinfo.byteLength) continue;
+		const tex = texInfoOf(ti);
+		const u0 = fv(264), u1 = fv(268), v0 = fv(272), v1 = fv(276);
+		const pts = [0, 1, 2, 3].map(i => [fv(280 + i * 12), fv(284 + i * 12), fv(288 + i * 12)]);
+		const origin = [fv(328), fv(332), fv(336)], n = [fv(340), fv(344), fv(348)];
+		const U = [pts[0][2], pts[1][2], pts[2][2]];
+		const ul = Math.hypot(U[0], U[1], U[2]);
+		if (ul < 1e-6) continue;
+		U[0] /= ul; U[1] /= ul; U[2] /= ul;
+		const V = [n[1] * U[2] - n[2] * U[1], n[2] * U[0] - n[0] * U[2], n[0] * U[1] - n[1] * U[0]];
+		const vl = Math.hypot(V[0], V[1], V[2]) * (pts[3][2] === 1 ? -1 : 1);
+		V[0] /= vl; V[1] /= vl; V[2] /= vl;
+		// the quad in overlay-plane coordinates, corners A B C D = points 0 3 2 1
+		const quad = pts.map(p => [p[0], p[1]]);
+		const A = quad[0], B = quad[3], C = quad[2], D = quad[1];
+		let g = overlayGroups.get(tex.material);
+		if (!g) {
+			g = {tex, b: new Builder()};
+			overlayGroups.set(tex.material, g);
+		}
+		for (let k = 0; k < faceCount; k++) {
+			const f = overlayLump.getInt32(o + 8 + k * 4, true);
+			if (f < 0 || f >= nFaces) continue;
+			const vs = faceVerts(f);
+			if (vs.length < 3) continue;
+			const {normal, dist} = facingOf(f, vs);
+			// the face in overlay-plane coordinates, wound counter-clockwise
+			let poly = vs.map(p => {
+				const d = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
+				return [d[0] * U[0] + d[1] * U[1] + d[2] * U[2], d[0] * V[0] + d[1] * V[1] + d[2] * V[2]];
+			});
+			let area = 0;
+			for (let i = 0; i < poly.length; i++) {
+				const a = poly[i], c = poly[(i + 1) % poly.length];
+				area += a[0] * c[1] - c[0] * a[1];
+			}
+			if (Math.abs(area) < 1e-6) continue;
+			if (area < 0) poly = poly.reverse();
+			let clipped = clipConvex(quad.slice(), poly);
+			if (clipped.length < 3) continue;
+			const denom = normal[0] * n[0] + normal[1] * n[1] + normal[2] * n[2];
+			const verts: Vert[] = clipped.map(([x, y]) => {
+				const [s, t] = invBilinear([x, y], A, B, C, D);
+				const P = [origin[0] + x * U[0] + y * V[0], origin[1] + x * U[1] + y * V[1], origin[2] + x * U[2] + y * V[2]];
+				// onto the face along the overlay's normal, a hair in front of it
+				const toFace = (normal[0] * P[0] + normal[1] * P[1] + normal[2] * P[2] - dist) / (Math.abs(denom) > 1e-6 ? denom : 1);
+				const W = [P[0] - n[0] * toFace + normal[0] * 0.1, P[1] - n[1] * toFace + normal[1] * 0.1, P[2] - n[2] * toFace + normal[2] * 0.1];
+				const lit = vertexFor(W, texInfoOf(faces.getInt16(f * 56 + 10, true)), f);
+				return {p: W, uv: [u0 + s * (u1 - u0), v0 + t * (v1 - v0)], lm: lit.lm};
+			});
+			for (let i = 1; i + 1 < verts.length; i++) g.b.tri(verts[0], verts[i], verts[i + 1], tex.color, normal);
+		}
+	}
+	const overlays: MaterialGroup[] = [];
+	for (const [material, {tex, b: ob}] of overlayGroups) {
+		if (ob.empty) continue;
+		overlays.push({
+			material, surface: tex.surface,
+			positions: new Float32Array(ob.pos), normals: new Float32Array(ob.nrm), colors: new Float32Array(ob.col),
+			uv: new Float32Array(ob.uv), lightUv: new Float32Array(ob.lm),
+		});
+	}
+
 	const b = (i: number) => models.getFloat32(i, true);
 	// ambient cubes and world lights (HDR where the map has them)
 	const [nodes, leaves, ambIndexHdr, ambLightHdr, lightsHdr] = await Promise.all([
@@ -620,7 +740,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 	for (let o = 0; o + 16 <= cubeLump.byteLength; o += 16) cubemaps.push([cubeLump.getInt32(o, true), cubeLump.getInt32(o + 4, true), cubeLump.getInt32(o + 8, true)]);
 
 	return {
-		name, models: meshes, staticProps, lightmap, skyFaces: new Float32Array(skyTris), ambient: ambient.available ? ambient : null, cubemaps, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
+		name, models: meshes, overlays, staticProps, lightmap, skyFaces: new Float32Array(skyTris), ambient: ambient.available ? ambient : null, cubemaps, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }

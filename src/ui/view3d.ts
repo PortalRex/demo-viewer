@@ -325,8 +325,34 @@ class MaterialLibrary {
 		m.needsUpdate = true;
 	}
 
-	forWorld(group: MaterialGroup): THREE.Material {
-		const cached = this.world.get(group.material);
+	// an overlay's material: the world material, drawn just in front of the
+	// face it's laid on (and DecalModulate's stains multiplying what's there)
+	forOverlay(group: MaterialGroup): THREE.Material {
+		const key = `overlay:${group.material}`;
+		const cached = this.world.get(key);
+		if (cached) return cached;
+		const mat = this.forWorld({...group, material: group.material}, key) as THREE.MeshBasicMaterial;
+		mat.polygonOffset = true;
+		mat.polygonOffsetFactor = -1;
+		mat.polygonOffsetUnits = -4;
+		this.materials.get(group.material).then(info => {
+			if (!info.found || info.shader !== 'decalmodulate') return;
+			mat.transparent = true;
+			mat.depthWrite = false;
+			mat.lightMap = null;
+			mat.blending = THREE.CustomBlending;
+			mat.blendEquation = THREE.AddEquation;
+			mat.blendSrc = THREE.DstColorFactor;
+			mat.blendDst = THREE.SrcColorFactor;
+			mat.defines = {...mat.defines, REFRACT_TINT: '', REFRACT_UNSCALED: ''};
+			mat.needsUpdate = true;
+			this.onChange();
+		});
+		return mat;
+	}
+
+	forWorld(group: MaterialGroup, cacheKey = group.material): THREE.Material {
+		const cached = this.world.get(cacheKey);
 		if (cached) return cached;
 		const mat = new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.FrontSide});
 		hookWorldMaterial(mat);
@@ -335,7 +361,7 @@ class MaterialLibrary {
 			mat.opacity = 0.35;
 			mat.depthWrite = false;
 		}
-		this.world.set(group.material, mat);
+		this.world.set(cacheKey, mat);
 		this.materials.get(group.material).then(info => {
 			if (!info.found) return;
 			if (!info.unlit && this.lightmap) {
@@ -830,6 +856,16 @@ export class View3D {
 		this.exposure = 3;
 
 		this.mapGroup.add(this.brushModel(bsp.models[0]));
+		// info_overlays (signs, indicator lights, stains) on the world's faces
+		const overlays = new THREE.Group();
+		overlays.name = 'overlays';
+		for (const g of bsp.overlays) {
+			const mesh = new THREE.Mesh(geometry(g), this.library!.forOverlay(g));
+			mesh.name = `overlay ${g.material}`;
+			mesh.renderOrder = 1;
+			overlays.add(mesh);
+		}
+		this.mapGroup.add(overlays);
 		// the sky faces mark (in the stencil) where the 2D skybox shows, as in
 		// the game: elsewhere, e.g. the backs of walls when out of bounds,
 		// it's the fog colour

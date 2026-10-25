@@ -88,9 +88,11 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 			varying vec3 vViewDir;
 			varying vec3 vTangentV;
 			varying vec3 vAxisV;
+			varying float vDepth;
 			void main() {
 				vUv = uv;
 				vec4 mv = modelViewMatrix * vec4(position, 1.0);
+				vDepth = -mv.z;
 				vNormalV = normalize(normalMatrix * normal);
 				// T (where v increases) runs along the column (its local Y), or
 				// round it when the texture's u runs along it (funnels)
@@ -112,6 +114,7 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 			varying vec3 vViewDir;
 			varying vec3 vTangentV;
 			varying vec3 vAxisV;
+			varying float vDepth;
 			uniform float tangentAround;
 			void main() {
 				vec4 c = texture2D(base, vUv + baseOffset);
@@ -137,7 +140,9 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 					alpha = mix(tangentRanges.x, tangentRanges.y, pow(along, tangentRanges.z));
 					float front = dot(view, normalize(vNormalV)) * 0.5 + 0.5;
 					alpha *= mix(1.0, tangentRanges.w, front * front);
-					c.rgb *= 1.0 + alpha;
+					// (and the shader's camera fade: nothing at the eye, full 40
+					// units out, from its clip-space depth: past the 7 unit near plane)
+					c.rgb *= (1.0 + alpha) * smoothstep(0.0, 1.0, clamp((vDepth - 7.0) * 0.025, 0.0, 1.0));
 				} else {
 					// funnels fade where the surface faces the viewer
 					float facing = abs(dot(normalize(vNormalV), view));
