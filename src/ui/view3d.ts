@@ -3079,9 +3079,11 @@ export class View3D {
 			return;
 		}
 		// colour: rgb / 255 x alpha / 255, times r_flashlightbrightness
-		// (0.25) and the brightness scale
+		// (0.25), the x2.5 the engine adds where the flashlight is added in
+		// linear space (sRGB-correct blending: any current card), and the
+		// brightness scale
 		const c = Number(e.m_LightColor ?? 0xffffffff) >>> 0;
-		const scale = ((c >>> 24) & 255) / 255 * 0.25 * Number(e.m_flBrightnessScale ?? 1);
+		const scale = ((c >>> 24) & 255) / 255 * 0.25 * 2.5 * Number(e.m_flBrightnessScale ?? 1);
 		u.flashColor.value.set((c & 255) / 255 * scale, ((c >>> 8) & 255) / 255 * scale, ((c >>> 16) & 255) / 255 * scale);
 		const near = Number(e.m_flNearZ ?? 4) || 4, far = Number(e.m_flFarZ ?? 2000) || 2000;
 		const fc = this.flashCam;
@@ -3136,11 +3138,19 @@ export class View3D {
 		r.setRenderTarget(this.flashTarget);
 		r.clear();
 		r.render(this.scene, fc);
-		r.setRenderTarget(target);
 		this.scene.overrideMaterial = null;
 		this.scene.fog = fog;
 		this.scene.background = bg;
 		for (const o of hidden) o.visible = true;
+		// ropes cast too, with their own shader (their strips are turned to
+		// face the light in it)
+		if (this.ropes) {
+			const auto = r.autoClear;
+			r.autoClear = false;
+			r.render(this.ropes.group, fc);
+			r.autoClear = auto;
+		}
+		r.setRenderTarget(target);
 	}
 
 	private frame: THREE.WebGLRenderTarget | null = null;
