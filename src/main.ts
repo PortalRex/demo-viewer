@@ -97,6 +97,10 @@ if (import.meta.env.DEV) {
 	};
 	// a small shot of every segment (at `frac` through it) into
 	// fixtures/shots/<name>/<index>_<map>.jpg, each once loading goes quiet
+	w.bloom = (scale: number | null) => {
+		view3d.bloomOverride = scale;
+		view3d.render();
+	};
 	w.tour = async (name: string, frac = 0.5, first = 0, last = Infinity, width = 480, height = 270) => {
 		if (!pb) return 'no run';
 		if (viewMode !== '3d') [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === '3D')?.click();

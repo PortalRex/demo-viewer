@@ -70,7 +70,7 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)
 	CEnvProjectedTexture: ['m_hTargetEntity', 'm_bCameraSpace', 'm_bState', 'm_flLightFOV', 'm_LightColor', 'm_flBrightnessScale', 'm_SpotlightTextureName', 'm_flNearZ', 'm_flFarZ', 'm_bEnableShadows', 'm_bLightWorld'],
-	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],
+	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax', 'm_bUseCustomBloomScale', 'm_flCustomBloomScale'],
 };
 
 export interface AnimState {

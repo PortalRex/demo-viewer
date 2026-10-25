@@ -27,6 +27,7 @@ import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
+import {Bloom, ENCODE} from './bloom.ts';
 
 export type CameraMode = 'eyes' | 'orbit' | 'free';
 
@@ -2680,6 +2681,7 @@ export class View3D {
 			const hi = Number(tk.m_bUseCustomAutoExposureMax) ? Number(tk.m_flCustomAutoExposureMax) : 2;
 			this.exposureRange = [lo, Math.max(lo, hi)];
 		}
+		this.bloomScale = tk && Number(tk.m_bUseCustomBloomScale) ? Number(tk.m_flCustomBloomScale) || 0 : 1;
 	}
 
 	// Auto exposure, as the engine's (mat_tonemap_algorithm 1): every few
@@ -3122,7 +3124,7 @@ export class View3D {
 	// the final pass: the frame times the exposure, clamped (the game's
 	// linear tone mapping) and sRGB-encoded
 	private composite = new THREE.ShaderMaterial({
-		uniforms: {frame: {value: null}, exposure: {value: 1}},
+		uniforms: {frame: {value: null}, exposure: {value: 1}, bloom: {value: null}, bloomAmount: {value: 0}},
 		depthTest: false,
 		depthWrite: false,
 		vertexShader: `
@@ -3134,13 +3136,22 @@ export class View3D {
 		fragmentShader: `
 			uniform sampler2D frame;
 			uniform float exposure;
+			uniform sampler2D bloom;
+			uniform float bloomAmount;
 			varying vec2 vUv;
+			${ENCODE}
 			void main() {
-				vec3 c = clamp(texture2D(frame, vUv).rgb * exposure, 0.0, 1.0);
-				c = mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+				vec3 c = encode(texture2D(frame, vUv).rgb, exposure);
+				// (engine_post: half the bloom buffer, added in gamma space)
+				c += bloomAmount * 0.5 * texture2D(bloom, vUv).rgb;
 				gl_FragColor = vec4(c, 1.0);
 			}`,
 	});
+	private bloom = new Bloom();
+	// mat_bloomscale, or the tonemap controller's custom bloom scale
+	private bloomScale = 1;
+	// debugging: a bloom scale used instead of the map's
+	bloomOverride: number | null = null;
 	private compositeScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.composite), {frustumCulled: false}));
 	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
@@ -3200,6 +3211,9 @@ export class View3D {
 			this.recheck = undefined;
 			this.onLoaded();
 		}, 30);
+		r.setRenderTarget(null);
+		this.composite.uniforms.bloom.value = this.bloom.render(r, this.frame, this.exposure);
+		this.composite.uniforms.bloomAmount.value = this.bloomOverride ?? this.bloomScale;
 		r.setRenderTarget(null);
 		this.composite.uniforms.frame.value = this.frame.texture;
 		this.composite.uniforms.exposure.value = this.exposure;
