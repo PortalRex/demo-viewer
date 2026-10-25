@@ -2,7 +2,8 @@
 // recorded entities (portals, brush entities, props) and the player's view.
 import * as THREE from 'three';
 import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js';
-import {MeshBVH} from 'three-mesh-bvh';
+import {MeshBVH, acceleratedRaycast} from 'three-mesh-bvh';
+import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {composeLightmap, styleValue} from '../game/bsp.ts';
 import type {BspMap, MeshData, MaterialGroup, ModelMesh} from '../game/bsp.ts';
 import type {GameFiles} from '../game/files.ts';
@@ -484,6 +485,36 @@ export class View3D {
 	private mapToken = 0;
 	onLoaded = () => {};
 
+	// something finished loading: redraw, and once loading goes quiet,
+	// compile the shaders of everything in the scene, hidden entities too,
+	// so nothing stalls the first time it shows
+	private loaded() {
+		this.onLoaded();
+		clearTimeout(this.precompileTimer);
+		this.precompileTimer = setTimeout(() => this.precompile(), 400);
+	}
+	private precompileTimer: ReturnType<typeof setTimeout> | undefined;
+
+	private precompile() {
+		const r = this.renderer;
+		if (!r) return;
+		const hidden: THREE.Object3D[] = [];
+		for (const g of [this.entityGroup, this.vmScene]) {
+			g.traverse(o => {
+				if (!o.visible) {
+					hidden.push(o);
+					o.visible = true;
+				}
+			});
+		}
+		try {
+			r.compile(this.scene, this.camera);
+			r.compile(this.vmScene, this.vmCam);
+		} finally {
+			for (const o of hidden) o.visible = false;
+		}
+	}
+
 	constructor(container: HTMLElement) {
 		this.container = container;
 		if (import.meta.env.DEV) (window as unknown as {THREE: typeof THREE}).THREE = THREE;  // for debugging in the console
@@ -636,7 +667,7 @@ export class View3D {
 		this.tracksByIndex.clear();
 		this.library = new MaterialLibrary(files, materials, lightTex);
 		this.library.setBackFaces(this.mode !== 'eyes');
-		this.library.onChange = () => this.onLoaded();
+		this.library.onChange = () => this.loaded();
 		this.effects = new EffectAssets(materials, this.library.textures);
 		if (this.particleRenderer) {
 			this.particleRenderer.clear();
@@ -708,8 +739,9 @@ export class View3D {
 
 		// static props, as they load, with vrad's vertex lighting from the pak
 		const pak = bsp.pak ? new Zip(bsp.pak) : null;
+		const placing: Promise<unknown>[] = [];
 		for (const prop of bsp.staticProps) {
-			Promise.all([
+			placing.push(Promise.all([
 				this.model(prop.model, prop.skin),
 				pak ? pak.read(`sp_hdr_${prop.index}.vhv`).then(b => b ?? pak.read(`sp_${prop.index}.vhv`)) : null,
 			]).then(([asset, vhv]) => {
@@ -721,9 +753,63 @@ export class View3D {
 				o.matrixAutoUpdate = false;
 				for (const c of o.children) c.matrixAutoUpdate = false;
 				this.propGroup.add(o);
-				this.onLoaded();
-			});
+				this.loaded();
+			}));
 		}
+		// once all are in: drawn merged
+		Promise.allSettled(placing).then(() => {
+			if (token !== this.mapToken) return;
+			this.mergeProps();
+			this.loaded();
+		});
+	}
+
+	// Static props with baked vertex light never move or change: their parts
+	// that share a material become one mesh (hundreds of draw calls fewer),
+	// with a bounds tree for ray tests
+	private mergeProps() {
+		const byMaterial = new Map<THREE.Material, THREE.Mesh[]>();
+		this.propGroup.traverse(c => {
+			const mesh = c as THREE.Mesh;
+			if (!mesh.isMesh || Array.isArray(mesh.material) || !mesh.material.userData?.vertexLit) return;
+			const g = mesh.geometry;
+			const key = mesh.material;
+			// (merged only with parts of the same layout)
+			const sig = Object.keys(g.attributes).sort().join(',') + (g.index ? '+i' : '');
+			(mesh.userData as {mergeSig?: string}).mergeSig = sig;
+			const list = byMaterial.get(key) ?? [];
+			list.push(mesh);
+			byMaterial.set(key, list);
+		});
+		for (const [material, meshes] of byMaterial) {
+			const bySig = new Map<string, THREE.Mesh[]>();
+			for (const m of meshes) {
+				const sig = (m.userData as {mergeSig: string}).mergeSig;
+				bySig.set(sig, [...(bySig.get(sig) ?? []), m]);
+			}
+			for (const list of bySig.values()) {
+				if (list.length < 2) continue;
+				const parts = list.map(m => {
+					m.updateWorldMatrix(true, false);
+					return m.geometry.clone().applyMatrix4(m.matrixWorld);
+				});
+				const merged = mergeGeometries(parts);
+				parts.forEach(p => p.dispose());
+				if (!merged) continue;
+				merged.boundsTree = new MeshBVH(merged);
+				const mesh = new THREE.Mesh(merged, material);
+				mesh.raycast = acceleratedRaycast;
+				mesh.name = `merged props ${list[0].name}`;
+				mesh.matrixAutoUpdate = false;
+				for (const m of list) {
+					m.removeFromParent();
+					m.geometry.dispose();  // (each lit prop's own copy, see litProp)
+				}
+				this.propGroup.add(mesh);
+			}
+		}
+		// prop groups left empty
+		for (const o of [...this.propGroup.children]) if (!(o as THREE.Mesh).isMesh && !o.children.length) o.removeFromParent();
 	}
 
 	// The 2D skybox: six faces around the camera, drawn behind everything.
@@ -764,7 +850,7 @@ export class View3D {
 				mesh.frustumCulled = false;
 				mesh.renderOrder = 2;
 				this.sky.add(mesh);
-				this.onLoaded();
+				this.loaded();
 			});
 		}
 	}
@@ -891,7 +977,7 @@ export class View3D {
 				group.add(anim.group);
 				group.userData.anim = anim;
 				group.userData.skeleton = asset.skeleton;
-				this.onLoaded();
+				this.loaded();
 			});
 			return group;
 		}
@@ -914,7 +1000,7 @@ export class View3D {
 				}
 				group.add(inner);
 				if (asset.skeleton) group.userData.skeleton = asset.skeleton;
-				this.onLoaded();
+				this.loaded();
 			});
 			return group;
 		}
@@ -1005,7 +1091,7 @@ export class View3D {
 					group.userData.staticBones = boneMatrices(asset.skeleton, pose);
 				}
 			}
-			this.onLoaded();
+			this.loaded();
 		});
 		return group;
 	}
@@ -1069,7 +1155,11 @@ export class View3D {
 			const origin = b.clone().applyMatrix4(m);
 			const newDir = dir.clone().transformDirection(m);
 			const ray = new THREE.Raycaster(origin.clone().addScaledVector(newDir, 2), newDir, 0, 16384);
-			const hit = ray.intersectObjects([this.mapGroup, this.propGroup], true)[0];
+			// the world through its bounds tree (solid faces: lasers pass glass),
+			// and the (merged, tree-backed) props
+			const world = this.collision?.raycastFirst(ray.ray, THREE.DoubleSide);
+			const prop = ray.intersectObjects([this.propGroup], true)[0];
+			const hit = [world, prop].filter((h): h is THREE.Intersection => !!h && h.distance <= 16384).sort((x, y) => x.distance - y.distance)[0];
 			a = origin;
 			b = hit ? hit.point.clone() : origin.clone().addScaledVector(newDir, 16384);
 			out.push([a, b]);
@@ -1084,6 +1174,11 @@ export class View3D {
 		const dither = ditherUniforms.ditherOn.value;
 		ditherUniforms.ditherOn.value = 0;
 		const seen = new Set<THREE.Object3D>();
+		// (only portals the camera can see get their view drawn: each is
+		// another whole scene)
+		this.camera.updateMatrixWorld();
+		const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse));
+		const camAt = new THREE.Vector3().setFromMatrixPosition(this.camera.matrixWorld);
 		for (const p of this.portals.values()) {
 			const surface = p.obj.userData.portalSurface as THREE.Mesh;
 			const material = surface.material as THREE.ShaderMaterial;
@@ -1093,6 +1188,10 @@ export class View3D {
 				material.uniforms.hasView.value = 0;
 				continue;
 			}
+			if (!p.obj.visible) continue;
+			p.obj.updateMatrixWorld(true);
+			const facing = new THREE.Vector3(1, 0, 0).transformDirection(p.obj.matrixWorld).dot(camAt.clone().sub(new THREE.Vector3().setFromMatrixPosition(p.obj.matrixWorld)));
+			if (facing <= 0 || !frustum.intersectsObject(surface)) continue;
 			let rt = this.portalTargets.get(p.obj);
 			if (!rt) {
 				// with a stencil, for the sky mask
@@ -1464,7 +1563,7 @@ export class View3D {
 				group.add(anim.group);
 				group.userData.anim = anim;
 				group.userData.skeleton = asset.skeleton;
-				this.onLoaded();
+				this.loaded();
 			});
 		}
 		const anim = g.userData.anim as AnimatedModel | undefined;
@@ -1485,9 +1584,12 @@ export class View3D {
 		const amb = this.bsp?.ambient;
 		if (!amb) return;
 		const hookMeshes = (o: THREE.Object3D) => {
-			// (looked at again whenever its parts change: a model replacing its
-			// placeholder box)
-			const parts = o.children.map(c => c.id).join(',');
+			// (looked at again whenever its meshes change, at any depth: a model
+			// replacing its placeholder box inside the object's group)
+			let parts = '';
+			o.traverse(c => {
+				if ((c as THREE.Mesh).isMesh) parts += c.id + ',';
+			});
 			if (o.userData.ambParts !== parts) {
 				o.userData.ambParts = parts;
 				delete o.userData.ambAllHooked;

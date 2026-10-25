@@ -89,8 +89,19 @@ let gameFS: GameFS | null = null;
 let gameFiles: GameFiles | null = null;
 let materials: Materials | null = null;
 const mapPaks = new Map<string, Zip | null>();
+// textures and models arrive in bursts: one redraw a frame for all of them
+// (or after a moment, where frames don't come: a hidden tab)
+let loadedPending = false;
 view3d.onLoaded = () => {
-	if (!playing) render();
+	if (playing || loadedPending) return;
+	loadedPending = true;
+	const redraw = () => {
+		if (!loadedPending) return;
+		loadedPending = false;
+		if (!playing) render();
+	};
+	requestAnimationFrame(redraw);
+	setTimeout(redraw, 100);
 };
 let mapToken = 0;
 
