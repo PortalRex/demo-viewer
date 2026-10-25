@@ -29,9 +29,10 @@ const vec = (p: Map<string, string>, key: string, d: [number, number, number]): 
 	const v = (p.get(key) ?? '').replace(/["[\]{}]/g, ' ').trim().split(/\s+/).map(Number);
 	return v.length >= 3 && v.every(isFinite) ? [v[0], v[1], v[2]] : d;
 };
-// "$outputintensity" comes per platform ("!srgb?$outputintensity", ...)
+// "$outputintensity" comes per platform; "!srgb?" is for platforms without
+// sRGB blending (not PC)
 const outputIntensity = (p: Map<string, string>) => {
-	for (const k of ['srgb_pc?$outputintensity', '!srgb?$outputintensity', '$outputintensity']) if (p.has(k)) return num(p, k, 1);
+	for (const k of ['srgb_pc?$outputintensity', '$outputintensity']) if (p.has(k)) return num(p, k, 1);
 	return 1;
 };
 
@@ -103,6 +104,10 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 				float facing = abs(dot(normalize(vNormalV), normalize(vViewDir)));
 				float a = mix(1.0, 1.0 - pow(facing, 2.0) * 0.85, edgeFade);
 				gl_FragColor = vec4(c.rgb * color * intensity * a, 1.0);
+				#ifdef TONE_MAPPING
+				// SolidEnergy caps the exposure it takes at 1
+				gl_FragColor.rgb /= max(toneMappingExposure, 1.0);
+				#endif
 				#include <tonemapping_fragment>
 				#include <colorspace_fragment>
 			}`,
@@ -242,7 +247,8 @@ export class Funnel {
 
 	set(start: THREE.Vector3, end: THREE.Vector3, radius: number, reversed: boolean, time: number) {
 		placeBetween(this.mesh, start, end, radius);
-		// texture scrolls along the funnel with its flow; orange when reversed
+		// texture scrolls along the funnel with its flow; light blue, or orange
+		// when reversed (the game's colours, matched to its renders)
 		const rate = (reversed ? -1 : 1) * 0.25;
 		const len = start.distanceTo(end);
 		const g = this.mesh.geometry as THREE.CylinderGeometry;
@@ -258,7 +264,7 @@ export class Funnel {
 		u.baseOffset.value.set(0, -rate * time);
 		u.detail1Offset.value.set(0.017 * rate * time, 0.1 * rate * time);
 		u.detail2Offset.value.set(0, -1.15 * rate * time);
-		u.color.value.setRGB(...(reversed ? [1.0, 0.45, 0.12] as const : [1, 1, 1] as const));
+		u.color.value.setRGB(...(reversed ? [1.0, 0.45, 0.12] as const : [0.3, 0.6, 1.0] as const));
 	}
 }
 
@@ -304,6 +310,10 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 				vec4 c = texture2D(base, uv + f * t1 * scroll) * w1 + texture2D(base, uv + f * t2 * scroll) * (1.0 - w1);
 				vec3 rgb = (c.a * flowColor + b.g * flowColor * 4.0) * b.b * intensity;
 				gl_FragColor = vec4(rgb, 1.0);
+				#ifdef TONE_MAPPING
+				// SolidEnergy caps the exposure it takes at 1
+				gl_FragColor.rgb /= max(toneMappingExposure, 1.0);
+				#endif
 				#include <tonemapping_fragment>
 				#include <colorspace_fragment>
 			}`,

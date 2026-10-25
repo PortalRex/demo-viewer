@@ -1193,6 +1193,40 @@ export class View3D {
 					const cp = this.worldMatrix(t, k, tick, 0) ?? new THREE.Matrix4().setPosition(k.origin[0], k.origin[1], k.origin[2]);
 					return new Map([[0, cp]]);
 				});
+			} else if (t.className === 'CTrigger_TractorBeam') {
+				// the core particles the client runs along each funnel (from
+				// when it last changed): start and end facing each other, the
+				// flow velocity, the colour
+				const i = keyIndexAt(t, tick);
+				if (i < 0) continue;
+				const k = t.keys[i], e = k.extra ?? {};
+				const start = vec3(e.m_vStart), end = vec3(e.m_vEnd);
+				if (!start || !end || Number(e.m_bDisabled) === 1 || !k.visible) continue;
+				const same = (j: number) => {
+					const x = t.keys[j].extra ?? {};
+					return String(x.m_vStart) === String(e.m_vStart) && String(x.m_vEnd) === String(e.m_vEnd) && x.m_bReversed === e.m_bReversed && Number(x.m_bDisabled) !== 1;
+				};
+				let s0 = i;
+				while (s0 > 0 && same(s0 - 1)) s0--;
+				let e0 = i + 1;
+				while (e0 < t.keys.length && same(e0)) e0++;
+				const reversed = Number(e.m_bReversed) === 1;
+				run(`funnel:${t.index}:${t.keys[s0].tick}`, 'tractor_beam_core', t.keys[s0].tick, e0 < t.keys.length ? t.keys[e0].tick : Infinity, () => {
+					const dir = end.clone().sub(start).normalize();
+					const side = Math.abs(dir.z) < 0.999 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+					const right = new THREE.Vector3().crossVectors(dir, side).normalize();
+					const up = new THREE.Vector3().crossVectors(right, dir).normalize();
+					// (CP axes: forward, left, up)
+					const left = right.clone().negate();
+					const cp0 = new THREE.Matrix4().makeBasis(dir, left, up).setPosition(start);
+					const cp1 = new THREE.Matrix4().makeBasis(dir.clone().negate(), right, up).setPosition(end);
+					// the flow: the trigger's forward axis times its force
+					const fwd = new THREE.Vector3(1, 0, 0).applyEuler(toEuler(k.angles));
+					const force = Number(e.m_linearForce) || 250;
+					const vel = fwd.multiplyScalar(reversed ? -force : force);
+					const color = reversed ? [255, 56, 8] : [0, 49, 189];
+					return new Map([[0, cp0], [1, cp1], [2, new THREE.Matrix4().setPosition(vel)], [3, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]);
+				});
 			} else if (t.className === 'CProp_Portal') {
 				// the edge of each placement, until the portal closes or moves
 				const i = keyIndexAt(t, tick);
