@@ -36,6 +36,12 @@ export interface Sequence {
 	groupSize: [number, number];
 	params: [string, string];          // pose parameter names ('' = none)
 	paramRange: [[number, number], [number, number]];
+	// a delta animation (added onto what's under it, as layers are); post:
+	// added on the other side of the base rotation (STUDIO_POST)
+	delta: boolean;
+	post: boolean;
+	weights: Float32Array | null;      // per (main model) bone; null = all 1
+	autolayers: string[];              // sequences layered on top (by label)
 }
 
 interface SourceModel {
@@ -59,17 +65,17 @@ export interface Skeleton {
 	sequences: Sequence[];
 	attachments: Attachment[];
 	ref?: Pose;      // reference pose, made on first use
-	scratch?: Pose;  // for the second frame when interpolating
 }
 
 const STUDIO_LOOPING = 0x1;
 const STUDIO_DELTA = 0x4;
+const STUDIO_POST = 0x10;
 const STUDIO_ALLZEROS = 0x20;
 const STUDIO_FRAMEANIM = 0x40;  // stored frame by frame (per-bone flags) instead of RLE per bone
 // frame-anim per-bone flags
 const FRAME_CONST_POS = 0x01, FRAME_CONST_ROT = 0x02, FRAME_ANIM_POS = 0x04, FRAME_ANIM_ROT = 0x08;
 const FRAME_ANIM_POS2 = 0x10, FRAME_CONST_POS2 = 0x20, FRAME_CONST_ROT2 = 0x40, FRAME_ANIM_ROT2 = 0x80;
-const ANIM_RAWPOS = 0x1, ANIM_RAWROT = 0x2, ANIM_ANIMPOS = 0x4, ANIM_ANIMROT = 0x8, ANIM_RAWROT2 = 0x20;
+const ANIM_RAWPOS = 0x1, ANIM_RAWROT = 0x2, ANIM_ANIMPOS = 0x4, ANIM_ANIMROT = 0x8, ANIM_DELTA = 0x10, ANIM_RAWROT2 = 0x20;
 
 const cstr = (b: Uint8Array, at: number) => {
 	let end = at;
@@ -141,9 +147,32 @@ function readSequences(src: SourceModel): Sequence[] {
 		const groupSize: [number, number] = [Math.max(1, v.getInt32(o + 68, true)), Math.max(1, v.getInt32(o + 72, true))];
 		const blends: (AnimDesc | null)[] = [];
 		for (let k = 0; k < groupSize[0] * groupSize[1] && k < 64; k++) blends.push(desc(v.getInt16(o + animIndexIndex + k * 2, true)));
+		const flags = v.getInt32(o + 12, true);
+		// auto-layers (mstudioautolayer_t, 24 bytes): sequences of this model
+		const autolayers: string[] = [];
+		const nLayers = v.getInt32(o + 148, true), layerOffset = v.getInt32(o + 152, true);
+		for (let k = 0; k < nLayers && k < 8; k++) {
+			const l = v.getInt16(o + layerOffset + k * 24, true);
+			if (l >= 0 && l < nSeq) autolayers.push(cstr(src.bytes, seqOffset + l * 212 + v.getInt32(seqOffset + l * 212 + 4, true)).toLowerCase());
+		}
+		// per-bone weights, onto the main model's bones
+		const weightOffset = v.getInt32(o + 156, true);
+		let weights: Float32Array | null = null;
+		if (weightOffset) {
+			for (let b = 0; b < src.bones.length; b++) {
+				const w = v.getFloat32(o + weightOffset + b * 4, true);
+				const m = src.toMain[b];
+				if (w === 1 || m < 0) continue;
+				weights ??= new Float32Array(Math.max(...src.toMain) + 1).fill(1);
+				weights[m] = w;
+			}
+		}
 		out.push({
 			label: cstr(src.bytes, o + v.getInt32(o + 4, true)).toLowerCase(),
-			looping: (v.getInt32(o + 12, true) & STUDIO_LOOPING) !== 0,
+			looping: (flags & STUDIO_LOOPING) !== 0,
+			delta: (flags & STUDIO_DELTA) !== 0,
+			post: (flags & STUDIO_POST) !== 0,
+			weights, autolayers,
 			anim: blends[0] ?? null,
 			blends, groupSize,
 			params: [poseName(v.getInt32(o + 76, true)), poseName(v.getInt32(o + 80, true))],
@@ -313,16 +342,17 @@ function sampleFrame(desc: AnimDesc, frame: number, pos: Float32Array, quat: Flo
 		p = b.start + index;
 	}
 	if (desc.flags & STUDIO_ALLZEROS) return;
-	const delta = (desc.flags & STUDIO_DELTA) !== 0;
 	if (desc.flags & STUDIO_FRAMEANIM) {
-		if (!delta) sampleFrameAnim(src, v, p, local, pos, quat);
+		if (!(desc.flags & STUDIO_DELTA)) sampleFrameAnim(src, v, p, local, pos, quat);
 		return;
 	}
 	for (let guard = 0; guard < 512 && p + 4 <= v.byteLength; guard++) {
 		const srcBone = v.getUint8(p), flags = v.getUint8(p + 1), next = v.getInt16(p + 2, true);
 		const bone = src.toMain[srcBone] ?? -1;
 		const sb = src.bones[srcBone];
-		if (bone >= 0 && sb && !delta) {
+		if (bone >= 0 && sb) {
+			// delta bones are stored without the bone's own rotation/position
+			const base = flags & ANIM_DELTA ? 0 : 1;
 			let d = p + 4;
 			if (flags & ANIM_RAWROT) {
 				const x = v.getUint16(d, true), y = v.getUint16(d + 2, true), zw = v.getUint16(d + 4, true);
@@ -342,7 +372,7 @@ function sampleFrame(desc: AnimDesc, frame: number, pos: Float32Array, quat: Flo
 				const e = [0, 0, 0];
 				for (let i = 0; i < 3; i++) {
 					const off = v.getInt16(d + i * 2, true);
-					e[i] = sb.rot[i] + (off > 0 ? animValue(v, d + off, local) * sb.rotScale[i] : 0);
+					e[i] = sb.rot[i] * base + (off > 0 ? animValue(v, d + off, local) * sb.rotScale[i] : 0);
 				}
 				quatFromRadianEuler(e[0], e[1], e[2], quat, bone * 4);
 				d += 6;
@@ -352,7 +382,7 @@ function sampleFrame(desc: AnimDesc, frame: number, pos: Float32Array, quat: Flo
 			} else if (flags & ANIM_ANIMPOS) {
 				for (let i = 0; i < 3; i++) {
 					const off = v.getInt16(d + i * 2, true);
-					pos[bone * 3 + i] = sb.pos[i] + (off > 0 ? animValue(v, d + off, local) * sb.posScale[i] : 0);
+					pos[bone * 3 + i] = sb.pos[i] * base + (off > 0 ? animValue(v, d + off, local) * sb.posScale[i] : 0);
 				}
 			}
 		}
@@ -381,36 +411,140 @@ export function sequenceRate(sk: Skeleton, seq: number): number {
 	return a && a.frames > 1 ? a.fps / (a.frames - 1) : 0;
 }
 
-// the blend of a sequence nearest the given pose parameter values
-export function blendFor(s: Sequence, values: Record<string, number>): AnimDesc | null {
-	const index = (k: 0 | 1) => {
-		const n = s.groupSize[k], name = s.params[k];
-		if (n < 2 || !name || values[name] === undefined) return 0;
-		const [lo, hi] = s.paramRange[k];
-		const t = hi === lo ? 0 : (values[name] - lo) / (hi - lo);
-		return Math.min(n - 1, Math.max(0, Math.round(t * (n - 1))));
-	};
-	return s.blends[index(1) * s.groupSize[0] + index(0)] ?? s.anim;
-}
-
-export function samplePose(sk: Skeleton, seq: number, cycle: number, out: Pose, params?: Record<string, number>) {
+// One animation at a cycle into `out`, from the reference pose (or for a
+// delta animation, from no change)
+function sampleDesc(sk: Skeleton, a: AnimDesc, cycle: number, out: Pose, next: Pose) {
 	const ref = (sk.ref ??= referencePose(sk));
-	out.pos.set(ref.pos);
-	out.quat.set(ref.quat);
-	const s = sk.sequences[seq];
-	const a = s && params ? blendFor(s, params) : s?.anim;
-	if (!a || a.frames < 1) return;
+	const reset = (p: Pose) => {
+		if (a.flags & STUDIO_DELTA) {
+			p.pos.fill(0);
+			for (let i = 0; i < sk.bones.length; i++) p.quat.set(IDENTITY_Q, i * 4);
+		} else {
+			p.pos.set(ref.pos);
+			p.quat.set(ref.quat);
+		}
+	};
+	reset(out);
+	if (a.frames < 1) return;
 	const f = Math.min(1, Math.max(0, cycle)) * (a.frames - 1);
 	const f0 = Math.floor(f), f1 = Math.min(a.frames - 1, f0 + 1), t = f - f0;
 	sampleFrame(a, f0, out.pos, out.quat);
 	if (t <= 0.001 || f1 === f0) return;
-	const next = (sk.scratch ??= referencePose(sk));
-	next.pos.set(ref.pos);
-	next.quat.set(ref.quat);
+	reset(next);
 	sampleFrame(a, f1, next.pos, next.quat);
-	for (let i = 0; i < sk.bones.length; i++) {
-		for (let k = 0; k < 3; k++) out.pos[i * 3 + k] += (next.pos[i * 3 + k] - out.pos[i * 3 + k]) * t;
-		slerp(out.quat, next.quat, i * 4, t);
+	blendPose(out, next, t, sk.bones.length);
+}
+const IDENTITY_Q = [0, 0, 0, 1];
+
+function blendPose(a: Pose, b: Pose, t: number, n: number) {
+	for (let i = 0; i < n; i++) {
+		for (let k = 0; k < 3; k++) a.pos[i * 3 + k] += (b.pos[i * 3 + k] - a.pos[i * 3 + k]) * t;
+		slerp(a.quat, b.quat, i * 4, t);
+	}
+}
+
+// scratch poses, per skeleton (sampling isn't re-entrant)
+function scratch(sk: Skeleton, i: number): Pose {
+	const s = ((sk as Skeleton & {pool?: Pose[]}).pool ??= []);
+	return (s[i] ??= referencePose(sk));
+}
+
+// A sequence's own pose (its blend grid interpolated at the pose
+// parameters, as the engine's local pose parameters do) into `out`;
+// scratch poses from `depth` up are used
+function sampleSequence(sk: Skeleton, s: Sequence, cycle: number, out: Pose, params: Record<string, number> | undefined, depth: number) {
+	const cell = (k: 0 | 1): [number, number] => {
+		const n = s.groupSize[k], name = s.params[k];
+		if (n < 2 || !name) return [0, 0];
+		// (pose parameters not given are 0, as the engine starts them)
+		const [lo, hi] = s.paramRange[k], value = params?.[name] ?? 0;
+		const x = Math.min(1, Math.max(0, hi === lo ? 0 : (value - lo) / (hi - lo))) * (n - 1);
+		const i = Math.min(n - 2, Math.floor(x));
+		return [i, x - i];
+	};
+	const [i0, t0] = cell(0), [i1, t1] = cell(1);
+	const at = (x: number, y: number) => s.blends[(i1 + y) * s.groupSize[0] + i0 + x] ?? s.anim;
+	const next = scratch(sk, depth), b = scratch(sk, depth + 1), c = scratch(sk, depth + 2);
+	const a00 = at(0, 0);
+	if (!a00) return;
+	sampleDesc(sk, a00, cycle, out, next);
+	const n = sk.bones.length;
+	if (t0 > 0.001) {
+		const a10 = at(1, 0);
+		if (a10) {
+			sampleDesc(sk, a10, cycle, b, next);
+			blendPose(out, b, t0, n);
+		}
+	}
+	if (t1 > 0.001) {
+		const a01 = at(0, 1);
+		if (!a01) return;
+		sampleDesc(sk, a01, cycle, b, next);
+		if (t0 > 0.001) {
+			const a11 = at(1, 1);
+			if (a11) {
+				sampleDesc(sk, a11, cycle, c, next);
+				blendPose(b, c, t0, n);
+			}
+		}
+		blendPose(out, b, t1, n);
+	}
+}
+
+// A delta pose added onto `out` (Studio_SlerpBones for delta sequences):
+// rotations multiplied in (after the base for STUDIO_POST, before it
+// otherwise), positions added, each scaled by the bone's weight
+function addDelta(out: Pose, d: Pose, s: Sequence, weight: number, n: number) {
+	for (let i = 0; i < n; i++) {
+		const w = weight * (s.weights?.[i] ?? 1);
+		if (w <= 0) continue;
+		const o = i * 4;
+		const q = [d.quat[o], d.quat[o + 1], d.quat[o + 2], d.quat[o + 3]];
+		if (w < 1) {
+			// the rotation scaled (slerp from no rotation)
+			const id = new Float32Array(IDENTITY_Q), qq = new Float32Array(q);
+			slerp(id, qq, 0, w);
+			q.splice(0, 4, id[0], id[1], id[2], id[3]);
+		}
+		const b = [out.quat[o], out.quat[o + 1], out.quat[o + 2], out.quat[o + 3]];
+		const [p, r] = s.post ? [b, q] : [q, b];
+		// p * r, with r flipped to p's hemisphere as the engine does
+		if (p[0] * r[0] + p[1] * r[1] + p[2] * r[2] + p[3] * r[3] < 0) for (let k = 0; k < 4; k++) r[k] = -r[k];
+		out.quat[o] = p[0] * r[3] + p[1] * r[2] - p[2] * r[1] + p[3] * r[0];
+		out.quat[o + 1] = -p[0] * r[2] + p[1] * r[3] + p[2] * r[0] + p[3] * r[1];
+		out.quat[o + 2] = p[0] * r[1] - p[1] * r[0] + p[2] * r[3] + p[3] * r[2];
+		out.quat[o + 3] = -p[0] * r[0] - p[1] * r[1] - p[2] * r[2] + p[3] * r[3];
+		for (let k = 0; k < 3; k++) out.pos[i * 3 + k] += d.pos[i * 3 + k] * w;
+	}
+}
+
+// A sequence's pose with its auto-layers (e.g. an aim matrix over a run)
+export function samplePose(sk: Skeleton, seq: number, cycle: number, out: Pose, params?: Record<string, number>) {
+	const ref = (sk.ref ??= referencePose(sk));
+	const s = sk.sequences[seq];
+	if (!s) {
+		out.pos.set(ref.pos);
+		out.quat.set(ref.quat);
+		return;
+	}
+	sampleSequence(sk, s, cycle, out, params, 0);
+	if (!s.autolayers.length) return;
+	const labels = ((sk as Skeleton & {labelIndex?: Map<string, number>}).labelIndex ??= new Map(sk.sequences.map((q, i) => [q.label, i])));
+	const layer = scratch(sk, 3);
+	for (const name of s.autolayers) {
+		const l = sk.sequences[labels.get(name) ?? -1];
+		if (!l || l === s) continue;
+		sampleSequence(sk, l, cycle, layer, params, 4);
+		if (l.delta) addDelta(out, layer, l, 1, sk.bones.length);
+		else {
+			// a full layer replaces what's under it, by bone weight
+			for (let i = 0; i < sk.bones.length; i++) {
+				const w = l.weights?.[i] ?? 1;
+				if (w <= 0) continue;
+				for (let k = 0; k < 3; k++) out.pos[i * 3 + k] += (layer.pos[i * 3 + k] - out.pos[i * 3 + k]) * w;
+				slerp(out.quat, layer.quat, i * 4, w);
+			}
+		}
 	}
 }
 

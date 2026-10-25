@@ -56,6 +56,18 @@ if (import.meta.env.DEV) {
 		const len = Math.hypot(d[0], d[1], d[2]);
 		return (w.shot as (n: string, e: number[], a: number[]) => Promise<string>)(name, eye, [-Math.asin(d[2] / len) * 180 / Math.PI, Math.atan2(d[1], d[0]) * 180 / Math.PI]);
 	};
+	// a shot of the recording player from `dist` away, `side` degrees round from where they face
+	w.sideShot = (name: string, tick: number, dist = 110, side = 90) => {
+		seekTo(tick);
+		const p = view3d.debugPlayer();
+		const k = p && keyAt(p, tick);
+		if (!k) return Promise.resolve('no player');
+		const yaw = (k.angles[1] + side) * Math.PI / 180;
+		const eye = [k.origin[0] + Math.cos(yaw) * dist, k.origin[1] + Math.sin(yaw) * dist, k.origin[2] + 40];
+		const d = [k.origin[0] - eye[0], k.origin[1] - eye[1], k.origin[2] + 36 - eye[2]];
+		const len = Math.hypot(d[0], d[1], d[2]);
+		return (w.shot as (n: string, e: number[], a: number[]) => Promise<string>)(name, eye, [-Math.asin(d[2] / len) * 180 / Math.PI, Math.atan2(d[1], d[0]) * 180 / Math.PI]);
+	};
 	// frames of a tick range into fixtures/shots/<name>/ (as JPEGs), for videos
 	w.record = async (name: string, from: number, to: number, step = 2, width = 960, height = 540) => {
 		let n = 0;

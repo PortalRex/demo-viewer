@@ -51,6 +51,8 @@ const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_T
 const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
 const toEuler = (a: Vec3) => new THREE.Euler(a[2] * Math.PI / 180, a[0] * Math.PI / 180, a[1] * Math.PI / 180, 'ZYX');
+// an angle in [-180, 180)
+const normPitch = (p: number) => ((p + 180) % 360 + 360) % 360 - 180;
 
 function geometry(m: MeshData) {
 	const g = new THREE.BufferGeometry();
@@ -183,6 +185,25 @@ class MaterialLibrary {
 	// glass and other Refract surfaces: what's behind them multiplied by
 	// their tint (and tint texture), unlit, as the shader draws them
 	private applyRefract(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
+		if (info.baseTexture) {
+			// with a $basetexture the shader refracts that instead of the
+			// screen: the texture times the tint, unlit and unscaled (light covers)
+			mat.userData.textureless = true;
+			mat.vertexColors = false;
+			mat.toneMapped = false;
+			mat.lightMap = null;
+			mat.defines = {...mat.defines, REFRACT_TINT: ''};
+			delete mat.defines.BACKFACE_SHADE;
+			mat.color.setRGB(info.refractTint[0], info.refractTint[1], info.refractTint[2], THREE.LinearSRGBColorSpace);
+			mat.needsUpdate = true;
+			this.textures.get(info.baseTexture).then(tex => {
+				if (!tex) return;
+				mat.map = tex;
+				mat.needsUpdate = true;
+				this.onChange();
+			});
+			return;
+		}
 		mat.transparent = true;
 		mat.depthWrite = false;
 		mat.side = THREE.DoubleSide;
@@ -1585,16 +1606,25 @@ export class View3D {
 
 	// A player's animation, picked from their movement as the game's
 	// animation state does: idle, run or crouch-walk (blended by direction
-	// relative to where they face), or floating in the air
+	// relative to where they face), or floating in the air; the upper body
+	// aims where they look (the sequences' aim-matrix layer)
 	private playerAnim(t: EntityTrack, tick: number, sk: Skeleton): [number, number, Record<string, number>] {
-		const seqs = (sk as Skeleton & {labels?: Map<string, number>}).labels ??= new Map(sk.sequences.map((s, i) => [s.label, i]));
+		const m = this.playerMotion(t, sk);
+		// (ticks between network updates are fractional)
+		const i = Math.min(m.seq.length - 1, Math.max(0, Math.floor(tick) - m.start)) || 0;
 		const k = keyAt(t, tick)!;
-		const before = keyAt(t, tick - 6) ?? k;
-		const dt = Math.max(1, k.tick - before.tick) * this.interval;
-		const v = [0, 1, 2].map(i => (k.origin[i] - before.origin[i]) / Math.max(dt, 6 * this.interval));
-		const speed = Math.hypot(v[0], v[1]);
-		const crouched = k.eyeZ !== undefined && k.eyeZ < 50;
-		const air = Math.abs(v[2]) > 40;
+		const c = m.phase[i];
+		return [m.seq[i], c - Math.floor(c), {move_x: m.moveX[i], move_y: m.moveY[i], body_pitch: -normPitch(k.angles[0]), body_yaw: 0}];
+	}
+
+	// a player's movement animation for every tick of their track: the
+	// sequence, its direction, and its cycle (advanced tick by tick at the
+	// speed-matched rate, so speed changes don't jump the legs)
+	private motions = new WeakMap<EntityTrack, {start: number; seq: Int16Array; phase: Float64Array; moveX: Float32Array; moveY: Float32Array}>();
+	private playerMotion(t: EntityTrack, sk: Skeleton) {
+		const have = this.motions.get(t);
+		if (have) return have;
+		const seqs = new Map(sk.sequences.map((s, i) => [s.label, i]));
 		const pick = (...labels: string[]) => {
 			for (const l of labels) {
 				const i = seqs.get(l);
@@ -1602,21 +1632,40 @@ export class View3D {
 			}
 			return 0;
 		};
-		let seq: number, rate = 1;
-		if (air) seq = pick('portalgun_jumpfloat', 'jump_float', 'jumpfloat');
-		else if (speed > 15) {
-			seq = crouched ? pick('portalgun_crouchwalk', 'crouchwalk') : pick('portalgun_run', 'run');
-			rate = Math.min(2, Math.max(0.4, speed / (crouched ? 63 : 175)));
-		} else seq = crouched ? pick('portalgun_crouch_idle', 'crouch_idle') : pick('portalgun_standing_idle', 'standing_idle', 'idle');
-		const yaw = k.angles[1] * Math.PI / 180;
-		const params: Record<string, number> = {move_x: 0, move_y: 0};
-		if (speed > 15) {
-			params.move_x = (v[0] * Math.cos(yaw) + v[1] * Math.sin(yaw)) / speed;
-			params.move_y = (-v[0] * Math.sin(yaw) + v[1] * Math.cos(yaw)) / speed;
+		// Chell's float is portalgun_jump_float, the robots' portalgun_jumpfloat
+		const FLOAT = pick('portalgun_jump_float', 'portalgun_jumpfloat'), RUN = pick('portalgun_run'), CROUCHWALK = pick('portalgun_crouchwalk');
+		const IDLE = pick('portalgun_standing_idle'), CROUCH = pick('portalgun_crouch_idle');
+		const start = t.keys[0].tick, n = Math.max(1, t.keys[t.keys.length - 1].tick - start + 1);
+		const seq = new Int16Array(n), phase = new Float64Array(n), moveX = new Float32Array(n), moveY = new Float32Array(n);
+		let ki = 0, cycle = 0;
+		for (let i = 0; i < n; i++) {
+			const tick = start + i;
+			while (ki + 1 < t.keys.length && t.keys[ki + 1].tick <= tick) ki++;
+			const k = t.keys[ki];
+			const before = keyAt(t, tick - 6) ?? k;
+			const dt = Math.max(6, k.tick - before.tick) * this.interval;
+			const v = [0, 1, 2].map(a => (k.origin[a] - before.origin[a]) / dt);
+			const speed = Math.hypot(v[0], v[1]);
+			const flags = Number(k.extra?.m_fFlags ?? NaN);
+			// FL_ONGROUND and FL_DUCKING when recorded, else guessed from motion
+			const air = Number.isNaN(flags) ? Math.abs(v[2]) > 40 : !(flags & 1);
+			const crouched = Number.isNaN(flags) ? k.eyeZ !== undefined && k.eyeZ < 50 : !!(flags & 2);
+			let s: number, rate = 1;
+			if (air) s = FLOAT;
+			else if (speed > 15) {
+				s = crouched ? CROUCHWALK : RUN;
+				rate = Math.min(2, Math.max(0.4, speed / (crouched ? 63 : 175)));
+				const yaw = k.angles[1] * Math.PI / 180;
+				moveX[i] = (v[0] * Math.cos(yaw) + v[1] * Math.sin(yaw)) / speed;
+				moveY[i] = (-v[0] * Math.sin(yaw) + v[1] * Math.cos(yaw)) / speed;
+			} else s = crouched ? CROUCH : IDLE;
+			seq[i] = s;
+			cycle += this.interval * sequenceRate(sk, s) * rate;
+			phase[i] = cycle;
 		}
-		const time = tick * this.interval;
-		const c = time * sequenceRate(sk, seq) * rate;
-		return [seq, c - Math.floor(c), params];
+		const m = {start, seq, phase, moveX, moveY};
+		this.motions.set(t, m);
+		return m;
 	}
 
 	// the entity at a network index at a tick (indices get reused)
@@ -1838,6 +1887,9 @@ export class View3D {
 				const o = show ? this.objectFor(t, k?.skin ?? 0) : this.objects.get(t);
 				if (!o) continue;
 				o.visible = show;
+				// a doorway's fade brush: drawn by the camera's distance (a closed
+				// door's black backing; open doors fade it out)
+				if (show && k && t.className === 'CFuncAreaPortalWindow') o.visible = this.portalWindowBlend(o, k) >= 0.5;
 				if (show && k && WORLD_SPACE.has(t.className)) {
 					this.placeEffect(t, k, o, time);
 					continue;
@@ -2107,6 +2159,25 @@ export class View3D {
 		this.camera.quaternion.copy(saved[1]);
 		this.render();
 		return url;
+	}
+
+	// how solid a func_areaportalwindow's brush is (C_FuncAreaPortalWindow::
+	// GetDistanceBlend): the camera's distance from its bounds remapped from
+	// the fade start..end distances to the translucency limit..1
+	private portalWindowBlend(o: THREE.Object3D, k: EntityKey): number {
+		const e = k.extra ?? {};
+		const start = Number(e.m_flFadeStartDist ?? 0), end = Number(e.m_flFadeDist ?? 0), limit = Number(e.m_flTranslucencyLimit ?? 0);
+		const box = (o.userData.windowBox ??= new THREE.Box3()) as THREE.Box3;
+		box.setFromObject(o);
+		const dist = box.isEmpty() ? 0 : box.distanceToPoint(this.camera.position);
+		if (start === end) return dist >= end ? 1 : limit;
+		const t = Math.min(1, Math.max(0, (dist - start) / (end - start)));
+		return limit + (1 - limit) * t;
+	}
+
+	// debugging: the recording player's track
+	debugPlayer(): EntityTrack | undefined {
+		return this.entities?.player;
 	}
 
 	// debugging: the track at a network index (of a class)

@@ -57,6 +57,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	// whose view model it is (co-op recordings have one per player)
 	CPredictedViewModel: ['m_hOwner', 'm_nViewModelIndex'],
 	CBaseViewModel: ['m_hOwner', 'm_nViewModelIndex'],
+	// a doorway's fade brush, drawn by distance (see View3D)
+	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],
 };
 
