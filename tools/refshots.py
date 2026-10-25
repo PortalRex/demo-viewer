@@ -19,10 +19,8 @@ OUT = os.path.join(FIXTURES, "shots", "ref")
 
 # demo file (in fixtures) -> ticks to capture
 SHOTS = [
-    ("cm_laserovergoo.dem", [500]),
     ("pair_Buttons_1818_76561198795823814_229948.dem", [300, 690]),
     ("pair_TeamRetrieval_1498_76561198795823814_201453.dem", [400, 900]),
-    ("cm_bridgeintro.dem", [400]),
 ]
 
 
@@ -58,7 +56,8 @@ def main():
     with open(os.path.join(GD, "cfg", "autoexec.cfg"), "w", encoding="utf-8") as f:
         f.write("plugin_load refshots_sar\nsar_disable_no_focus_sleep 1\njoystick 0\ncl_drawhud 0\ncrosshair 0\n"
                 "hud_draw_fixed_reticle 0\nvolume 0\nmat_vsync 0\nfps_max 0\n"
-                "sv_cheats 1\nsar_on_load sv_cheats 1\nsar_render_autostart 1\nsar_render_autostop 1\nsar_render_fps 60\nsar_render_quality 20\nsar_render_blend 1\n"
+                "sv_cheats 1\nsar_on_load sv_cheats 1\nsar_disable_challenge_stats_hud -1\nsar_disable_challenge_stats_hud_partner 0\n"
+                "sar_render_autostart 1\nsar_render_autostop 1\nsar_render_fps 60\nsar_render_quality 20\nsar_render_blend 1\n"
                 "sar_render_skip_coop_videos 1\necho [ref] ready\n")
     for name, _ in SHOTS:
         shutil.copy(os.path.join(FIXTURES, name), os.path.join(GD, name))

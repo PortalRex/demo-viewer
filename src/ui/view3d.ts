@@ -1541,9 +1541,14 @@ export class View3D {
 			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType, stencilBuffer: true});
 			const fog = this.scene.fog;
 			this.scene.fog = null;
+			// with a 3D skybox the sky box sits at the sky camera, where it
+			// would cover the whole view here
+			const skyShown = this.sky.visible;
+			if (this.skyCamera) this.sky.visible = false;
 			r.setRenderTarget(this.meter);
 			r.render(this.scene, this.camera);
 			r.setRenderTarget(null);
+			this.sky.visible = skyShown;
 			this.scene.fog = fog;
 			const px = new Uint16Array(w * h * 4);
 			r.readRenderTargetPixels(this.meter, 0, 0, w, h, px);
@@ -1782,15 +1787,16 @@ export class View3D {
 	render() {
 		const r = this.renderer;
 		if (!r) return;
+		// orbit: the camera stays on the player's side of walls, as a game's
+		// third-person camera does (the user's distance is kept for later);
+		// before metering, which must see what's drawn
+		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
 		this.camera.updateMatrixWorld();
 		if (this.bsp) {
 			if (!this.skyCamera) this.sky.position.copy(this.camera.position);
 			this.meterExposure(r);
 			this.updateFog();
 		}
-		// orbit: the camera stays on the player's side of walls, as a game's
-		// third-person camera does (the user's distance is kept for later)
-		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
 		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
 		this.renderScene(r);
