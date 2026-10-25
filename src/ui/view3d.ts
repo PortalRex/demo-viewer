@@ -1870,7 +1870,13 @@ export class View3D {
 			if (!gun) continue;
 			// attachments (1-based): v_portalgun muzzle 1, arms 4/7/10; w_portalgun muzzle 1, arms 5/8/11
 			const atts = fp ? [1, 4, 7, 10] : [1, 5, 8, 11];
-			const at = (m: THREE.Matrix4 | null) => m && new THREE.Matrix4().setPosition(new THREE.Vector3().setFromMatrixPosition(m));
+			// (turned as the attachments are: the strands bulge out along their ends' axes)
+			const at = (m: THREE.Matrix4 | null) => {
+				if (!m) return null;
+				const pos = new THREE.Vector3(), rot = new THREE.Quaternion();
+				m.decompose(pos, rot, new THREE.Vector3());
+				return new THREE.Matrix4().compose(pos, rot, new THREE.Vector3(1, 1, 1));
+			};
 			run(`hold:${fp ? 'fp' : 'tp'}:${p.index}:${since}`, fp ? 'portalgun_beam_holding_FP' : 'portalgun_beam_holding_TP', since, Infinity, () => {
 				const pts = atts.map(a => at(this.attachmentAt(gun.index, a, tick, fp)));
 				if (pts.some(m => !m)) return null;

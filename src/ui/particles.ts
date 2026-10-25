@@ -155,6 +155,8 @@ export class ParticleInstance {
 	private rand: () => number;
 	private emitted = new Map<ParticleOperator, number>();
 	private children: {inst: ParticleInstance; delay: number}[] = [];
+	private parent: ParticleInstance | null = null;
+	private pathBulge: THREE.Vector3 | undefined;  // a path's random bulge direction
 	private spawned = 0;
 	// initializers that read a particle's position run after those that set it
 	private initOrder: ParticleOperator[];
@@ -172,7 +174,10 @@ export class ParticleInstance {
 		if (depth < 4) {
 			def.children.forEach((c, i) => {
 				const d = lib.get(c.name);
-				if (d) this.children.push({inst: new ParticleInstance(d, lib, cps, seed * 31 + i + 1, depth + 1), delay: c.delay});
+				if (!d) return;
+				const child = new ParticleInstance(d, lib, cps, seed * 31 + i + 1, depth + 1);
+				child.parent = this;
+				this.children.push({inst: child, delay: c.delay});
 			});
 		}
 		this.placeControlPoints(0);
@@ -262,6 +267,44 @@ export class ParticleInstance {
 	// a control point an operator moves: the engine's SetControlPoint passes
 	// it on to the child systems too (portal edges aim their children's
 	// ribbons by points the parent places)
+	// A point along a path between two control points, as the engine's
+	// path parameters shape it: a quadratic curve through a mid point (at
+	// "mid point position" along), pushed out by "bulge" x the length along
+	// the start's or end's forward axis (less the more the path already runs
+	// that way), or a random one
+	private pathPoint(o: ParticleOperator, t: number): THREE.Vector3 {
+		const si = num(o, 'start control point number', 0), ei = num(o, 'end control point number', 0);
+		const a = this.cpPos(si), b = this.cpPos(ei);
+		const mid = a.clone().lerp(b, num(o, 'mid point position', 0.5));
+		const bulge = num(o, 'bulge', 0);
+		if (bulge) {
+			const control = num(o, 'bulge control 0=random 1=orientation of start pnt 2=orientation of end point', 0);
+			const along = b.clone().sub(a);
+			const len = along.length();
+			let fwd: THREE.Vector3;
+			if (control === 0) {
+				if (!this.pathBulge) {
+					const z = this.r(-1, 1), ang = this.r(0, Math.PI * 2), r = Math.sqrt(1 - z * z);
+					this.pathBulge = new THREE.Vector3(r * Math.cos(ang), r * Math.sin(ang), z);
+				}
+				fwd = this.pathBulge;
+			}
+			else fwd = new THREE.Vector3().setFromMatrixColumn(this.cp(control === 2 ? ei : si), 0).normalize();
+			const scale = len > 1e-6 ? 1 - Math.abs(along.divideScalar(len).dot(fwd)) : 0;
+			mid.addScaledVector(fwd, bulge * len * scale);
+		}
+		const p0 = a.lerp(mid, t), p1 = mid.lerp(b, t);
+		return p0.lerp(p1, t);
+	}
+
+	// the emitters fire again from `at` (the engine's Restart, which goes to
+	// the child systems too)
+	private restartEmitters(at: number) {
+		this.emitted.clear();
+		this.emitBase = at;
+		for (const c of this.children) c.inst.restartEmitters(at - c.delay);
+	}
+
 	private changeCp(n: number, change: (m: THREE.Matrix4) => THREE.Matrix4) {
 		this.cps = new Map(this.cps);
 		this.cps.set(n, change(this.cp(n)));
@@ -310,8 +353,7 @@ export class ParticleInstance {
 			const next = () => this.r(num(restart, 'Minimum Restart Time', 0), num(restart, 'Maximum Restart Time', 1));
 			if (this.restartAt < 0) this.restartAt = next();
 			if (t >= this.restartAt) {
-				this.emitted.clear();
-				this.emitBase = this.restartAt;
+				this.restartEmitters(this.restartAt);
 				this.restartAt += Math.max(0.05, next());
 			}
 		}
@@ -343,6 +385,21 @@ export class ParticleInstance {
 		const decay = this.def.operators.find(o => o.fn === 'lifespan decay');
 		const ages = !!decay && endCapOk(decay, !this.emitting);
 		for (const p of this.particles) this.operate(p, dt);
+		// "inherit attribute from parent particle": each particle takes the
+		// position of its parent system's particle in the same place (every
+		// increment-th), so a child rope or sparks follow the parent's strand
+		if (this.parent) {
+			for (const o of this.def.operators) {
+				if (o.fn !== 'inherit attribute from parent particle' || num(o, 'Inherited Field', 0) !== 0) continue;
+				const from = [...this.parent.particles].sort((a, b) => a.index - b.index);
+				if (!from.length) continue;
+				const step = Math.max(1, Math.round(num(o, 'Particle Increment Amount', 1)));
+				// (matched against the parent's newest: its last burst)
+				const mine = [...this.particles].sort((a, b) => a.index - b.index);
+				const base = Math.max(0, from.length - mine.length * step);
+				mine.forEach((p, k) => p.pos.copy(from[(base + k * step) % from.length].pos));
+			}
+		}
 		// "remap difference of sequential particle vector to scalar": by how
 		// far each particle is from the one spawned before it (a rope hides
 		// the jump between one burst's end and the next's start)
@@ -442,10 +499,9 @@ export class ParticleInstance {
 				break;
 			}
 			case 'position along path sequential': {
-				const a = this.cpPos(num(o, 'start control point number', 0)), b = this.cpPos(num(o, 'end control point number', 0));
 				const n = Math.max(1, num(o, 'particles to map from start to end', 100));
 				const k = n > 1 ? (index % n) / (n - 1) : 0;
-				p.pos = a.lerp(b, k);
+				p.pos = this.pathPoint(o, k);
 				p.pathT = k;  // (kept for "movement lock to saved position along path")
 				break;
 			}
@@ -567,7 +623,7 @@ export class ParticleInstance {
 				// carried along as the path's ends move (a beam between two
 				// moving points)
 				if (p.pathT === undefined) break;
-				const at = this.cpPos(num(o, 'start control point number', 0)).lerp(this.cpPos(num(o, 'end control point number', 1)), p.pathT);
+				const at = this.pathPoint(o, p.pathT);
 				if (p.pathAt) p.pos.add(at.clone().sub(p.pathAt));
 				p.pathAt = at;
 				break;
