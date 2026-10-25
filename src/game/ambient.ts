@@ -77,6 +77,19 @@ export class AmbientLighting {
 	// the ambient cube at a point (blended from the leaf's samples by
 	// distance) and the nearby world lights that reach it
 	at(p: number[]): ModelLight {
+		// a leaf without samples (or a point just inside a wall): the
+		// nearest point around it that has some
+		let cube = this.cubeAt(p);
+		for (let r = 16; !cube && r <= 64; r *= 2) {
+			for (const d of [[0, 0, r], [0, 0, -r], [r, 0, 0], [-r, 0, 0], [0, r, 0], [0, -r, 0]]) {
+				cube = this.cubeAt([p[0] + d[0], p[1] + d[1], p[2] + d[2]]);
+				if (cube) break;
+			}
+		}
+		return {cube: cube ?? new Array(18).fill(0), lights: this.lightsAt(p)};
+	}
+
+	private cubeAt(p: number[]): number[] | null {
 		const cube = new Array(18).fill(0);
 		let leaf = this.leafAt(p);
 		// a leaf without samples of its own (solid) borrows a neighbour's
@@ -105,9 +118,16 @@ export class AmbientLighting {
 					cube[side * 3 + 2] += this.samples.getUint8(c + 2) * e * w;
 				}
 			}
-			if (total > 0) for (let i = 0; i < 18; i++) cube[i] /= total;
+			if (total > 0) {
+				for (let i = 0; i < 18; i++) cube[i] /= total;
+				return cube;
+			}
 		}
-		// the strongest two direct lights not already in the cubes
+		return null;
+	}
+
+	// the strongest two direct lights not already in the cubes
+	private lightsAt(p: number[]): ModelLight['lights'] {
 		const lit: {pos: [number, number, number]; color: [number, number, number]; s: number}[] = [];
 		for (const l of this.lights) {
 			if (l.inAmbient || (l.type !== 1 && l.type !== 2)) continue;
@@ -125,6 +145,6 @@ export class AmbientLighting {
 			lit.push({pos: l.origin, color, s: color[0] + color[1] + color[2]});
 		}
 		lit.sort((a, b) => b.s - a.s);
-		return {cube, lights: lit.slice(0, 2).map(({pos, color}) => ({pos, color}))};
+		return lit.slice(0, 2).map(({pos, color}) => ({pos, color}));
 	}
 }

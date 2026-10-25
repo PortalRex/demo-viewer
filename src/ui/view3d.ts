@@ -1410,6 +1410,8 @@ export class View3D {
 		};
 		const apply = (o: THREE.Object3D) => {
 			hookMeshes(o);
+			// (fresh world matrices: held objects are placed by hand each frame)
+			o.updateMatrixWorld(true);
 			const box = new THREE.Box3().setFromObject(o);
 			const p = box.isEmpty() ? new THREE.Vector3().setFromMatrixPosition(o.matrixWorld) : box.getCenter(new THREE.Vector3());
 			const key = `${Math.round(p.x / 4)},${Math.round(p.y / 4)},${Math.round(p.z / 4)}`;

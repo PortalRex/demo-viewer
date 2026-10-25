@@ -20,9 +20,9 @@ OUT = os.path.join(FIXTURES, "shots", "ref")
 
 # demo file (in fixtures) -> ticks to capture
 SHOTS = [
-    ("cm_columnblocker.dem", [756, 1300]),
-    ("cm_bridgeintro.dem", [400]),
-    ("pair_TeamRetrieval_1498_76561198795823814_201453.dem", [400, 700]),
+    ("cm_duallasers.dem", [200, 300]),
+    ("cm_triplelaser.dem", [300, 600]),
+    ("cm_bombflings.dem", [300, 600]),
 ]
 
 

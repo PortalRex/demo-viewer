@@ -143,7 +143,7 @@ const AMBIENT_FRAGMENT = `
 	}
 `;
 
-const NEUTRAL: ModelLighting = {cube: new Array(18).fill(0.012), lights: []};
+const NEUTRAL: ModelLighting = {cube: new Array(18).fill(0.1), lights: []};
 
 // a lit model material of its own for one mesh (three uploads a material's
 // uniforms only when the material changes between draws, so objects can't
