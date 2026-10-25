@@ -25,7 +25,7 @@ import {readVhv} from '../game/vhv.ts';
 import {PaintBlobs, type Sprayer} from './paintblobs.ts';
 import {Ropes, type RopeSpec} from './ropes.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
-import {keyAt, keyIndexAt} from '../net/entities.ts';
+import {keyAt, keyIndexAt, type ScreenFade} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
 import {Bloom, ENCODE} from './bloom.ts';
@@ -3271,7 +3271,7 @@ export class View3D {
 	// the final pass: the frame times the exposure, clamped (the game's
 	// linear tone mapping) and sRGB-encoded
 	private composite = new THREE.ShaderMaterial({
-		uniforms: {frame: {value: null}, exposure: {value: 1}, bloom: {value: null}, bloomAmount: {value: 0}},
+		uniforms: {frame: {value: null}, exposure: {value: 1}, bloom: {value: null}, bloomAmount: {value: 0}, fade: {value: new THREE.Vector4()}, fadeModulate: {value: 0}},
 		depthTest: false,
 		depthWrite: false,
 		vertexShader: `
@@ -3285,12 +3285,16 @@ export class View3D {
 			uniform float exposure;
 			uniform sampler2D bloom;
 			uniform float bloomAmount;
+			uniform vec4 fade;
+			uniform float fadeModulate;
 			varying vec2 vUv;
 			${ENCODE}
 			void main() {
 				vec3 c = encode(texture2D(frame, vUv).rgb, exposure);
 				// (engine_post: half the bloom buffer, added in gamma space)
 				c += bloomAmount * 0.5 * texture2D(bloom, vUv).rgb;
+				// the screen fade over it (or multiplying it)
+				c = fadeModulate > 0.5 ? c * mix(vec3(1.0), fade.rgb, fade.a) : mix(c, fade.rgb, fade.a);
 				gl_FragColor = vec4(c, 1.0);
 			}`,
 	});
@@ -3299,6 +3303,56 @@ export class View3D {
 	private bloomScale = 1;
 	// debugging: a bloom scale used instead of the map's
 	bloomOverride: number | null = null;
+	// The screen fades the server sent the recording player, as the client's
+	// view effects run them: a fade in holds the colour, then lifts it over
+	// its duration; a fade out brings it on over its duration, then holds;
+	// spent ones go unless they stay out; a purge clears the earlier ones.
+	// Together: the highest alpha, the colours averaged.
+	private screenFade(tick: number) {
+		const u = this.composite.uniforms;
+		u.fade.value.set(0, 0, 0, 0);
+		const fades = this.entities?.fades;
+		if (!fades?.length || this.mode !== 'eyes' || this.followed) return;
+		const now = tick * this.interval;
+		let active: {f: ScreenFade; speed: number; end: number; reset: number}[] = [];
+		// a bare purge first (instant, opaque, fading in: co-op starts) lifts a
+		// fade that stayed out from before the recording began
+		const first = fades[0];
+		if (first.tick > 0 && first.flags === 17 && !first.duration && !first.hold && first.color[3] === 255 && tick < first.tick) {
+			u.fade.value.set(first.color[0] / 255, first.color[1] / 255, first.color[2] / 255, 1);
+			u.fadeModulate.value = 0;
+			return;
+		}
+		for (const f of fades) {
+			if (f.tick > tick) break;
+			if (f.flags & 16) active = [];
+			const t0 = f.tick * this.interval, alpha = f.color[3];
+			let speed = 0, end: number, reset: number;
+			if (f.flags & 2) {
+				if (f.duration) speed = -alpha / f.duration;
+				end = t0 + f.duration;
+				reset = end + f.hold;
+			} else {
+				if (f.duration) speed = alpha / f.duration;
+				reset = t0 + f.hold;
+				end = reset + f.duration;
+			}
+			active.push({f, speed, end, reset});
+		}
+		active = active.filter(a => !(now > a.reset && now > a.end) || (a.f.flags & 8));
+		if (!active.length) return;
+		let alpha = 0, modulate = false;
+		const rgb = [0, 0, 0];
+		for (const {f, speed, end} of active) {
+			let a = speed * (end - now);
+			if (f.flags & 2) a += f.color[3];
+			alpha = Math.max(alpha, Math.min(f.color[3], Math.max(0, a)));
+			for (let i = 0; i < 3; i++) rgb[i] += f.color[i];
+			if (f.flags & 4) modulate = true;
+		}
+		u.fade.value.set(rgb[0] / active.length / 255, rgb[1] / active.length / 255, rgb[2] / active.length / 255, alpha / 255);
+		u.fadeModulate.value = modulate ? 1 : 0;
+	}
 	private compositeScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.composite), {frustumCulled: false}));
 	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
@@ -3364,6 +3418,7 @@ export class View3D {
 		r.setRenderTarget(null);
 		this.composite.uniforms.frame.value = this.frame.texture;
 		this.composite.uniforms.exposure.value = this.exposure;
+		this.screenFade(this.meterTick);
 		r.render(this.compositeScene, this.compositeCam);
 		if (saved) {
 			this.camera.position.copy(saved);

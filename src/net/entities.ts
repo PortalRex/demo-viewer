@@ -104,7 +104,21 @@ export interface EntityTimeline {
 	lightStyles: LightStyleChange[];  // in tick order
 	particleNames: string[];          // "ParticleEffectNames" (info_particle_system's m_iEffectIndex)
 	effects: EffectEvent[];           // dispatched effects (temp entities), in tick order
+	fades: ScreenFade[];              // screen fades sent to the recording player, in tick order
 }
+
+// A "Fade" user message (ScreenFade_t): over `duration` seconds to or from
+// the colour, held `hold` seconds; flags FFADE_IN 1, OUT 2, MODULATE 4,
+// STAYOUT 8, PURGE 16
+export interface ScreenFade {
+	tick: number;
+	duration: number;
+	hold: number;
+	flags: number;
+	color: [number, number, number, number];  // 0..255
+}
+// Portal 2's user message number for it (registration order)
+const MSG_FADE = 13;
 
 // A DispatchEffect from the server (CTEEffectDispatch): "PortalBlast" for a
 // portal shot (origin: where it left the gun, start: where the portal
@@ -238,6 +252,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 	const backdoorSeen = seg.net.some(r => r.kind === 'entities');
 	const paint: PaintEvent[] = [];
 	const effects: EffectEvent[] = [];
+	const fades: ScreenFade[] = [];
 	const lightStyles: LightStyleChange[] = [];
 	const stylePatterns = new Map<number, string>();
 	let tableTick = 0;
@@ -458,6 +473,16 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 					applyPacketEntities(h, r.tick);
 				},
 				onUserMessage: (type, data) => {
+					if (type === MSG_FADE) {
+						try {
+							// (times in 1/512 s: SCREENFADE_FRACBITS 9)
+							const duration = data.u(16) / 512, hold = data.u(16) / 512, flags = data.u(16);
+							fades.push({tick: r.tick, duration, hold, flags, color: [data.u(8), data.u(8), data.u(8), data.u(8)]});
+						} catch {
+							// a short message: ignore it
+						}
+						return;
+					}
 					const e = readPaintMessage(type, data, r.tick);
 					if (e) paint.push(e);
 				},
@@ -525,7 +550,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	}
 	const particleNames = (tableByName.get('ParticleEffectNames')?.entries ?? []).map(e => e?.name ?? '');
-	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, effects};
+	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, effects, fades};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
