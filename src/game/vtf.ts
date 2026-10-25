@@ -229,3 +229,49 @@ export function decodeVtf(img: VtfImage): Uint8Array {
 	}
 	return out;
 }
+
+// ---- sprite sheets (the "sheet" resource particle textures carry) ----
+
+export interface SheetFrame {
+	duration: number;
+	uv: [number, number, number, number];  // left, top, right, bottom
+}
+
+export interface SheetSequence {
+	frames: SheetFrame[];
+	total: number;   // seconds
+	clamp: boolean;  // hold the last frame instead of looping
+}
+
+// a texture's sheet: sequences of frames, each a sub-rectangle of the image
+export function readVtfSheet(bytes: Uint8Array): SheetSequence[] | null {
+	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (v.getUint32(0, true) !== 0x00465456 || v.getUint32(8, true) < 3) return null;
+	const numResources = v.getUint32(68, true);
+	for (let i = 0; i < numResources; i++) {
+		const o = 80 + i * 8;
+		if ((v.getUint32(o, true) & 0xffffff) !== 0x10) continue;
+		let p = v.getUint32(o + 4, true) + 4;  // past the chunk's size
+		const version = v.getInt32(p, true);
+		const perFrame = version ? 4 : 1;
+		const count = v.getInt32(p + 4, true);
+		p += 8;
+		const out: SheetSequence[] = [];
+		for (let s = 0; s < count && p + 16 <= v.byteLength; s++) {
+			const index = v.getInt32(p, true), flags = v.getInt32(p + 4, true), frames = v.getInt32(p + 8, true);
+			const total = v.getFloat32(p + 12, true);
+			p += 16;
+			const seq: SheetSequence = {frames: [], total, clamp: (flags & 1) !== 0};
+			for (let f = 0; f < frames && p + 4 <= v.byteLength; f++) {
+				const duration = v.getFloat32(p, true);
+				p += 4;
+				const uv: [number, number, number, number] = [v.getFloat32(p, true), v.getFloat32(p + 4, true), v.getFloat32(p + 8, true), v.getFloat32(p + 12, true)];
+				p += 16 * perFrame;
+				seq.frames.push({duration, uv});
+			}
+			out[index] = seq;
+		}
+		return out;
+	}
+	return null;
+}

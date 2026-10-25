@@ -14,6 +14,7 @@ import type {Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
+import {ParticleLibrary, ParticleInstance, ParticleRenderer} from './particles.ts';
 import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
@@ -272,6 +273,11 @@ export class View3D {
 	private tracksByIndex = new Map<number, EntityTrack[]>();
 	// the world's solid faces, for keeping the orbit camera inside the map
 	private collision: MeshBVH | null = null;
+	// particle effects: info_particle_system entities, each active run an instance
+	private particleLib: ParticleLibrary | null = null;
+	private particleRenderer: ParticleRenderer | null = null;
+	private particleRuns = new Map<EntityTrack, {start: number; inst: ParticleInstance}>();
+	private particlesShown: ParticleInstance[] = [];
 	// first-person view model (the portal gun), drawn over the world in
 	// Eyes view with its own field of view, as the game does
 	private vmScene = new THREE.Scene();
@@ -430,6 +436,14 @@ export class View3D {
 		this.library.setBackFaces(this.mode !== 'eyes');
 		this.library.onChange = () => this.onLoaded();
 		this.effects = new EffectAssets(materials, this.library.textures);
+		if (this.particleRenderer) {
+			this.particleRenderer.clear();
+			this.scene.remove(this.particleRenderer.group);
+		}
+		this.particleLib = new ParticleLibrary(files, bsp.name);
+		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
+		this.scene.add(this.particleRenderer.group);
+		this.particleRuns.clear();
 		this.fizzlers.clear();
 		this.paint = null;
 		paintUniforms.paintOn.value = 0;
@@ -601,6 +615,8 @@ export class View3D {
 	}
 
 	private clearEntities() {
+		this.particleRuns.clear();
+		this.particlesShown = [];
 		this.entityGroup.clear();
 		this.objects.clear();
 		for (const g of this.vmObjects.values()) this.vmScene.remove(g);
@@ -956,6 +972,58 @@ export class View3D {
 		return i >= 0 && t.keys[i].tick > 1 ? t.keys[i].tick : tick - 1000;
 	}
 
+	// info_particle_system effects: a run from when one is switched on to
+	// when it's switched off (its particles then live out their lives),
+	// simulated from its start so seeking anywhere shows the same thing
+	private updateParticles(tick: number) {
+		const ents = this.entities, lib = this.particleLib;
+		this.particlesShown = [];
+		if (!ents || !lib) return;
+		const LINGER = 5;
+		for (const t of ents.tracks) {
+			if (t.className !== 'CParticleSystem') continue;
+			const i = keyIndexAt(t, tick);
+			if (i < 0) continue;
+			const isOn = (j: number) => Number(t.keys[j].extra?.m_bActive) === 1;
+			// the latest run started at or before this tick
+			let j = i;
+			while (j >= 0 && !isOn(j)) j--;
+			if (j < 0) {
+				this.particleRuns.delete(t);
+				continue;
+			}
+			let s = j;
+			while (s > 0 && isOn(s - 1)) s--;
+			let e = j + 1;
+			while (e < t.keys.length && isOn(e)) e++;
+			const start = t.keys[s].tick, end = e < t.keys.length ? t.keys[e].tick : Infinity;
+			const time = (tick - start) * this.interval;
+			if (tick > end + LINGER / this.interval) {
+				this.particleRuns.delete(t);
+				continue;
+			}
+			const k = t.keys[i];
+			const name = ents.particleNames[Number(k.extra?.m_iEffectIndex ?? -1)];
+			const def = name ? lib.get(name) : undefined;
+			if (!def) continue;
+			let run = this.particleRuns.get(t);
+			if (!run || run.start !== start || run.inst.time > time + 1e-4 || time - run.inst.time > 3) {
+				const cp = this.worldMatrix(t, k, tick, 0) ?? new THREE.Matrix4().setPosition(k.origin[0], k.origin[1], k.origin[2]);
+				const inst = new ParticleInstance(def, lib, cp, t.index * 7919 + start);
+				if (time > 6) inst.skipTo(time - 6);
+				run = {start, inst};
+				this.particleRuns.set(t, run);
+			}
+			const stopAt = (end - start) * this.interval;
+			if (time >= stopAt && run.inst.emitting) {
+				run.inst.advance(stopAt);
+				run.inst.stopEmitting();
+			}
+			run.inst.advance(time);
+			this.particlesShown.push(...run.inst.all);
+		}
+	}
+
 	// the recording player's view model, posed by its networked animation
 	private updateViewModel(tick: number) {
 		if (this.vmShown) this.vmShown.visible = false;
@@ -1255,6 +1323,7 @@ export class View3D {
 
 		if (ents) this.placeAttached(tick);
 		this.updateViewModel(tick);
+		this.updateParticles(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		const pk = ents?.player ? keyAt(ents.player, tick) : undefined;
@@ -1301,6 +1370,7 @@ export class View3D {
 		// orbit: the camera stays on the player's side of walls, as a game's
 		// third-person camera does (the user's distance is kept for later)
 		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
+		this.particleRenderer?.draw(this.particlesShown, this.camera);
 		this.renderScene(r);
 		if (this.mode === 'eyes' && this.vmShown) {
 			this.vmCam.position.copy(this.camera.position);

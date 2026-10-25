@@ -48,6 +48,7 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	// which fog and tonemap controllers apply to the player
 	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
+	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],
 };
 
@@ -76,6 +77,7 @@ export interface EntityTimeline {
 	player?: EntityTrack;
 	paint: PaintEvent[];
 	lightStyles: LightStyleChange[];  // in tick order
+	particleNames: string[];          // "ParticleEffectNames" (info_particle_system's m_iEffectIndex)
 }
 
 // a light style's pattern ("lightstyles" string table entry = style number)
@@ -418,7 +420,8 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 			}
 		}
 	}
-	return {tracks, classCounts, errors, player, paint, lightStyles};
+	const particleNames = (tableByName.get('ParticleEffectNames')?.entries ?? []).map(e => e?.name ?? '');
+	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
