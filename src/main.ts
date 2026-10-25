@@ -5,7 +5,7 @@ import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D} from './ui/view3d.ts';
 import type {CameraMode} from './ui/view3d.ts';
-import {decodeEntities} from './net/entities.ts';
+import {decodeEntities, keyAt} from './net/entities.ts';
 import type {EntityTimeline} from './net/entities.ts';
 import {loadBsp} from './game/bsp.ts';
 import type {BspMap} from './game/bsp.ts';
@@ -43,6 +43,19 @@ if (import.meta.env.DEV) {
 	// debugging: seek, look from a game position (eye origin + pitch/yaw), save the 3D view to fixtures/shots
 	const w = window as unknown as Record<string, unknown>;
 	w.seek = (t: number) => seekTo(t);
+	// a shot from in front of a portal (network index), `dist` out and `side` across
+	w.facePortal = (name: string, index: number, tick: number, dist = 120, side = 0) => {
+		const t = pb && view3d.debugTrack(index, 'CProp_Portal');
+		const k = t && keyAt(t, tick);
+		if (!k) return Promise.resolve('no portal');
+		const yaw = k.angles[1] * Math.PI / 180, pitch = k.angles[0] * Math.PI / 180;
+		const fwd = [Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), -Math.sin(pitch)];
+		const left = [-Math.sin(yaw), Math.cos(yaw), 0];
+		const eye = [0, 1, 2].map(i => k.origin[i] + fwd[i] * dist + left[i] * side);
+		const d = [0, 1, 2].map(i => k.origin[i] - eye[i]);
+		const len = Math.hypot(d[0], d[1], d[2]);
+		return (w.shot as (n: string, e: number[], a: number[]) => Promise<string>)(name, eye, [-Math.asin(d[2] / len) * 180 / Math.PI, Math.atan2(d[1], d[0]) * 180 / Math.PI]);
+	};
 	w.shot = (name: string, eye?: number[], ang?: number[]) => {
 		const url = view3d.snapshot(1600, 900, eye, ang);
 		return fetch(`/__shot?name=${name}`, {method: 'POST', body: url}).then(r => r.text());

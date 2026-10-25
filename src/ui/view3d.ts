@@ -14,7 +14,8 @@ import type {Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
-import {ParticleLibrary, ParticleInstance, ParticleRenderer} from './particles.ts';
+import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
+import type {ControlPoints} from './particles.ts';
 import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
@@ -276,8 +277,10 @@ export class View3D {
 	// particle effects: info_particle_system entities, each active run an instance
 	private particleLib: ParticleLibrary | null = null;
 	private particleRenderer: ParticleRenderer | null = null;
-	private particleRuns = new Map<EntityTrack, {start: number; inst: ParticleInstance}>();
+	private particleRuns = new Map<string, {start: number; inst: ParticleInstance}>();
 	private particlesShown: ParticleInstance[] = [];
+	private vmParticlesShown: ParticleInstance[] = [];  // first-person effects, drawn with the view model
+	private vmParticleRenderer: ParticleRenderer | null = null;
 	// first-person view model (the portal gun), drawn over the world in
 	// Eyes view with its own field of view, as the game does
 	private vmScene = new THREE.Scene();
@@ -443,6 +446,12 @@ export class View3D {
 		this.particleLib = new ParticleLibrary(files, bsp.name);
 		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
 		this.scene.add(this.particleRenderer.group);
+		if (this.vmParticleRenderer) {
+			this.vmParticleRenderer.clear();
+			this.vmScene.remove(this.vmParticleRenderer.group);
+		}
+		this.vmParticleRenderer = new ParticleRenderer(files, materials, this.library.textures);
+		this.vmScene.add(this.vmParticleRenderer.group);
 		this.particleRuns.clear();
 		this.fizzlers.clear();
 		this.paint = null;
@@ -678,6 +687,7 @@ export class View3D {
 					inner.matrixAutoUpdate = false;
 				}
 				group.add(inner);
+				if (asset.skeleton) group.userData.skeleton = asset.skeleton;
 				this.onLoaded();
 			});
 			return group;
@@ -972,56 +982,165 @@ export class View3D {
 		return i >= 0 && t.keys[i].tick > 1 ? t.keys[i].tick : tick - 1000;
 	}
 
-	// info_particle_system effects: a run from when one is switched on to
-	// when it's switched off (its particles then live out their lives),
-	// simulated from its start so seeking anywhere shows the same thing
+	// Particle effects: info_particle_system runs (switched on to switched
+	// off, then their particles live out their lives), the edges of open
+	// portals, and effects the server dispatched (portal shots and muzzle
+	// flashes). Each is simulated from its start, so seeking anywhere shows
+	// the same thing.
 	private updateParticles(tick: number) {
 		const ents = this.entities, lib = this.particleLib;
 		this.particlesShown = [];
+		this.vmParticlesShown = [];
 		if (!ents || !lib) return;
-		const LINGER = 5;
-		for (const t of ents.tracks) {
-			if (t.className !== 'CParticleSystem') continue;
-			const i = keyIndexAt(t, tick);
-			if (i < 0) continue;
-			const isOn = (j: number) => Number(t.keys[j].extra?.m_bActive) === 1;
-			// the latest run started at or before this tick
-			let j = i;
-			while (j >= 0 && !isOn(j)) j--;
-			if (j < 0) {
-				this.particleRuns.delete(t);
-				continue;
-			}
-			let s = j;
-			while (s > 0 && isOn(s - 1)) s--;
-			let e = j + 1;
-			while (e < t.keys.length && isOn(e)) e++;
-			const start = t.keys[s].tick, end = e < t.keys.length ? t.keys[e].tick : Infinity;
+		const LINGER = 5 / this.interval;
+		const seen = new Set<string>();
+		const run = (key: string, name: string, start: number, end: number, cps: () => ControlPoints | null, opts: {cpAt?: (t: number) => THREE.Matrix4; fp?: boolean} = {}) => {
+			const def = lib.get(name);
+			if (!def || tick < start || tick > end + LINGER) return;
 			const time = (tick - start) * this.interval;
-			if (tick > end + LINGER / this.interval) {
-				this.particleRuns.delete(t);
-				continue;
+			// a burst from long ago is over (no need to simulate it from the start)
+			if (time > 8 && !isEndless(def, lib)) return;
+			let r = this.particleRuns.get(key);
+			if (!r || r.inst.time > time + 1e-4 || time - r.inst.time > 3) {
+				const c = cps();
+				if (!c) return;
+				const inst = new ParticleInstance(def, lib, c, hashKey(key));
+				if (opts.cpAt) inst.setCpAt(opts.cpAt);
+				if (time > 6 && !opts.cpAt) inst.skipTo(time - 6);
+				r = {start, inst};
+				this.particleRuns.set(key, r);
 			}
-			const k = t.keys[i];
-			const name = ents.particleNames[Number(k.extra?.m_iEffectIndex ?? -1)];
-			const def = name ? lib.get(name) : undefined;
-			if (!def) continue;
-			let run = this.particleRuns.get(t);
-			if (!run || run.start !== start || run.inst.time > time + 1e-4 || time - run.inst.time > 3) {
-				const cp = this.worldMatrix(t, k, tick, 0) ?? new THREE.Matrix4().setPosition(k.origin[0], k.origin[1], k.origin[2]);
-				const inst = new ParticleInstance(def, lib, cp, t.index * 7919 + start);
-				if (time > 6) inst.skipTo(time - 6);
-				run = {start, inst};
-				this.particleRuns.set(t, run);
-			}
+			seen.add(key);
 			const stopAt = (end - start) * this.interval;
-			if (time >= stopAt && run.inst.emitting) {
-				run.inst.advance(stopAt);
-				run.inst.stopEmitting();
+			if (time >= stopAt && r.inst.emitting) {
+				r.inst.advance(stopAt);
+				r.inst.stopEmitting();
 			}
-			run.inst.advance(time);
-			this.particlesShown.push(...run.inst.all);
+			r.inst.advance(time);
+			if (r.inst.finished) return;
+			(opts.fp ? this.vmParticlesShown : this.particlesShown).push(...r.inst.all);
+		};
+
+		for (const t of ents.tracks) {
+			if (t.className === 'CParticleSystem') {
+				const i = keyIndexAt(t, tick);
+				if (i < 0) continue;
+				const isOn = (j: number) => Number(t.keys[j].extra?.m_bActive) === 1;
+				let j = i;
+				while (j >= 0 && !isOn(j)) j--;
+				if (j < 0) continue;
+				let s = j;
+				while (s > 0 && isOn(s - 1)) s--;
+				let e = j + 1;
+				while (e < t.keys.length && isOn(e)) e++;
+				const k = t.keys[i];
+				const name = ents.particleNames[Number(k.extra?.m_iEffectIndex ?? -1)] ?? '';
+				run(`sys:${t.index}:${t.keys[s].tick}`, name, t.keys[s].tick, e < t.keys.length ? t.keys[e].tick : Infinity, () => {
+					const cp = this.worldMatrix(t, k, tick, 0) ?? new THREE.Matrix4().setPosition(k.origin[0], k.origin[1], k.origin[2]);
+					return new Map([[0, cp]]);
+				});
+			} else if (t.className === 'CProp_Portal') {
+				// the edge of each placement, until the portal closes or moves
+				const i = keyIndexAt(t, tick);
+				if (i < 0) continue;
+				const placed = this.portalPlacedAt(t, tick);
+				let pk = keyIndexAt(t, placed);
+				if (pk < 0 || !(t.keys[pk].active && t.keys[pk].visible)) continue;
+				const pkey = t.keys[pk];
+				let e = pk + 1;
+				while (e < t.keys.length && t.keys[e].active && t.keys[e].visible && !t.keys[e].origin.some((v, n) => Math.abs(v - pkey.origin[n]) > 0.5)) e++;
+				const end = e < t.keys.length ? t.keys[e].tick : Infinity;
+				const color = this.portalColor(!!t.orange, Number(pkey.extra?.m_iTeamNum ?? 0));
+				run(`edge:${t.index}:${placed}`, 'portal_edge', placed, end, () => {
+					const m = new THREE.Matrix4().compose(new THREE.Vector3(...pkey.origin), new THREE.Quaternion().setFromEuler(toEuler(pkey.angles)), new THREE.Vector3(1, 1, 1));
+					// the edge's ring lies in X/Y: across the portal, up it; Z out of the wall
+					const ex = new THREE.Vector3(), ey = new THREE.Vector3(), ez = new THREE.Vector3();
+					m.extractBasis(ex, ey, ez);
+					const cp0 = new THREE.Matrix4().makeBasis(ey, ez, ex).setPosition(pkey.origin[0], pkey.origin[1], pkey.origin[2]);
+					return new Map([[0, cp0], [1, cp0.clone()], [7, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]);
+				});
+			}
 		}
+
+		// dispatched effects
+		const eyes = this.mode === 'eyes';
+		const me = ents.player?.index;
+		ents.effects.forEach((fx, n) => {
+			if (fx.tick > tick) return;
+			if (fx.name === 'PortalBlast') {
+				// the shot: from the gun to where the portal lands, in 0.1s
+				const color = this.portalColor(fx.color === 2, this.teamOf(fx.entity, tick));
+				const from = new THREE.Vector3(...fx.origin), to = new THREE.Vector3(...fx.start);
+				const dir = to.clone().sub(from).normalize();
+				const basis = new THREE.Matrix4().lookAt(new THREE.Vector3(), dir, new THREE.Vector3(0, 0, 1));
+				const flight = 0.1;
+				const at = (t: number) => basis.clone().setPosition(from.clone().lerp(to, Math.min(1, t / flight)));
+				run(`blast:${n}`, 'portal_projectile_stream', fx.tick, fx.tick + Math.round(flight / this.interval), () =>
+					new Map([[0, at(0)], [1, at(0)], [2, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]), {cpAt: at});
+				return;
+			}
+			if (fx.name !== 'ParticleEffect') return;
+			const name = ents.particleNames[fx.hitbox] ?? '';
+			const owner = this.ownerOf(fx.entity, tick);
+			const fp = /_fp$/i.test(name);
+			// first-person versions only through the recording player's eyes;
+			// their third-person versions everywhere else
+			if (fp && !(eyes && owner === me)) return;
+			if (!fp && eyes && owner === me && owner !== undefined) return;
+			// runs until the server stops that entity's effects
+			const stop = ents.effects.find(s => s.name === 'ParticleEffectStop' && s.entity === fx.entity && s.tick > fx.tick)?.tick ?? Infinity;
+			run(`fx:${n}`, name, fx.tick, stop, () => {
+				const cp = this.attachmentAt(fx.entity, fx.attachment, tick, fp) ?? new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1));
+				return new Map([[0, cp]]);
+			}, {fp});
+		});
+		for (const key of this.particleRuns.keys()) if (!seen.has(key)) this.particleRuns.delete(key);
+	}
+
+	// portal colours for particles: single player blue/orange, co-op by team
+	// (ATLAS blue/purple, P-body orange/red), 0..255
+	private portalColor(second: boolean, team: number): number[] {
+		const coop = this.bsp?.name.startsWith('mp_') && (team === 2 || team === 3);
+		if (!coop) return second ? [233, 78, 2] : [0, 60, 255];
+		const c = team === 3 ? (second ? [0.075, 0, 0.824] : [0.125, 0.5, 0.824]) : (second ? [0.225, 0.01, 0.01] : [1, 0.705, 0.125]);
+		return c.map(x => x * 255);
+	}
+
+	private teamOf(index: number, tick: number): number {
+		const t = (this.tracksByIndex.get(index) ?? []).find(c => keyAt(c, tick));
+		if (!t) return 0;
+		// players: ATLAS is the blue team, P-body red
+		return /eggbot/.test(t.model) ? 2 : /ballbot/.test(t.model) ? 3 : 0;
+	}
+
+	// the player an entity belongs to (itself, or the player a weapon or view model hangs off)
+	private ownerOf(index: number, tick: number): number | undefined {
+		const t = (this.tracksByIndex.get(index) ?? []).find(c => keyAt(c, tick));
+		if (!t) return undefined;
+		if (t.className === 'CPortal_Player') return t.index;
+		if (t.className === 'CPredictedViewModel' || t.className === 'CBaseViewModel') return this.entities?.player?.index;
+		return keyAt(t, tick)?.parent;
+	}
+
+	// an entity's model attachment (1-based) in the world: the held gun's
+	// muzzle, or the view model's
+	private attachmentAt(index: number, attachment: number, tick: number, viewModel: boolean): THREE.Matrix4 | null {
+		const t = (this.tracksByIndex.get(index) ?? []).find(c => keyAt(c, tick));
+		if (!t || attachment < 1) return null;
+		const o = viewModel ? this.vmShown : this.objects.get(t);
+		const sk = o?.userData.skeleton as Skeleton | undefined;
+		if (!o || !sk) return null;
+		o.updateMatrixWorld(true);
+		const anim = o.userData.anim as AnimatedModel | undefined;
+		if (anim) {
+			const a = attachmentMatrix(sk, boneMatrices(sk, anim.pose), attachment - 1);
+			return a && o.matrixWorld.clone().multiply(a);
+		}
+		// the bone-merged gun: its weapon_bone is the group itself
+		const a = sk.attachments[attachment - 1];
+		if (!a) return null;
+		const m = a.local;
+		return o.matrixWorld.clone().multiply(new THREE.Matrix4().set(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0, 0, 0, 1));
 	}
 
 	// the recording player's view model, posed by its networked animation
@@ -1030,7 +1149,7 @@ export class View3D {
 		this.vmShown = null;
 		const ents = this.entities;
 		if (!ents || this.mode !== 'eyes') return;
-		const t = ents.tracks.find(c => c.className === 'CPredictedViewModel' && keyAt(c, tick)?.visible && c.model.endsWith('.mdl'));
+		const t = ents.tracks.find(c => (c.className === 'CPredictedViewModel' || c.className === 'CBaseViewModel') && keyAt(c, tick)?.visible && c.model.endsWith('.mdl'));
 		const k = t && keyAt(t, tick);
 		if (!t || !k) return;
 		let g = this.vmObjects.get(t);
@@ -1371,6 +1490,7 @@ export class View3D {
 		// third-person camera does (the user's distance is kept for later)
 		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
+		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
 		this.renderScene(r);
 		if (this.mode === 'eyes' && this.vmShown) {
 			this.vmCam.position.copy(this.camera.position);
@@ -1542,6 +1662,11 @@ export class View3D {
 		return url;
 	}
 
+	// debugging: the track at a network index (of a class)
+	debugTrack(index: number, className: string): EntityTrack | undefined {
+		return (this.tracksByIndex.get(index) ?? []).find(t => t.className === className);
+	}
+
 	// debugging: what's under a point of the canvas (0..1 coordinates)
 	pick(x: number, y: number) {
 		const ray = new THREE.Raycaster();
@@ -1574,4 +1699,11 @@ function worldCollision(m: ModelMesh): MeshBVH | null {
 	const geom = new THREE.BufferGeometry();
 	geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
 	return new MeshBVH(geom);
+}
+
+// a stable seed from a run's key
+function hashKey(key: string): number {
+	let h = 2166136261;
+	for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 16777619);
+	return h >>> 0;
 }

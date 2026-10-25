@@ -39,7 +39,7 @@ export interface EntityKey {
 
 // Props kept for the classes the 3D view draws specially
 export const EXTRA_PROPS: Record<string, string[]> = {
-	CProp_Portal: ['m_hLinkedPortal', 'm_fNetworkHalfWidth', 'm_fNetworkHalfHeight'],
+	CProp_Portal: ['m_hLinkedPortal', 'm_fNetworkHalfWidth', 'm_fNetworkHalfHeight', 'm_iTeamNum'],
 	CPortalLaser: ['m_vStartPoint', 'm_vEndPoint', 'm_bLaserOn'],
 	CProjectedWallEntity: ['m_vecStartPoint', 'm_vecEndPoint', 'm_flWidth', 'm_flHeight'],
 	CProjectedTractorBeamEntity: ['m_vecStartPoint', 'm_vecEndPoint'],
@@ -78,6 +78,27 @@ export interface EntityTimeline {
 	paint: PaintEvent[];
 	lightStyles: LightStyleChange[];  // in tick order
 	particleNames: string[];          // "ParticleEffectNames" (info_particle_system's m_iEffectIndex)
+	effects: EffectEvent[];           // dispatched effects (temp entities), in tick order
+}
+
+// A DispatchEffect from the server (CTEEffectDispatch): "PortalBlast" for a
+// portal shot (origin: where it left the gun, start: where the portal
+// lands, color: 1 or 2 for which portal, entity: the shooter),
+// "ParticleEffect" for a named particle system (hitbox: its index in
+// ParticleEffectNames), and so on
+export interface EffectEvent {
+	tick: number;
+	name: string;
+	origin: Vec3;
+	start: Vec3;
+	angles: Vec3;
+	normal: Vec3;
+	scale: number;
+	color: number;
+	entity: number;
+	attachment: number;
+	hitbox: number;
+	damageType: number;
 }
 
 // a light style's pattern ("lightstyles" string table entry = style number)
@@ -189,6 +210,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 	const classCounts = new Map<string, number>();
 	const backdoorSeen = seg.net.some(r => r.kind === 'entities');
 	const paint: PaintEvent[] = [];
+	const effects: EffectEvent[] = [];
 	const lightStyles: LightStyleChange[] = [];
 	const stylePatterns = new Map<number, string>();
 	let tableTick = 0;
@@ -348,6 +370,45 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	}
 
+	// Temp entities: per entry an optional delay, then either a class and a
+	// full set of props, or props as changes to the previous entry's
+	function readTempEntities(count: number, br: BitReader, tick: number) {
+		let classIndex = -1;
+		let state: PropValue[] = [];
+		for (let n = 0; n < Math.max(1, count); n++) {
+			if (br.bit()) br.u(8);  // fire delay
+			if (br.bit()) {
+				classIndex = br.u(dt.classBits) - 1;
+				state = [];
+			}
+			const cls = dt.classes[classIndex];
+			if (!cls) throw new Error(`unknown temp entity class ${classIndex}`);
+			readEntityProps(br, cls.flat, state);
+			if (cls.name !== 'CTEEffectDispatch') continue;
+			const at = (k: string) => state[cls.index.get(k) ?? -1];
+			const n3 = (k: string): Vec3 => [num(at(`${k}.x`)), num(at(`${k}.y`)), num(at(`${k}.z`))];
+			const v3 = (k: string): Vec3 => {
+				const v = vec(at(k));
+				return [v?.[0] ?? 0, v?.[1] ?? 0, v?.[2] ?? 0];
+			};
+			const nameIndex = num(at('m_EffectData.m_iEffectName'));
+			effects.push({
+				tick,
+				name: tableByName.get('EffectDispatch')?.entries[nameIndex]?.name ?? '',
+				origin: n3('m_EffectData.m_vOrigin'),
+				start: n3('m_EffectData.m_vStart'),
+				angles: v3('m_EffectData.m_vAngles'),
+				normal: v3('m_EffectData.m_vNormal'),
+				scale: num(at('m_EffectData.m_flScale')),
+				color: num(at('m_EffectData.m_nColor')),
+				entity: num(at('m_EffectData.entindex'), -1),
+				attachment: num(at('m_EffectData.m_nAttachmentIndex')),
+				hitbox: num(at('m_EffectData.m_nHitBox')),
+				damageType: num(at('m_EffectData.m_nDamageType')),
+			});
+		}
+	}
+
 	function handle(r: NetRecord) {
 		tableTick = Math.max(0, r.tick);
 		switch (r.kind) {
@@ -363,6 +424,13 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 				onUserMessage: (type, data) => {
 					const e = readPaintMessage(type, data, r.tick);
 					if (e) paint.push(e);
+				},
+				onTempEntities: (count, data) => {
+					try {
+						readTempEntities(count, data, r.tick);
+					} catch (e) {
+						if (errors.length < 20) errors.push(`temp entities at tick ${r.tick}: ${(e as Error).message}`);
+					}
 				},
 				onPaintmap: data => {
 					const e = readPaintmap(data, r.tick);
@@ -421,7 +489,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	}
 	const particleNames = (tableByName.get('ParticleEffectNames')?.entries ?? []).map(e => e?.name ?? '');
-	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames};
+	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, effects};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];

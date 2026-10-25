@@ -27,6 +27,7 @@ export interface NetHandlers {
 	trace?: (type: number, bitPos: number) => void;
 	onUserMessage?: (type: number, data: BitReader) => void;
 	onPaintmap?: (data: BitReader) => void;
+	onTempEntities?: (count: number, data: BitReader) => void;
 }
 
 // reads a length, then skips that many units (pos += u() would read pos first)
@@ -184,7 +185,13 @@ export function walkPacket(data: Uint8Array, nbits: number, h: NetHandlers) {
 			h.onPacketEntities?.({maxEntries, isDelta, deltaFrom, baseline, updated, updateBaseline, data});
 			break;
 		}
-		case 27: br.pos += 8; skipLength(br, 17, 1); break;  // temp entities
+		case 27: {  // temp entities
+			const count = br.u(8);
+			const n = br.u(17);
+			const data = sub(br, n);
+			h.onTempEntities?.(count, data);
+			break;
+		}
 		case 28: br.pos += 13; break;  // prefetch
 		case 29: br.pos += 16; skipLength(br, 32, 1); break;  // menu
 		case 30: br.pos += 9; skipLength(br, 20, 1); break;  // game event list
