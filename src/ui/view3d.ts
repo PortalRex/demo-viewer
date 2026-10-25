@@ -1537,7 +1537,8 @@ export class View3D {
 		this.lastRender = now;
 		if (this.meterCount++ % 8 === 0) {
 			const w = 64, h = 36;
-			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType});
+			// (with a stencil buffer: the sky is masked to the sky faces by it)
+			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType, stencilBuffer: true});
 			const fog = this.scene.fog;
 			this.scene.fog = null;
 			r.setRenderTarget(this.meter);
@@ -1783,6 +1784,7 @@ export class View3D {
 		if (!r) return;
 		this.camera.updateMatrixWorld();
 		if (this.bsp) {
+			if (!this.skyCamera) this.sky.position.copy(this.camera.position);
 			this.meterExposure(r);
 			this.updateFog();
 		}
