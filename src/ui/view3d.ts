@@ -22,6 +22,7 @@ import {AMBIENT_SCALE, flashUniforms, exposureUniforms, paintUniforms, ditherUni
 import {TextureCache, compressedSupport} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
+import {PaintBlobs, type Sprayer} from './paintblobs.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
@@ -79,6 +80,8 @@ const LIGHTMAP_EXPOSURE = 1.5;
 // a static prop's stored vertex light (a byte) as linear light, in the
 // lightmaps' units
 const vertexLight = (b: number) => Math.pow(b / 255 * 2, 2.2);
+// gel colours by power (bounce, reflect, speed, portal, erase)
+const PAINT_COLORS: Record<number, number[]> = {0: [20, 120, 255], 1: [160, 160, 160], 2: [255, 110, 0], 3: [235, 235, 235], 4: [110, 125, 140]};
 
 // The engine's tonemap target from a histogram of the frame as drawn at
 // `exposure` (RGBA half floats, unexposed): only the middle 90% x 85% of
@@ -838,6 +841,17 @@ export class View3D {
 			this.mapGroup.add(mask);
 		}
 		this.collision = worldCollision(bsp.models[0]);
+		this.paintBlobs?.dispose();
+		if (this.paintBlobs) this.scene.remove(this.paintBlobs.group);
+		const collision = this.collision;
+		this.paintBlobs = new PaintBlobs((from, to) => {
+			const d = to.clone().sub(from);
+			const len = d.length();
+			if (len < 1e-3) return Infinity;
+			const hit = collision?.raycastFirst(new THREE.Ray(from, d.divideScalar(len)), THREE.DoubleSide);
+			return hit && hit.distance <= len ? hit.distance : Infinity;
+		});
+		this.scene.add(this.paintBlobs.group);
 		this.loadSky(bsp, token);
 		this.worldFog = this.scene.fog as THREE.Fog | null;
 
@@ -1335,6 +1349,7 @@ export class View3D {
 		this.particlesShown = [];
 		disposeOwn(this.entityGroup);
 		this.turretLasers.clear();
+		this.paintBlobs?.clear();
 		this.windowedKids = [];
 		this.entityGroup.clear();
 		this.frozen.clear();
@@ -1548,6 +1563,54 @@ export class View3D {
 
 	// a laser's beam, continued through any portals it ends on (traced
 	// against the map from the exit portal)
+	// gel sprayers' blobs (see PaintBlobs): each sprayer's settings and where
+	// it sprays from, its spraying periods from when m_bActive was on
+	private paintBlobs: PaintBlobs | null = null;
+	private sprayPeriods = new WeakMap<EntityTrack, [number, number][]>();
+	private updatePaintBlobs(tick: number) {
+		if (!this.paintBlobs) return;
+		const sprayers: Sprayer[] = [];
+		const amb = this.bsp?.ambient;
+		for (const t of this.entities!.tracks) {
+			if (t.className !== 'CPaintSprayer') continue;
+			let periods = this.sprayPeriods.get(t);
+			if (!periods) {
+				periods = [];
+				let on: number | null = null;
+				for (const k of t.keys) {
+					const active = Number(k.extra?.m_bActive) === 1 && !k.removed;
+					if (active && on === null) on = k.tick;
+					if (!active && on !== null) {
+						periods.push([on * this.interval, k.tick * this.interval]);
+						on = null;
+					}
+				}
+				if (on !== null) periods.push([on * this.interval, Infinity]);
+				this.sprayPeriods.set(t, periods);
+			}
+			if (!periods.length) continue;
+			const k = keyAt(t, tick);
+			if (!k) continue;
+			const m = this.worldMatrix(t, k, tick, 0);
+			if (!m) continue;
+			const e = k.extra ?? {};
+			const origin = new THREE.Vector3().setFromMatrixPosition(m);
+			const power = Number(e.m_PaintPowerType ?? 3);
+			const c = PAINT_COLORS[power] ?? PAINT_COLORS[3];
+			// (lit by the light where it sprays, the ambient cube's average, and
+			// bright even in the dark as the gel's shiny material reads)
+			const cube = amb?.at([origin.x, origin.y, origin.z]).cube;
+			const light = cube ? 0.15 + cube.reduce((a, b) => a + b, 0) / 18 * AMBIENT_SCALE : 0.3;
+			sprayers.push({
+				key: `${t.index}:${t.keys[0].tick}`, origin, dir: new THREE.Vector3().setFromMatrixColumn(m, 0).normalize(), periods,
+				rate: Number(e.m_flBlobsPerSecond ?? 0), minSpeed: Number(e.m_flMinSpeed ?? 100), maxSpeed: Number(e.m_flMaxSpeed ?? 100),
+				spreadRadius: Number(e.m_flBlobSpreadRadius ?? 0), spreadAngle: Number(e.m_flBlobSpreadAngle ?? 0), seed: Number(e.m_nBlobRandomSeed ?? t.index),
+				color: c.map(v => Math.pow(v / 255, 2.2)) as [number, number, number], light,
+			});
+		}
+		this.paintBlobs.update(sprayers, tick * this.interval);
+	}
+
 	// Turrets' laser sights (C_NPC_Portal_FloorTurret): a thin red beam from
 	// the "light" attachment along the eyes' aim, to what it hits (8192 out)
 	// and on through portals, while m_bLaserOn (flickering when out of ammo)
@@ -2829,6 +2892,7 @@ export class View3D {
 
 		if (ents) this.placeAttached(tick);
 		if (ents) this.updateTurretLasers(tick);
+		if (ents) this.updatePaintBlobs(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the

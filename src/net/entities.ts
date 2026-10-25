@@ -62,6 +62,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CBaseViewModel: ['m_hOwner', 'm_nViewModelIndex', 'm_nBody'],
 	// body groups (PotatOS)
 	CWeaponPortalgun: ['m_nBody', 'm_iLastFiredPortal'],
+	// gel sprayers: what the blobs they fire are fired by
+	CPaintSprayer: ['m_bActive', 'm_bDrawOnly', 'm_nBlobRandomSeed', 'm_PaintPowerType', 'm_nMaxBlobCount', 'm_flBlobsPerSecond', 'm_flMinSpeed', 'm_flMaxSpeed', 'm_flBlobSpreadRadius', 'm_flBlobSpreadAngle', 'm_flStartTime'],
 	// turrets' laser sights
 	CNPC_Portal_FloorTurret: ['m_bLaserOn', 'm_bOutOfAmmo'],
 	// a doorway's fade brush, drawn by distance (see View3D)
