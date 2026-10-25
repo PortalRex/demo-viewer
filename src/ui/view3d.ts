@@ -1572,6 +1572,8 @@ export class View3D {
 
 	// whether an entity's object is drawn at a key
 	private shows(t: EntityTrack, k: EntityKey): boolean {
+		// (deleted: lasers, bridges, funnels and fizzlers too)
+		if (k.removed) return false;
 		const e = k.extra ?? {};
 		switch (t.className) {
 		case 'CProp_Portal': return (k.visible || (!!k.dormant && !k.nodraw)) && k.active === true;
@@ -1585,7 +1587,46 @@ export class View3D {
 		}
 	}
 
-	private placeEffect(t: EntityTrack, k: EntityKey, o: THREE.Object3D, time: number) {
+	// When each funnel's column last started growing (C_Trigger_TractorBeam's
+	// m_vStart / m_vEnd proxies), by key: a new start, or an end in a new
+	// direction (by over 0.1 a component), starts it again; an end further
+	// along the same line keeps the drawn length (the time so far scaled by
+	// old / new length). The column then reaches its end over 0.5 s.
+	private funnelStarts = new WeakMap<EntityTrack, number[]>();
+	private funnelGrowth(t: EntityTrack, tick: number): number {
+		let starts = this.funnelStarts.get(t);
+		if (!starts) {
+			starts = [];
+			let s0: THREE.Vector3 | null = null, e0: THREE.Vector3 | null = null, at = -Infinity;
+			for (const k of t.keys) {
+				const now = k.tick * this.interval;
+				const s = vec3(k.extra?.m_vStart), e = vec3(k.extra?.m_vEnd);
+				if (s && (!s0 || !s.equals(s0))) {
+					at = now;
+					s0 = s.clone();
+				}
+				if (e && s0 && (!e0 || !e.equals(e0))) {
+					if (e0) {
+						const oldDir = e0.clone().sub(s0), newDir = e.clone().sub(s0);
+						const oldLen = oldDir.length(), newLen = newDir.length();
+						oldDir.divideScalar(oldLen + 1.192e-7);
+						newDir.divideScalar(newLen + 1.192e-7);
+						if (Math.abs(oldDir.x - newDir.x) > 0.1 || Math.abs(oldDir.y - newDir.y) > 0.1 || Math.abs(oldDir.z - newDir.z) > 0.1) at = now;
+						else if (newLen > 0) at = now - oldLen * (now - at) / newLen;
+					} else at = now;
+					e0 = e.clone();
+				}
+				starts.push(at);
+			}
+			this.funnelStarts.set(t, starts);
+		}
+		const i = keyIndexAt(t, Math.floor(tick));
+		if (i < 0) return 1;
+		const f = Math.min(1, Math.max(0, (tick * this.interval - starts[i]) / 0.5));
+		return f * f * (3 - 2 * f);
+	}
+
+	private placeEffect(t: EntityTrack, k: EntityKey, o: THREE.Object3D, time: number, tick: number) {
 		const e = k.extra ?? {};
 		o.position.set(0, 0, 0);
 		o.rotation.set(0, 0, 0);
@@ -1596,7 +1637,9 @@ export class View3D {
 			const right = new THREE.Vector3(0, -1, 0).applyEuler(toEuler(k.angles));
 			(o.userData.bridge as Bridge).set(vec3(e.m_vecStartPoint)!, vec3(e.m_vecEndPoint)!, right, Number(e.m_flWidth) || 64, time);
 		} else if (o.userData.funnel) {
-			(o.userData.funnel as Funnel).set(vec3(e.m_vStart)!, vec3(e.m_vEnd)!, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time, Number(e.m_bFromPortal) === 1, Number(e.m_bToPortal) === 1);
+			const start = vec3(e.m_vStart)!, grown = this.funnelGrowth(t, tick);
+			const end = start.clone().lerp(vec3(e.m_vEnd)!, Math.max(grown, 0.001));
+			(o.userData.funnel as Funnel).set(start, end, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time, Number(e.m_bFromPortal) === 1, Number(e.m_bToPortal) === 1 && grown >= 1);
 		}
 	}
 
@@ -2943,7 +2986,7 @@ export class View3D {
 				// door's black backing; open doors fade it out)
 				if (show && k && t.className === 'CFuncAreaPortalWindow') o.visible = this.portalWindowBlend(o, k) >= 0.5;
 				if (show && k && WORLD_SPACE.has(t.className)) {
-					this.placeEffect(t, k, o, time);
+					this.placeEffect(t, k, o, time, tick);
 					continue;
 				}
 				// the recording player (and their gun) are the camera in Eyes view
