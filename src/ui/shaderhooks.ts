@@ -165,7 +165,8 @@ const FLASH_HEAD = `
 uniform float flashOn, flashFar, flashShadows, flashTexel;
 uniform vec3 flashPos, flashColor;
 uniform mat4 flashMatrix;
-uniform sampler2D flashCookie, flashDepth;
+uniform sampler2D flashCookie;
+uniform sampler2DShadow flashDepth;
 vec3 flashLight(vec3 p, vec3 n) {
 	if (flashOn < 0.5) return vec3(0.0);
 	vec4 lp = flashMatrix * vec4(p, 1.0);
@@ -182,12 +183,15 @@ vec3 flashLight(vec3 p, vec3 n) {
 	float shadow = 1.0;
 	if (flashShadows > 0.5) {
 		float z = proj.z * 0.5 + 0.5 - (0.0004 + 0.0016 * (1.0 - ndl));
+		// (the engine's 5x5 Gaussian of hardware-filtered compares, a texel
+		// apart: DoShadowNvidiaPCF5x5Gaussian)
 		shadow = 0.0;
-		for (int i = 0; i < 4; i++) {
-			vec2 o = vec2(i == 1 || i == 3 ? 1.0 : -1.0, i >= 2 ? 1.0 : -1.0) * 0.75 * flashTexel;
-			shadow += step(z, texture2D(flashDepth, uv + o).r);
+		for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {
+			int ax = abs(x), ay = abs(y);
+			float w = ax == 2 && ay == 2 ? 1.0 : ax + ay == 3 ? 4.0 : (ax == 2 || ay == 2) ? 7.0 : ax + ay == 2 ? 20.0 : ax + ay == 1 ? 33.0 : 55.0;
+			shadow += w * texture(flashDepth, vec3(uv + vec2(float(x), float(y)) * flashTexel, z));
 		}
-		shadow *= 0.25;
+		shadow /= 331.0;
 	}
 	return texture2D(flashCookie, uv).rgb * flashColor * atten * fade * ndl * shadow;
 }

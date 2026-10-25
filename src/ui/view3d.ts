@@ -3039,7 +3039,23 @@ export class View3D {
 	// (redrawn when the tick or the light changes; glass and effects don't cast)
 	private flashCam = new THREE.PerspectiveCamera(90, 1, 4, 2000);
 	private flashTarget: THREE.WebGLRenderTarget | null = null;
-	private flashDepthMaterial = new THREE.MeshBasicMaterial({colorWrite: false});
+	// (with the engine's shadow map depth bias: mat_slopescaledepthbias_shadowmap
+	// 3, mat_depthbias_shadowmap 0.000025 = ~420 steps of a 24-bit depth)
+	private flashDepthMaterial = new THREE.MeshBasicMaterial({colorWrite: false, polygonOffset: true, polygonOffsetFactor: 3, polygonOffsetUnits: 420});
+	private flashDepthAlphas = new WeakMap<THREE.Material, THREE.MeshBasicMaterial>();
+	private flashDepthAlpha(m: THREE.Material): THREE.MeshBasicMaterial {
+		const map = (m as THREE.MeshBasicMaterial).map;
+		let d = this.flashDepthAlphas.get(m);
+		if (!d || d.map !== map) {
+			d?.dispose();
+			d = this.flashDepthMaterial.clone();
+			d.map = map;
+			d.alphaTest = m.alphaTest;
+			d.side = m.side;
+			this.flashDepthAlphas.set(m, d);
+		}
+		return d;
+	}
 	private flashKey = '';
 	private flashCookieName = '';
 	private updateFlashlight(tick: number) {
@@ -3081,9 +3097,9 @@ export class View3D {
 		// colour: rgb / 255 x alpha / 255, times r_flashlightbrightness
 		// (0.25), the x2.5 the engine adds where the flashlight is added in
 		// linear space (sRGB-correct blending: any current card), and the
-		// brightness scale
+		// brightness scale; in the lightmaps' units (LIGHTMAP_EXPOSURE)
 		const c = Number(e.m_LightColor ?? 0xffffffff) >>> 0;
-		const scale = ((c >>> 24) & 255) / 255 * 0.25 * 2.5 * Number(e.m_flBrightnessScale ?? 1);
+		const scale = ((c >>> 24) & 255) / 255 * 0.25 * 2.5 * LIGHTMAP_EXPOSURE * Number(e.m_flBrightnessScale ?? 1);
 		u.flashColor.value.set((c & 255) / 255 * scale, ((c >>> 8) & 255) / 255 * scale, ((c >>> 16) & 255) / 255 * scale);
 		const near = Number(e.m_flNearZ ?? 4) || 4, far = Number(e.m_flFarZ ?? 2000) || 2000;
 		const fc = this.flashCam;
@@ -3112,6 +3128,9 @@ export class View3D {
 		if (!this.flashTarget) {
 			this.flashTarget = new THREE.WebGLRenderTarget(size, size, {depthBuffer: true});
 			this.flashTarget.depthTexture = new THREE.DepthTexture(size, size);
+			// (compared in the sampler, filtered: hardware PCF)
+			this.flashTarget.depthTexture.compareFunction = THREE.LessEqualCompare;
+			this.flashTarget.depthTexture.minFilter = this.flashTarget.depthTexture.magFilter = THREE.LinearFilter;
 			u.flashDepth.value = this.flashTarget.depthTexture;
 			u.flashTexel.value = 1 / size;
 		}
@@ -3131,14 +3150,21 @@ export class View3D {
 			const m = (o as THREE.Mesh).material as THREE.Material | undefined;
 			if (m && !Array.isArray(m) && (m.transparent || (m as THREE.ShaderMaterial).isShaderMaterial)) hide(o);
 		});
+		// (alpha-tested ones, like grates, cast through their holes)
+		const swapped: [THREE.Mesh, THREE.Material][] = [];
+		this.scene.traverseVisible(o => {
+			const mesh = o as THREE.Mesh, m = mesh.material as THREE.Material | undefined;
+			if (!mesh.isMesh || !m || Array.isArray(m)) return;
+			swapped.push([mesh, m]);
+			mesh.material = m.alphaTest > 0 && (m as THREE.MeshBasicMaterial).map ? this.flashDepthAlpha(m) : this.flashDepthMaterial;
+		});
 		const target = r.getRenderTarget(), fog = this.scene.fog, bg = this.scene.background;
-		this.scene.overrideMaterial = this.flashDepthMaterial;
 		this.scene.fog = null;
 		this.scene.background = null;
 		r.setRenderTarget(this.flashTarget);
 		r.clear();
 		r.render(this.scene, fc);
-		this.scene.overrideMaterial = null;
+		for (const [mesh, m] of swapped) mesh.material = m;
 		this.scene.fog = fog;
 		this.scene.background = bg;
 		for (const o of hidden) o.visible = true;
