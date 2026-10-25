@@ -18,7 +18,7 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints} from './particles.ts';
-import {AMBIENT_SCALE, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
+import {AMBIENT_SCALE, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
 import {TextureCache, compressedSupport} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -836,6 +836,18 @@ export class View3D {
 		});
 	}
 
+	// whether a world light reaches a point (nothing solid in between), for
+	// model lighting
+	private lightReaches = (from: number[], to: [number, number, number]): boolean => {
+		if (!this.collision) return true;
+		const d = new THREE.Vector3(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+		const len = d.length();
+		if (len < 2) return true;
+		const ray = new THREE.Ray(new THREE.Vector3(from[0], from[1], from[2]), d.divideScalar(len));
+		const hit = this.collision.raycastFirst(ray, THREE.DoubleSide);
+		return !hit || hit.distance > len - 2;
+	};
+
 	// Dynamic props that, all recording long, are there from the start and
 	// never move, animate, change skin or hide are drawn as static props:
 	// posed once, lit once (the ambient cube and lights baked into vertex
@@ -869,7 +881,7 @@ export class View3D {
 				const k0 = t.keys[0];
 				// (on a parent: fixed to it, moving with it)
 				return live.every(k => !k.removed && !k.nodraw && (k.visible || k.dormant) && k.parent === k0.parent && k.attachment === undefined
-					&& same(k.origin, k0.origin) && same(k.angles, k0.angles) && (k.skin ?? 0) === (k0.skin ?? 0)
+					&& same(k.origin, k0.origin) && same(k.angles, k0.angles) && (k.skin ?? 0) === (k0.skin ?? 0) && k.model === k0.model
 					&& Number(k.extra?.m_nBody ?? 0) === Number(k0.extra?.m_nBody ?? 0)
 					&& (!k.anim || (k0.anim && k.anim.sequence === k0.anim.sequence && k.anim.cycle === k0.anim.cycle && (!k.anim.clientSide || !k.anim.rate))));
 			});
@@ -919,7 +931,7 @@ export class View3D {
 				if (part.raw.boundingBox) box.union(part.raw.boundingBox);
 			}
 			const centre = box.isEmpty() ? new THREE.Vector3(...k.origin) : box.getCenter(new THREE.Vector3()).applyMatrix4(world);
-			const light = amb.at([centre.x, centre.y, centre.z]);
+			const light = amb.at([centre.x, centre.y, centre.z], this.lightReaches);
 			const normalMat = new THREE.Matrix3().getNormalMatrix(world);
 			const p = new THREE.Vector3(), n = new THREE.Vector3(), l = new THREE.Vector3();
 			const k2 = AMBIENT_SCALE / LIGHTMAP_EXPOSURE;
@@ -1245,26 +1257,27 @@ export class View3D {
 		this.vmShown = null;
 	}
 
-	private objectFor(t: EntityTrack, skin = 0, body = 0): THREE.Object3D | null {
+	private objectFor(t: EntityTrack, skin = 0, body = 0, model = t.model): THREE.Object3D | null {
 		let o = this.objects.get(t);
 		if (o !== undefined) {
-			if (((o.userData.skin ?? 0) === skin && (o.userData.body ?? 0) === body) || !t.model.endsWith('.mdl')) return o;
+			if (((o.userData.skin ?? 0) === skin && (o.userData.body ?? 0) === body && (o.userData.model ?? t.model) === model) || !t.model.endsWith('.mdl')) return o;
 			// a new skin (a cube lighting up on a button) or body groups
 			// (PotatOS on the gun): rebuild
 			this.entityGroup.remove(o);
 			disposeOwn(o);
 			this.objects.delete(t);
 		}
-		o = this.makeObject(t, skin, body) ?? new THREE.Group();
+		o = this.makeObject(t, skin, body, model) ?? new THREE.Group();
 		o.userData.skin = skin;
 		o.userData.body = body;
+		o.userData.model = model;
 		o.visible = false;
 		this.objects.set(t, o);
 		this.entityGroup.add(o);
 		return o;
 	}
 
-	private makeObject(t: EntityTrack, skin = 0, body = 0): THREE.Object3D | null {
+	private makeObject(t: EntityTrack, skin = 0, body = 0, model = t.model): THREE.Object3D | null {
 		if (t.className === 'CPortal_Player') {
 			// the player's own model (Chell, ATLAS, P-body); a capsule until it loads
 			const group = new THREE.Group();
@@ -1370,14 +1383,18 @@ export class View3D {
 		// ones: room-moving panels and the like just appear)
 		let box: THREE.Mesh | null = null;
 		if (size.every(s => s > 0 && s <= 512)) {
-			const cube = /cube|box/i.test(t.model);
+			const cube = /cube|box/i.test(model);
 			box = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), new THREE.MeshLambertMaterial({color: cube ? 0x9fb7cf : 0x8a7f6e, transparent: !cube, opacity: cube ? 1 : 0.55}));
 			box.position.set((t.mins[0] + t.maxs[0]) / 2, (t.mins[1] + t.maxs[1]) / 2, (t.mins[2] + t.maxs[2]) / 2);
 			group.add(box);
 		}
 		// the real model when it loads, animated when it can be
-		this.model(t.model, skin).then(asset => {
-			if (box) group.remove(box);
+		this.model(model, skin).then(asset => {
+			if (box) {
+				group.remove(box);
+				box.geometry.dispose();
+				(box.material as THREE.Material).dispose();
+			}
 			if (!asset) return;
 			group.userData.asset = asset;
 			if (asset.skeleton && asset.skeleton.sequences.length && t.keys.some(k => k.anim)) {
@@ -1667,7 +1684,7 @@ export class View3D {
 		if (!ents || !lib) return;
 		const LINGER = 5 / this.interval;
 		const seen = new Set<string>();
-		const run = (key: string, name: string, start: number, end: number, cps: () => ControlPoints | null, opts: {cpAt?: (t: number) => THREE.Matrix4; fp?: boolean} = {}) => {
+		const run = (key: string, name: string, start: number, end: number, cps: () => ControlPoints | null, opts: {cpAt?: (t: number) => THREE.Matrix4; fp?: boolean; live?: boolean; size?: number} = {}) => {
 			const def = lib.get(name);
 			if (!def || tick < start || tick > end + LINGER) return;
 			const time = (tick - start) * this.interval;
@@ -1679,11 +1696,17 @@ export class View3D {
 				if (!c) return;
 				const inst = new ParticleInstance(def, lib, c, hashKey(key));
 				if (opts.cpAt) inst.setCpAt(opts.cpAt);
+				if (opts.size) inst.setSizeScale(opts.size);
 				if (time > 6 && !opts.cpAt) inst.skipTo(time - 6);
 				r = {start, inst};
 				this.particleRuns.set(key, r);
 			}
 			seen.add(key);
+			// (ends that move: control points taken afresh every frame)
+			if (opts.live) {
+				const c = cps();
+				if (c) r.inst.setControlPoints(c);
+			}
 			const stopAt = (end - start) * this.interval;
 			if (time >= stopAt && r.inst.emitting) {
 				r.inst.advance(stopAt);
@@ -1778,6 +1801,39 @@ export class View3D {
 					return new Map([[0, cp0], [1, cp0.clone()], [7, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]);
 				});
 			}
+		}
+
+		// the arcs the gun draws while holding something (DoEffectHolding):
+		// between its three claw tips and its muzzle (control points 0
+		// muzzle, 1-3 Arm1-3_attach3, 4 the player, 5 what's held), on the
+		// view model in first person, else on the held gun
+		for (const p of ents.tracks) {
+			if (p.className !== 'CPortal_Player') continue;
+			const k = keyAt(p, tick);
+			const h = Number(k?.extra?.m_hAttachedObject ?? -1);
+			if (!k || h < 0 || (h & 2047) === 2047) continue;
+			const ot = this.trackForHandle(h, tick);
+			const held = ot && this.objects.get(ot);
+			let i = keyIndexAt(p, tick);
+			while (i > 0 && Number(p.keys[i - 1].extra?.m_hAttachedObject ?? -1) === h) i--;
+			const since = p.keys[i].tick;
+			const fp = this.mode === 'eyes' && p === this.followTrack && !!this.vmShown;
+			const gun = fp ? p : ents.tracks.find(g => g.className === 'CWeaponPortalgun' && keyAt(g, tick)?.parent === p.index);
+			if (!gun) continue;
+			// attachments (1-based): v_portalgun muzzle 1, arms 4/7/10; w_portalgun muzzle 1, arms 5/8/11
+			const atts = fp ? [1, 4, 7, 10] : [1, 5, 8, 11];
+			const at = (m: THREE.Matrix4 | null) => m && new THREE.Matrix4().setPosition(new THREE.Vector3().setFromMatrixPosition(m));
+			run(`hold:${fp ? 'fp' : 'tp'}:${p.index}:${since}`, fp ? 'portalgun_beam_holding_FP' : 'portalgun_beam_holding_TP', since, Infinity, () => {
+				const pts = atts.map(a => at(this.attachmentAt(gun.index, a, tick, fp)));
+				if (pts.some(m => !m)) return null;
+				const cps: ControlPoints = new Map(pts.map((m, n) => [n, m!]));
+				const pk = this.entityPose(p, tick);
+				cps.set(4, new THREE.Matrix4().setPosition(pk.origin));
+				if (held) cps.set(5, new THREE.Matrix4().setPosition(new THREE.Vector3().setFromMatrixPosition(held.matrixWorld)));
+				return cps;
+			// (first person: the client shrinks these arcs (cl_portalgun_beam_size);
+			// the scale here is matched to its frames, not taken from its code)
+			}, {fp, live: true, size: fp ? 0.2 : 1});
 		}
 
 		// dispatched effects
@@ -1965,7 +2021,7 @@ export class View3D {
 			const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)}`;
 			if (o.userData.lightingKey === key) return;
 			o.userData.lightingKey = key;
-			o.userData.lighting = amb.at([at.x, at.y, at.z]);
+			o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches);
 		};
 		const apply = (o: THREE.Object3D) => {
 			hookMeshes(o);
@@ -2036,7 +2092,7 @@ export class View3D {
 			const k = keyAt(p, Math.floor(tick));
 			const h = Number(k?.extra?.m_hAttachedObject ?? -1);
 			if (!k || h < 0 || (h & 2047) === 2047) continue;
-			const ot = (this.tracksByIndex.get(h & 2047) ?? []).find(c => keyAt(c, tick));
+			const ot = this.trackForHandle(h, tick);
 			const o = ot && this.objects.get(ot);
 			const ok = ot && keyAt(ot, Math.floor(tick));
 			if (!o || !ok) continue;
@@ -2132,6 +2188,20 @@ export class View3D {
 		const m = {start, seq, phase, moveX, moveY};
 		this.motions.set(t, m);
 		return m;
+	}
+
+	// the entity an entity handle (index | serial << 11) names at a tick:
+	// the track at that index with that serial (indices get reused) that has
+	// started by then, the latest such
+	private trackForHandle(h: number, tick: number): EntityTrack | undefined {
+		const serial = h >> 11;
+		let best: EntityTrack | undefined;
+		for (const t of this.tracksByIndex.get(h & 2047) ?? []) {
+			if (!t.keys.length || t.keys[0].tick > tick) continue;
+			if (t.serial !== undefined && t.serial !== serial) continue;
+			if (!best || t.keys[0].tick > best.keys[0].tick) best = t;
+		}
+		return best;
 	}
 
 	// the entity at a network index at a tick (indices get reused)
@@ -2342,17 +2412,18 @@ export class View3D {
 			// draws a copy in front of the view instead), so it's shown here
 			for (const o of this.windowed) o.visible = tick >= o.userData.window[0] && tick < o.userData.window[1];
 			for (const o of this.windowedKids) o.visible = tick >= o.userData.window[0] && tick < o.userData.window[1];
-			const held = new Set<number>();
+			const held = new Set<EntityTrack>();
 			for (const p of ents.tracks) {
 				if (p.className !== 'CPortal_Player') continue;
 				const h = Number(keyAt(p, tick)?.extra?.m_hAttachedObject ?? -1);
-				if (h >= 0 && (h & 2047) !== 2047) held.add(h & 2047);
+				const ht = h >= 0 && (h & 2047) !== 2047 ? this.trackForHandle(h, tick) : undefined;
+				if (ht) held.add(ht);
 			}
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
 				if (this.frozen.has(t)) continue;  // (drawn with the static props)
-				const show = !!k && (this.shows(t, k) || (held.has(t.index) && t.model.endsWith('.mdl')));
-				const o = show ? this.objectFor(t, k?.skin ?? 0, Number(k?.extra?.m_nBody ?? 0)) : this.objects.get(t);
+				const show = !!k && (this.shows(t, k) || (held.has(t) && t.model.endsWith('.mdl')));
+				const o = show ? this.objectFor(t, k?.skin ?? 0, Number(k?.extra?.m_nBody ?? 0), k?.model ?? t.model) : this.objects.get(t);
 				if (!o) continue;
 				o.visible = show;
 				// a doorway's fade brush: drawn by the camera's distance (a closed
@@ -2439,8 +2510,113 @@ export class View3D {
 		this.updateViewModel(tick);
 		if (ents) this.placeHeld(tick);
 		this.updateParticles(tick);
+		this.updateFlashlight(tick);
 		this.lightModels();
 		this.render();
+	}
+
+	// The projected spotlight lighting the view: the active
+	// env_projectedtexture nearest the camera, with a shadow map from it
+	// (redrawn when the tick or the light changes; glass and effects don't cast)
+	private flashCam = new THREE.PerspectiveCamera(90, 1, 4, 2000);
+	private flashTarget: THREE.WebGLRenderTarget | null = null;
+	private flashDepthMaterial = new THREE.MeshBasicMaterial({colorWrite: false});
+	private flashKey = '';
+	private flashCookieName = '';
+	private updateFlashlight(tick: number) {
+		const ents = this.entities, r = this.renderer;
+		const u = flashUniforms;
+		let best: {k: EntityKey; d: number} | null = null;
+		const cam = this.camera.position;
+		for (const t of ents?.tracks ?? []) {
+			if (t.className !== 'CEnvProjectedTexture') continue;
+			const k = keyAt(t, Math.floor(tick));
+			if (!k || k.removed || Number(k.extra?.m_bState ?? 0) !== 1) continue;
+			const d = cam.distanceTo(new THREE.Vector3(...k.origin));
+			if (!best || d < best.d) best = {k, d};
+		}
+		if (!best || !r || !this.library) {
+			u.flashOn.value = 0;
+			return;
+		}
+		const k = best.k, e = k.extra ?? {};
+		// the cookie (loaded once; dark until it is)
+		const cookie = String(e.m_SpotlightTextureName ?? 'effects/flashlight001').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, '');
+		if (cookie !== this.flashCookieName) {
+			this.flashCookieName = cookie;
+			u.flashCookie.value = null;
+			this.library.textures.get(cookie).then(t => {
+				if (this.flashCookieName !== cookie) return;
+				u.flashCookie.value = t;
+				this.loaded();
+			});
+		}
+		if (!u.flashCookie.value) {
+			u.flashOn.value = 0;
+			return;
+		}
+		// colour: rgb / 255 x alpha / 255, times r_flashlightbrightness
+		// (0.25) and the brightness scale
+		const c = Number(e.m_LightColor ?? 0xffffffff) >>> 0;
+		const scale = ((c >>> 24) & 255) / 255 * 0.25 * Number(e.m_flBrightnessScale ?? 1);
+		u.flashColor.value.set((c & 255) / 255 * scale, ((c >>> 8) & 255) / 255 * scale, ((c >>> 16) & 255) / 255 * scale);
+		const near = Number(e.m_flNearZ ?? 4) || 4, far = Number(e.m_flFarZ ?? 2000) || 2000;
+		const fc = this.flashCam;
+		fc.fov = Number(e.m_flLightFOV ?? 90) || 90;
+		fc.near = near;
+		fc.far = far;
+		fc.updateProjectionMatrix();
+		// Source's basis: x forward, y left, z up
+		const basis = new THREE.Matrix4().makeRotationFromEuler(toEuler(k.angles));
+		const fwd = new THREE.Vector3(), left = new THREE.Vector3(), up = new THREE.Vector3();
+		basis.extractBasis(fwd, left, up);
+		fc.position.set(k.origin[0], k.origin[1], k.origin[2]);
+		fc.up.copy(up);
+		fc.lookAt(fc.position.clone().add(fwd));
+		fc.updateMatrixWorld();
+		u.flashPos.value.copy(fc.position);
+		u.flashMatrix.value.multiplyMatrices(fc.projectionMatrix, fc.matrixWorldInverse);
+		u.flashFar.value = far;
+		u.flashShadows.value = Number(e.m_bEnableShadows ?? 1) === 1 ? 1 : 0;
+		u.flashOn.value = 1;
+		const key = `${Math.floor(tick)}|${k.origin.join(',')}|${k.angles.join(',')}|${fc.fov}`;
+		if (!u.flashShadows.value || key === this.flashKey) return;
+		this.flashKey = key;
+		const size = 1024;
+		if (!this.flashTarget) {
+			this.flashTarget = new THREE.WebGLRenderTarget(size, size, {depthBuffer: true});
+			this.flashTarget.depthTexture = new THREE.DepthTexture(size, size);
+			u.flashDepth.value = this.flashTarget.depthTexture;
+			u.flashTexel.value = 1 / size;
+		}
+		// what casts: the solid scene (not the sky, effects, overlays, glass)
+		const hidden: THREE.Object3D[] = [];
+		const hide = (o: THREE.Object3D | null | undefined) => {
+			if (o && o.visible) {
+				o.visible = false;
+				hidden.push(o);
+			}
+		};
+		hide(this.sky);
+		hide(this.pathLine);
+		hide(this.player);
+		hide(this.particleRenderer?.group);
+		this.scene.traverseVisible(o => {
+			const m = (o as THREE.Mesh).material as THREE.Material | undefined;
+			if (m && !Array.isArray(m) && (m.transparent || (m as THREE.ShaderMaterial).isShaderMaterial)) hide(o);
+		});
+		const target = r.getRenderTarget(), fog = this.scene.fog, bg = this.scene.background;
+		this.scene.overrideMaterial = this.flashDepthMaterial;
+		this.scene.fog = null;
+		this.scene.background = null;
+		r.setRenderTarget(this.flashTarget);
+		r.clear();
+		r.render(this.scene, fc);
+		r.setRenderTarget(target);
+		this.scene.overrideMaterial = null;
+		this.scene.fog = fog;
+		this.scene.background = bg;
+		for (const o of hidden) o.visible = true;
 	}
 
 	private frame: THREE.WebGLRenderTarget | null = null;

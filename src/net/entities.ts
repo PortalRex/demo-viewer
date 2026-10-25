@@ -40,6 +40,7 @@ export interface EntityKey {
 	parent?: number;
 	attachment?: number;
 	skin?: number;     // m_nSkin (cube types, lit cubes and buttons)
+	model?: string;    // the model here, where it isn't the track's
 }
 
 // Props kept for the classes the 3D view draws specially
@@ -61,6 +62,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CWeaponPortalgun: ['m_nBody'],
 	// a doorway's fade brush, drawn by distance (see View3D)
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
+	// the projected spotlights (test chambers' key light for models and the world)
+	CEnvProjectedTexture: ['m_hTargetEntity', 'm_bCameraSpace', 'm_bState', 'm_flLightFOV', 'm_LightColor', 'm_flBrightnessScale', 'm_SpotlightTextureName', 'm_flNearZ', 'm_flFarZ', 'm_bEnableShadows', 'm_bLightWorld'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],
 };
 
@@ -79,6 +82,7 @@ export interface EntityTrack {
 	mins: Vec3;
 	maxs: Vec3;
 	orange?: boolean;   // portals
+	serial?: number;    // the entity's serial number (handles carry it: index | serial << 11)
 	keys: EntityKey[];
 	userData?: Record<string, unknown>;  // the viewer's per-track cache
 }
@@ -312,12 +316,16 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		const mins = vec(s[f.mins]), maxs = vec(s[f.maxs]);
 		if (mins) t.mins = [mins[0], mins[1], mins[2]];
 		if (maxs) t.maxs = [maxs[0], maxs[1], maxs[2]];
-		if (f.model >= 0) t.model = modelName(num(s[f.model]));
+		// the track's model is its first; a key carries its own where the
+		// entity has switched (a Frankencube becoming a box when picked up)
+		const m = f.model >= 0 ? modelName(num(s[f.model])) : '';
+		if (!t.model) t.model = m;
+		const model = m && m !== t.model ? m : undefined;
 		if (f.isPortal2 >= 0) t.orange = num(s[f.isPortal2]) !== 0;
 		const last = t.keys[t.keys.length - 1];
-		if (last && last.visible === visible && last.dormant === dormant && last.removed === removed && last.active === active && last.eyeZ === eyeZ && last.parent === parentIndex && last.attachment === attachment && last.skin === skin && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
+		if (last && last.visible === visible && last.dormant === dormant && last.removed === removed && last.active === active && last.eyeZ === eyeZ && last.parent === parentIndex && last.attachment === attachment && last.skin === skin && last.model === model && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
 		if (last && last.tick === tick) t.keys.pop();
-		t.keys.push({tick, origin, angles, visible, dormant, removed, nodraw, active, eyeZ, anim, extra, parent: parentIndex, attachment, skin});
+		t.keys.push({tick, origin, angles, visible, dormant, removed, nodraw, active, eyeZ, anim, extra, parent: parentIndex, attachment, skin, model});
 	};
 
 	const leave = (e: LiveEntity, tick: number, remove: boolean) => {
@@ -356,7 +364,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 					if (e) leave(e, tick, true);
 					const eb = baselines[h.baseline].get(index);
 					const base = eb && eb.classIndex === classIndex ? eb.state : instanceBaseline(classIndex);
-					const track: EntityTrack = {index, className: cls.name, model: '', mins: [0, 0, 0], maxs: [0, 0, 0], keys: []};
+					const track: EntityTrack = {index, className: cls.name, model: '', mins: [0, 0, 0], maxs: [0, 0, 0], serial, keys: []};
 					tracks.push(track);
 					classCounts.set(cls.name, (classCounts.get(cls.name) ?? 0) + 1);
 					e = {classIndex, serial, state: base.slice(), track, inSnapshot: true};

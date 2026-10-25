@@ -63,6 +63,8 @@ const endCapOk = (o: ParticleOperator, ending: boolean) => {
 // whether an effect (or one of its children) keeps emitting until stopped
 export function isEndless(def: ParticleSystemDef, lib: ParticleLibrary, depth = 0): boolean {
 	if (def.emitters.some(e => e.fn !== 'emit_instantaneously' && num(e, 'emission_duration', 0) <= 0)) return true;
+	// effects that restart themselves run until stopped
+	if (def.operators.some(o => o.fn === 'restart effect after duration')) return true;
 	// particles that never age (no lifespan operator) stay until stopped too
 	if (def.emitters.length && !def.operators.some(o => o.fn === 'lifespan decay' || o.fn === 'alpha fade and decay')) return true;
 	return depth < 4 && def.children.some(c => {
@@ -96,6 +98,8 @@ interface Particle {
 	fadeIn: number;    // per-particle random fade times (seconds or proportions)
 	fadeOut: number;
 	osc: number[];     // per-particle oscillation rates/frequencies
+	pathT?: number;    // where along a control point path it was placed (0..1)
+	pathAt?: THREE.Vector3;  // that point of the path when last moved with it
 }
 
 function mulberry(seed: number) {
@@ -150,6 +154,10 @@ export class ParticleInstance {
 	private spawned = 0;
 	// initializers that read a particle's position run after those that set it
 	private initOrder: ParticleOperator[];
+	// "restart effect after duration": when the emitters next fire again,
+	// and the time their start times count from
+	private restartAt = -1;
+	private emitBase = 0;
 
 	constructor(def: ParticleSystemDef, lib: ParticleLibrary, cps: ControlPoints, seed: number, depth = 0) {
 		this.def = def;
@@ -196,6 +204,21 @@ export class ParticleInstance {
 	skipTo(t: number) {
 		this.time = t;
 		for (const e of this.def.emitters) if (e.fn === 'emit_instantaneously' && num(e, 'emission_start_time', 0) < t) this.emitted.set(e, 0);
+	}
+
+	// a scale on every particle's drawn size, for its children too (the
+	// client scales some effects drawn with the view model)
+	sizeScale = 1;
+	setSizeScale(k: number) {
+		this.sizeScale = k;
+		for (const c of this.children) c.inst.setSizeScale(k);
+	}
+
+	// new control points (ends that move: a beam to a held object), for its
+	// children too
+	setControlPoints(cps: ControlPoints) {
+		this.cps = cps;
+		for (const c of this.children) c.inst.setControlPoints(cps);
 	}
 
 	stopEmitting() {
@@ -261,9 +284,19 @@ export class ParticleInstance {
 			this.cps.set(0, this.cpAt(t));
 		}
 		this.placeControlPoints(dt);
+		const restart = this.def.operators.find(o => o.fn === 'restart effect after duration');
+		if (restart && this.emitting) {
+			const next = () => this.r(num(restart, 'Minimum Restart Time', 0), num(restart, 'Maximum Restart Time', 1));
+			if (this.restartAt < 0) this.restartAt = next();
+			if (t >= this.restartAt) {
+				this.emitted.clear();
+				this.emitBase = this.restartAt;
+				this.restartAt += Math.max(0.05, next());
+			}
+		}
 		if (this.emitting) {
 			for (const e of this.def.emitters) {
-				const start = num(e, 'emission_start_time', 0);
+				const start = num(e, 'emission_start_time', 0) + this.emitBase;
 				let want = 0;
 				if (e.fn === 'emit_instantaneously') {
 					if (t >= start && !this.emitted.has(e)) {
@@ -289,6 +322,25 @@ export class ParticleInstance {
 		const decay = this.def.operators.find(o => o.fn === 'lifespan decay');
 		const ages = !!decay && endCapOk(decay, !this.emitting);
 		for (const p of this.particles) this.operate(p, dt);
+		// "remap difference of sequential particle vector to scalar": by how
+		// far each particle is from the one spawned before it (a rope hides
+		// the jump between one burst's end and the next's start)
+		const seq = this.def.operators.find(o => o.fn === 'remap difference of sequential particle vector to scalar');
+		if (seq && this.particles.length > 1) {
+			const ps = [...this.particles].sort((a, b) => a.index - b.index);
+			const d0 = num(seq, 'difference minimum', 0), d1 = num(seq, 'difference maximum', 128);
+			const o0 = num(seq, 'output minimum', 0), o1 = num(seq, 'output maximum', 1);
+			const prev = !!num(seq, 'also set ouput to previous particle', 0);
+			const field = num(seq, 'output field', 3);
+			if (field === F.ALPHA || field === F.ALPHA2) {
+				for (let i = 1; i < ps.length; i++) {
+					const k = Math.min(1, Math.max(0, (ps[i].pos.distanceTo(ps[i - 1].pos) - d0) / ((d1 - d0) || 1)));
+					const v = Math.max(0, o0 + (o1 - o0) * k);
+					ps[i].drawAlpha *= v;
+					if (prev) ps[i - 1].drawAlpha *= v;
+				}
+			}
+		}
 		this.particles = this.particles.filter(p => p.life !== -2 && !(ages && this.time - p.born >= p.life));
 		for (const c of this.children) if (t > c.delay) c.inst.advance(t - c.delay);
 	}
@@ -373,6 +425,7 @@ export class ParticleInstance {
 				const n = Math.max(1, num(o, 'particles to map from start to end', 100));
 				const k = n > 1 ? (index % n) / (n - 1) : 0;
 				p.pos = a.lerp(b, k);
+				p.pathT = k;  // (kept for "movement lock to saved position along path")
 				break;
 			}
 			case 'velocity random': {
@@ -489,6 +542,15 @@ export class ParticleInstance {
 				if (drag > 0) p.vel.multiplyScalar(Math.pow(Math.max(0, 1 - drag), dt * 30));
 				break;
 			}
+			case 'movement lock to saved position along path': {
+				// carried along as the path's ends move (a beam between two
+				// moving points)
+				if (p.pathT === undefined) break;
+				const at = this.cpPos(num(o, 'start control point number', 0)).lerp(this.cpPos(num(o, 'end control point number', 1)), p.pathT);
+				if (p.pathAt) p.pos.add(at.clone().sub(p.pathAt));
+				p.pathAt = at;
+				break;
+			}
 			case 'alpha fade in random': {
 				const tIn = num(o, 'proportional 0/1', 1) ? p.fadeIn * p.life : p.fadeIn;
 				if (tIn > 0) alpha *= Math.min(1, age / tIn);
@@ -600,7 +662,7 @@ export class ParticleInstance {
 			}
 		}
 		p.drawAlpha = Math.max(0, p.alpha) * alpha * Math.max(0, p.alpha2);
-		p.drawRadius = Math.max(0, p.radius * radiusScale);
+		p.drawRadius = Math.max(0, p.radius * radiusScale) * this.sizeScale;
 		if (moves) p.pos.addScaledVector(p.vel, dt);
 	}
 }

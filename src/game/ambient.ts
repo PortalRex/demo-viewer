@@ -76,7 +76,9 @@ export class AmbientLighting {
 
 	// the ambient cube at a point (blended from the leaf's samples by
 	// distance) and the nearby world lights that reach it
-	at(p: number[]): ModelLight {
+	// (`visible`: whether a light can reach the point, as the engine's light
+	// cache traces it; all lights count without it)
+	at(p: number[], visible?: (from: number[], to: [number, number, number]) => boolean): ModelLight {
 		// a leaf without samples (or a point just inside a wall): the
 		// nearest point around it that has some
 		let cube = this.cubeAt(p);
@@ -86,7 +88,8 @@ export class AmbientLighting {
 				if (cube) break;
 			}
 		}
-		return {cube: cube ?? new Array(18).fill(0), lights: this.lightsAt(p)};
+		const out = cube ?? new Array(18).fill(0);
+		return {cube: out, lights: this.lightsAt(p, out, visible)};
 	}
 
 	private cubeAt(p: number[]): number[] | null {
@@ -126,8 +129,10 @@ export class AmbientLighting {
 		return null;
 	}
 
-	// the strongest two direct lights not already in the cubes
-	private lightsAt(p: number[]): ModelLight['lights'] {
+	// The direct lights not already in the cubes that reach the point: the
+	// strongest two as local lights, the rest added into the cube by
+	// direction (as the light cache's AddWorldLightToAmbientCube)
+	private lightsAt(p: number[], cube?: number[], visible?: (from: number[], to: [number, number, number]) => boolean): ModelLight['lights'] {
 		const lit: {pos: [number, number, number]; color: [number, number, number]; s: number}[] = [];
 		for (const l of this.lights) {
 			if (l.inAmbient || (l.type !== 1 && l.type !== 2)) continue;
@@ -142,9 +147,23 @@ export class AmbientLighting {
 				if (l.exponent > 0) k *= Math.pow(Math.max(dot, 0), l.exponent);
 			}
 			const color: [number, number, number] = [l.color[0] * k, l.color[1] * k, l.color[2] * k];
-			lit.push({pos: l.origin, color, s: color[0] + color[1] + color[2]});
+			const sum = color[0] + color[1] + color[2];
+			if (sum < 1e-5) continue;
+			lit.push({pos: l.origin, color, s: sum});
 		}
 		lit.sort((a, b) => b.s - a.s);
-		return lit.slice(0, 2).map(({pos, color}) => ({pos, color}));
+		const reach = visible ? lit.filter(l => visible(p, l.pos)) : lit;
+		if (cube) {
+			for (const l of reach.slice(2)) {
+				const d = [l.pos[0] - p[0], l.pos[1] - p[1], l.pos[2] - p[2]];
+				const len = Math.hypot(d[0], d[1], d[2]) || 1;
+				for (let axis = 0; axis < 3; axis++) {
+					const c = d[axis] / len;
+					const side = axis * 2 + (c >= 0 ? 0 : 1);
+					for (let ch = 0; ch < 3; ch++) cube[side * 3 + ch] += l.color[ch] * Math.abs(c);
+				}
+			}
+		}
+		return reach.slice(0, 2).map(({pos, color}) => ({pos, color}));
 	}
 }

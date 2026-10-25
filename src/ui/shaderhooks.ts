@@ -124,6 +124,54 @@ const PAINT_FRAGMENT = `
 	#endif
 `;
 
+// A projected spotlight (env_projectedtexture), as the engine's flashlight
+// shading: the cookie texture projected from the light, times its colour,
+// a linear falloff (100 / distance), the far plane's fade, N.L and a shadow
+// map; added to the world's light maps and to models' lighting
+export const flashUniforms = {
+	flashOn: {value: 0},
+	flashPos: {value: new THREE.Vector3()},
+	flashMatrix: {value: new THREE.Matrix4()},
+	flashColor: {value: new THREE.Vector3()},
+	flashFar: {value: 2000},
+	flashCookie: {value: null as THREE.Texture | null},
+	flashDepth: {value: null as THREE.Texture | null},
+	flashShadows: {value: 0},
+	flashTexel: {value: 1 / 1024},
+};
+
+const FLASH_HEAD = `
+uniform float flashOn, flashFar, flashShadows, flashTexel;
+uniform vec3 flashPos, flashColor;
+uniform mat4 flashMatrix;
+uniform sampler2D flashCookie, flashDepth;
+vec3 flashLight(vec3 p, vec3 n) {
+	if (flashOn < 0.5) return vec3(0.0);
+	vec4 lp = flashMatrix * vec4(p, 1.0);
+	if (lp.w <= 0.0) return vec3(0.0);
+	vec3 proj = lp.xyz / lp.w;
+	vec2 uv = proj.xy * 0.5 + 0.5;
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || proj.z > 1.0) return vec3(0.0);
+	vec3 d = flashPos - p;
+	float dist = length(d);
+	float atten = clamp(100.0 / dist, 0.0, 1.0);
+	float fade = clamp((dist - flashFar) / (-0.4 * flashFar), 0.0, 1.0);
+	float ndl = clamp(dot(d / dist, n), 0.0, 1.0);
+	if (ndl <= 0.0) return vec3(0.0);
+	float shadow = 1.0;
+	if (flashShadows > 0.5) {
+		float z = proj.z * 0.5 + 0.5 - (0.0004 + 0.0016 * (1.0 - ndl));
+		shadow = 0.0;
+		for (int i = 0; i < 4; i++) {
+			vec2 o = vec2(i == 1 || i == 3 ? 1.0 : -1.0, i >= 2 ? 1.0 : -1.0) * 0.75 * flashTexel;
+			shadow += step(z, texture2D(flashDepth, uv + o).r);
+		}
+		shadow *= 0.25;
+	}
+	return texture2D(flashCookie, uv).rgb * flashColor * atten * fade * ndl * shadow;
+}
+`;
+
 // Models that move are lit as the engine lights them: an ambient cube (six
 // colours by normal direction) plus up to two local lights, per object (set
 // just before each draw, as the materials are shared)
@@ -153,6 +201,7 @@ const AMBIENT_FRAGMENT = `
 			vec3 l = ambLightPos[i] - vDitherWorld;
 			amb += ambLightColor[i] * max(dot(n, normalize(l)), 0.0);
 		}
+		amb += flashLight(vDitherWorld, n);
 		reflectedLight.directDiffuse = vec3(0.0);
 		reflectedLight.directSpecular = vec3(0.0);
 		reflectedLight.indirectDiffuse = diffuseColor.rgb * amb * ambScale;
@@ -262,6 +311,8 @@ const BUMP_FRAGMENT = `
 	#endif
 		reflectedLight.indirectDiffuse += lmColor * lightMapIntensity * RECIPROCAL_PI;
 		surfaceLight = lmColor * lightMapIntensity * RECIPROCAL_PI;
+		// (in the light maps' units: their scale, lightMapIntensity / pi)
+		reflectedLight.indirectDiffuse += flashLight(vDitherWorld, normalize(vEnvN)) * lightMapIntensity * RECIPROCAL_PI;
 `;
 
 // Reflections (LightmappedGeneric's $envmap): the cubemap along the view
@@ -380,7 +431,7 @@ function hook(material: THREE.Material, paint: boolean) {
 		};
 	}
 	material.onBeforeCompile = shader => {
-		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms, exposureUniforms);
+		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms, exposureUniforms, flashUniforms);
 		if (paint) {
 			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
@@ -409,7 +460,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n\tvDitherUp = normalize(mat3(modelMatrix) * normal).z;',
 		);
 		shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', REFRACT_FRAGMENT + '#include <opaque_fragment>');
-		shader.fragmentShader = DITHER_FRAGMENT_HEAD + FOG_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
+		shader.fragmentShader = DITHER_FRAGMENT_HEAD + FOG_HEAD + FLASH_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
