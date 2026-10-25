@@ -650,6 +650,11 @@ export class ParticleRenderer {
 		this.group.renderOrder = 3;
 	}
 
+	// whether a material draws over everything ($ignorez), once it's loaded
+	ignoresDepth(name: string): boolean {
+		return this.loaded.get(name)?.material.depthTest === false;
+	}
+
 	private sprite(name: string): SpriteMaterial | null | undefined {
 		if (this.loaded.has(name)) return this.loaded.get(name);
 		if (!this.sprites.has(name)) {

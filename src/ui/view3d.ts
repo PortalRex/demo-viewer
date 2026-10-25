@@ -1172,6 +1172,17 @@ export class View3D {
 			}
 			r.inst.advance(time);
 			if (r.inst.finished) return;
+			// glows drawn over everything still go when the world hides their
+			// origin from the camera (the game tests their visibility)
+			if (this.particleRenderer?.ignoresDepth(def.material) && this.collision) {
+				const at = new THREE.Vector3().setFromMatrixPosition(r.inst.cps.get(0) ?? new THREE.Matrix4());
+				const to = at.clone().sub(this.camera.position);
+				const dist = to.length();
+				if (dist > 8) {
+					const hit = this.collision.raycastFirst(new THREE.Ray(this.camera.position.clone(), to.divideScalar(dist)), THREE.DoubleSide);
+					if (hit && hit.distance < dist - 8) return;
+				}
+			}
 			(opts.fp ? this.vmParticlesShown : this.particlesShown).push(...r.inst.all);
 		};
 
