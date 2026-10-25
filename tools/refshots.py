@@ -20,9 +20,9 @@ OUT = os.path.join(FIXTURES, "shots", "ref")
 
 # demo file (in fixtures) -> ticks to capture
 SHOTS = [
-    # (demofixup'd: the original was recorded before build 8873 and fails
-    # on DT_PointSurvey in today's game)
-    ("cm_laserovergoo_fixed.dem", [300, 500, 800]),
+    ("cm_columnblocker.dem", [756, 1300]),
+    ("cm_duallasers.dem", [300]),
+    ("pair_TeamRetrieval_1498_76561198795823814_201453.dem", [400]),
 ]
 
 
@@ -62,7 +62,9 @@ def main():
     with open(os.path.join(GD, "cfg", "autoexec.cfg"), "w", encoding="utf-8") as f:
         f.write("exec autorender\nsar_togglewait\nsar_on_demo_start snd_restart\n"
                 "sar_quickhud_set_texture crosshair/quickhud900-\ncl_crosshairgap 7.5\nmat_vsync 0\nfps_max 0\n"
-                "sar_render_skip_coop_videos 1\nsar_disable_no_focus_sleep 1\njoystick 0\nvolume 0\necho [ref] ready\n")
+                "sar_render_skip_coop_videos 1\nsar_disable_no_focus_sleep 1\njoystick 0\nvolume 0\n"
+                # --histogram: the engine prints its exposure (target and current scalar) on screen
+                + ("developer 1\nmat_show_histogram 1\n" if "--histogram" in sys.argv else "") + "echo [ref] ready\n")
     for name, _ in SHOTS:
         shutil.copy(os.path.join(FIXTURES, name), os.path.join(GD, name))
 

@@ -73,6 +73,56 @@ const LIGHTMAP_EXPOSURE = 1.5;
 // lightmaps' units
 const vertexLight = (b: number) => Math.pow(b / 255 * 2, 2.2);
 
+// The engine's tonemap target from a histogram of the frame as drawn at
+// `exposure` (RGBA half floats, unexposed): only the middle 90% x 85% of
+// the view counts; pixels go in 16 buckets of linear luminance (edges
+// (k/16)^2.5, with everything over 1 in the top one; the engine's
+// mat_show_histogram says linear); the scale aims to put
+// the brightest 2% at 0.6 (holding still when 0.6 is already in their
+// bucket), or the median at 0.03 if that's brighter. Null with nothing to
+// measure.
+function histogramTarget(px: Uint16Array, w: number, h: number, exposure: number): number | null {
+	const BUCKETS = 16;
+	const edges = Array.from({length: BUCKETS + 1}, (_, k) => Math.pow(k / BUCKETS, 2.5));
+	const counts = new Array(BUCKETS).fill(0);
+	const f = THREE.DataUtils.fromHalfFloat;
+	const enc = (v: number) => Math.min(1, Math.max(0, v * exposure));
+	let total = 0;
+	for (let y = Math.floor(h * 0.075); y < Math.ceil(h * 0.925); y++) {
+		for (let x = Math.floor(w * 0.05); x < Math.ceil(w * 0.95); x++) {
+			const i = (y * w + x) * 4;
+			const lum = 0.2126 * enc(f(px[i])) + 0.7152 * enc(f(px[i + 1])) + 0.0722 * enc(f(px[i + 2]));
+			let b = 0;
+			while (b < BUCKETS - 1 && lum >= edges[b + 1]) b++;
+			counts[b]++;
+			total++;
+		}
+	}
+	if (!total) return null;
+	// where the brightest `percent` of pixels start (snapping to `snap` when
+	// it lies in that bucket)
+	const location = (percent: number, snap = -1) => {
+		let pixels = 0, range = 0;
+		for (let b = BUCKETS - 1; b >= 0; b--) {
+			const need = percent - pixels, share = counts[b] / total, width = edges[b + 1] - edges[b];
+			if (share >= need) {
+				if (snap >= 0 && edges[b] <= snap && snap <= edges[b + 1]) return snap;
+				const at = 1 - (range + width * (need / share));
+				return Math.max(edges[b], Math.min(edges[b + 1], at));
+			}
+			pixels += share;
+			range += width;
+		}
+		return -1;
+	};
+	let at = location(0.02, 0.6);
+	if (at < 0) at = 0.6;
+	let target = 0.6 / Math.max(1e-4, at);
+	const median = location(0.5);
+	if (median > 0) target = Math.max(target, 0.03 / median);
+	return target * exposure;
+}
+
 // three.js materials for the map's materials: textured once the texture
 // loads (flat colour until then), lit by the lightmap atlas for the world
 class MaterialLibrary {
@@ -1603,9 +1653,8 @@ export class View3D {
 	}
 
 	// Auto exposure, as the engine's (mat_tonemap_algorithm 1): every few
-	// frames the view is drawn small without exposure, and the scale is set
-	// so the brightest 2% of pixels start at 0.6 (sRGB), unless that leaves
-	// the median under 0.03; within the tonemap controller's range,
+	// frames the view is drawn small, and the scale is set from a histogram
+	// of it (see histogramTarget); within the tonemap controller's range,
 	// approached gradually.
 	private meterExposure(r: THREE.WebGLRenderer) {
 		const now = performance.now();
@@ -1647,20 +1696,10 @@ export class View3D {
 			// read back without waiting for the GPU (it lands a frame or two later)
 			const px = new Uint16Array(w * h * 4);
 			this.meterPending = true;
+			const exposed = this.exposure;
 			r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px).then(() => {
-				const lum: number[] = [];
-				for (let i = 0; i < px.length; i += 4) {
-					const f = THREE.DataUtils.fromHalfFloat;
-					lum.push(0.2126 * f(px[i]) + 0.7152 * f(px[i + 1]) + 0.0722 * f(px[i + 2]));
-				}
-				lum.sort((a, b) => a - b);
-				const at = (p: number) => Math.max(1e-4, lum[Math.floor(lum.length * p)]);
-				// (the engine's histogram reads the sRGB-encoded frame: 0.6 and
-				// 0.03 there are 0.319 and 0.0023 linear; and its coarse bins
-				// settle about 0.8x lower than this exact percentile, measured
-				// against its renders)
-				const target = 0.8 * Math.max(0.319 / at(0.98), 0.0023 / at(0.5));
-				this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
+				const target = histogramTarget(px, w, h, exposed);
+				if (target) this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
 			}).catch(() => {}).finally(() => { this.meterPending = false; });
 		}
 		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));

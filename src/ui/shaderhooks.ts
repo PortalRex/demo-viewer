@@ -11,15 +11,31 @@ export const paintUniforms = {
 	paintOn: {value: 0},
 };
 
-// Source's fog: linear from start to end, up to a maximum density
+// Source's range fog: by distance from the eye, linear from start to end
+// and capped at the maximum density, then squared and blended in linear
+// light (the frame here is already sRGB-encoded, as is the fog colour)
 export const fogUniforms = {
 	fogMaxDensity: {value: 1},
 };
 
+const FOG_HEAD = `
+vec3 srgbToLinear(vec3 c) {
+	return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+vec3 linearToSrgb(vec3 c) {
+	return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+}
+`;
+
 const FOG_FRAGMENT = `
 #ifdef USE_FOG
-	float fogFactor = clamp((vFogDepth - fogNear) / max(fogFar - fogNear, 1.0), 0.0, 1.0) * fogMaxDensity;
-	gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+	{
+		float dist = length(vDitherWorld - cameraPosition);
+		float f = min(fogMaxDensity, clamp((dist - fogNear) / max(fogFar - fogNear, 1.0), 0.0, 1.0));
+		vec3 lin = srgbToLinear(gl_FragColor.rgb);
+		vec3 fogLin = srgbToLinear(fogColor);
+		gl_FragColor.rgb = linearToSrgb(mix(lin, fogLin, f * f));
+	}
 #endif
 `;
 
@@ -390,7 +406,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n\tvDitherUp = normalize(mat3(modelMatrix) * normal).z;',
 		);
 		shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', REFRACT_FRAGMENT + '#include <opaque_fragment>');
-		shader.fragmentShader = DITHER_FRAGMENT_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
+		shader.fragmentShader = DITHER_FRAGMENT_HEAD + FOG_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
