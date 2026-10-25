@@ -750,6 +750,10 @@ interface SpriteMaterial {
 	material: THREE.ShaderMaterial;
 	sheet: SheetSequence[] | null;
 	orientation: number;  // SpriteCard $orientation (3: along the particles' normals)
+	// $minsize, $maxsize, $startfadesize, $endfadesize: limits on a sprite's
+	// radius as a fraction of its distance from the eye (fading out, then
+	// gone, between the last two: smoke at the camera)
+	size: [number, number, number, number];
 }
 
 const VERTEX = `
@@ -832,7 +836,12 @@ export class ParticleRenderer {
 			blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
 			side: THREE.DoubleSide,
 		});
-		return {material, sheet: bytes ? readVtfSheet(bytes) : null, orientation: Number(m.params.get('$orientation') ?? 0) || 0};
+		const param = (k: string, d: number) => {
+			const v = Number(m.params.get(k));
+			return Number.isFinite(v) && m.params.has(k) ? v : d;
+		};
+		const size: [number, number, number, number] = [param('$minsize', 0), param('$maxsize', 20), param('$startfadesize', 10), param('$endfadesize', 20)];
+		return {material, sheet: bytes ? readVtfSheet(bytes) : null, orientation: Number(m.params.get('$orientation') ?? 0) || 0, size};
 	}
 
 	// rebuilds the quads of every live particle
@@ -865,8 +874,20 @@ export class ParticleRenderer {
 			const rate = num(r, 'animation rate', 0.1);
 			const fit = num(r, 'animation_fit_lifetime', 0);
 			const flat = num(r, 'orientation_type', 0) === 2;
+			const [minSize, maxSize, startFade, endFade] = sprite.size;
 			for (const p of inst.particles) {
 				if (p.drawAlpha <= 0.002 || p.drawRadius <= 0) continue;
+				// (the sprite shader's size limits, by distance from the eye)
+				let radius = p.drawRadius, alpha = p.drawAlpha;
+				if (!trail) {
+					const l = p.pos.distanceTo(camPos);
+					radius = Math.max(radius, minSize * l);
+					if (radius > startFade * l) {
+						if (radius > endFade * l) continue;
+						alpha *= 1 - (radius - startFade * l) / Math.max(1e-6, (endFade - startFade) * l);
+					}
+					radius = Math.min(radius, maxSize * l);
+				}
 				const age = inst.time - p.born;
 				const uv = frameUv(sprite.sheet, p.seq, fit ? age / Math.max(p.life, 1e-3) : age * rate, !!fit);
 				let ax: THREE.Vector3, ay: THREE.Vector3, center = p.pos;
@@ -882,15 +903,15 @@ export class ParticleRenderer {
 					ay = dir.multiplyScalar(len / 2);
 				} else if (flat) {
 					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-					ax = new THREE.Vector3(c, s, 0).multiplyScalar(p.drawRadius);
-					ay = new THREE.Vector3(-s, c, 0).multiplyScalar(p.drawRadius);
+					ax = new THREE.Vector3(c, s, 0).multiplyScalar(radius);
+					ay = new THREE.Vector3(-s, c, 0).multiplyScalar(radius);
 				} else {
 					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-					ax = right.clone().multiplyScalar(c).addScaledVector(up, s).multiplyScalar(p.drawRadius);
-					ay = up.clone().multiplyScalar(c).addScaledVector(right, -s).multiplyScalar(p.drawRadius);
+					ax = right.clone().multiplyScalar(c).addScaledVector(up, s).multiplyScalar(radius);
+					ay = up.clone().multiplyScalar(c).addScaledVector(right, -s).multiplyScalar(radius);
 				}
 				const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([cx, cy]) => center.clone().addScaledVector(ax, cx).addScaledVector(ay, cy));
-				const col = [p.color[0], p.color[1], p.color[2], p.drawAlpha];
+				const col = [p.color[0], p.color[1], p.color[2], alpha];
 				quad(b, corners, [[uv[0], uv[3]], [uv[2], uv[3]], [uv[2], uv[1]], [uv[0], uv[1]]], [col, col, col, col]);
 			}
 		}
