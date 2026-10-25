@@ -1308,6 +1308,7 @@ export class View3D {
 		this.particleRuns.clear();
 		this.particlesShown = [];
 		disposeOwn(this.entityGroup);
+		this.turretLasers.clear();
 		this.windowedKids = [];
 		this.entityGroup.clear();
 		this.frozen.clear();
@@ -1521,6 +1522,48 @@ export class View3D {
 
 	// a laser's beam, continued through any portals it ends on (traced
 	// against the map from the exit portal)
+	// Turrets' laser sights (C_NPC_Portal_FloorTurret): a thin red beam from
+	// the "light" attachment along the eyes' aim, to what it hits (8192 out)
+	// and on through portals, while m_bLaserOn (flickering when out of ammo)
+	private turretLasers = new Map<EntityTrack, Laser>();
+	private updateTurretLasers(tick: number) {
+		const seen = new Set<EntityTrack>();
+		for (const t of this.entities!.tracks) {
+			if (t.className !== 'CNPC_Portal_FloorTurret') continue;
+			const k = keyAt(t, tick);
+			const o = this.objects.get(t);
+			if (!k || !o?.visible || Number(k.extra?.m_bLaserOn) !== 1) continue;
+			if (Number(k.extra?.m_bOutOfAmmo) === 1 && Math.sin(tick * 0.9 + t.index) > 0.3) continue;
+			const muzzle = this.attachmentAt(t.index, 2, tick, false), eyes = this.attachmentAt(t.index, 1, tick, false);
+			if (!muzzle || !eyes) continue;
+			const start = new THREE.Vector3().setFromMatrixPosition(muzzle);
+			const dir = new THREE.Vector3().setFromMatrixColumn(eyes, 0).normalize();
+			const ray = new THREE.Ray(start.clone().addScaledVector(dir, 1), dir);
+			const world = this.collision?.raycastFirst(ray, THREE.DoubleSide);
+			let dist = world && world.distance < 8192 ? world.distance + 1 : 8192;
+			// (players stop it too: their boxes, 32 wide, 72 tall or 36 ducked)
+			for (const p of this.entities!.tracks) {
+				const pk = p.className === 'CPortal_Player' ? keyAt(p, tick) : undefined;
+				if (!pk) continue;
+				const at = this.entityPose(p, tick).origin;
+				const box = new THREE.Box3(at.clone().add(new THREE.Vector3(-16, -16, 0)), at.clone().add(new THREE.Vector3(16, 16, (pk.eyeZ ?? DEFAULT_EYE) < 50 ? 36 : 72)));
+				const hit = ray.intersectBox(box, new THREE.Vector3());
+				if (hit) dist = Math.min(dist, hit.distanceTo(start));
+			}
+			const end = start.clone().addScaledVector(dir, dist);
+			let laser = this.turretLasers.get(t);
+			if (!laser) {
+				laser = new Laser(this.effects, 0.75, [1, 32 / 255, 32 / 255]);
+				this.entityGroup.add(laser.group);
+				this.turretLasers.set(t, laser);
+			}
+			laser.group.visible = true;
+			laser.set(this.laserPath(start, end), this.camera.position);
+			seen.add(t);
+		}
+		for (const [t, laser] of this.turretLasers) if (!seen.has(t)) laser.group.visible = false;
+	}
+
 	private laserPath(start: THREE.Vector3, end: THREE.Vector3): [THREE.Vector3, THREE.Vector3][] {
 		const out: [THREE.Vector3, THREE.Vector3][] = [[start, end]];
 		let a = start, b = end;
@@ -2367,6 +2410,25 @@ export class View3D {
 		}
 	}
 
+	// The challenge mode HUD's numbers at a tick: the recording player's
+	// portals placed and seconds taken (networked stats; the clock runs on
+	// between updates), or null outside challenge mode
+	cmStats(tick: number): {portals: number; seconds: number} | null {
+		const p = this.entities?.player ? this.followTrack : null;
+		if (!p || this.followed) return null;
+		const i = keyIndexAt(p, tick);
+		if (i < 0) return null;
+		const k = p.keys[i], e = k.extra ?? {};
+		const challenge = Number(e.m_iBonusChallenge ?? e['localdata.m_iBonusChallenge'] ?? 0);
+		const seconds = Number(e['m_StatsThisLevel.fNumSecondsTaken'] ?? NaN);
+		if (!challenge || Number.isNaN(seconds)) return null;
+		const next = p.keys[i + 1];
+		const nextSeconds = Number(next?.extra?.['m_StatsThisLevel.fNumSecondsTaken'] ?? NaN);
+		const running = next && nextSeconds > seconds;
+		const f = running ? Math.min(1, (tick - k.tick) / (next.tick - k.tick)) : 0;
+		return {portals: Number(e['m_StatsThisLevel.iNumPortalsPlaced'] ?? 0), seconds: seconds + (running ? (nextSeconds - seconds) * f : 0)};
+	}
+
 	// a player's weapon_bone in the world (where a held gun is bone-merged)
 	private handMatrix(index: number, tick: number): THREE.Matrix4 | null {
 		const pt = (this.tracksByIndex.get(index) ?? []).find(c => c.className === 'CPortal_Player' && keyAt(c, tick));
@@ -2729,8 +2791,9 @@ export class View3D {
 						const u = (surface.material as THREE.ShaderMaterial).uniforms;
 						u.time.value = time;
 						u.exposure.value = this.exposure;
-						// opens over half a second from where it was placed
-						u.open.value = (tick - this.portalPlacedAt(t, tick)) * this.interval * 2;
+						// opens over a tenth of a second from where it was placed (as
+						// the game's renders show: full within about six ticks)
+						u.open.value = (tick - this.portalPlacedAt(t, tick)) * this.interval * 10;
 						this.portals.set(t.index, {obj: o, link: Number(e.m_hLinkedPortal ?? -1) & 2047, halfW, halfH});
 					}
 				}
@@ -2738,6 +2801,7 @@ export class View3D {
 		}
 
 		if (ents) this.placeAttached(tick);
+		if (ents) this.updateTurretLasers(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the

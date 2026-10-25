@@ -52,7 +52,9 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CTrigger_TractorBeam: ['m_vStart', 'm_vEnd', 'm_flRadius', 'm_bReversed', 'm_bDisabled', 'm_linearForce', 'm_bFromPortal', 'm_bToPortal'],
 	CTriggerPortalCleanser: ['m_bDisabled', 'm_bVisible'],
 	// which fog and tonemap controllers apply to the player
-	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController', 'm_hAttachedObject', 'm_bUseVMGrab', 'm_bUsingVMGrabState', 'm_fFlags'],
+	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController', 'm_hAttachedObject', 'm_bUseVMGrab', 'm_bUsingVMGrabState', 'm_fFlags',
+		// challenge mode: its type, and the stats its HUD shows
+		'localdata.m_iBonusChallenge', 'm_iBonusChallenge', 'm_StatsThisLevel.iNumPortalsPlaced', 'm_StatsThisLevel.fNumSecondsTaken'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
 	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
 	// whose view model it is (co-op recordings have one per player)
@@ -60,6 +62,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CBaseViewModel: ['m_hOwner', 'm_nViewModelIndex', 'm_nBody'],
 	// body groups (PotatOS)
 	CWeaponPortalgun: ['m_nBody', 'm_iLastFiredPortal'],
+	// turrets' laser sights
+	CNPC_Portal_FloorTurret: ['m_bLaserOn', 'm_bOutOfAmmo'],
 	// a doorway's fade brush, drawn by distance (see View3D)
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)

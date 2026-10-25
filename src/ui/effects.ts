@@ -188,7 +188,11 @@ export class Laser {
 	private segments: THREE.Mesh[] = [];
 	private material: THREE.MeshBasicMaterial;
 
-	constructor(assets: EffectAssets | null) {
+	// (`width`: the beam's; `tint`: its render colour, 0..1)
+	private width: number;
+
+	constructor(assets: EffectAssets | null, width = 12, tint: [number, number, number] = [1, 1, 1]) {
+		this.width = width;
 		this.material = new THREE.MeshBasicMaterial({color: 0xff4020, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false});
 		this.material.userData.effect = true;  // (freed with its object)
 		assets?.texture('effects/redlaser1').then(t => {
@@ -200,7 +204,7 @@ export class Laser {
 			tex.wrapT = THREE.RepeatWrapping;
 			tex.needsUpdate = true;
 			this.material.map = tex;
-			this.material.color.setRGB(1, 1, 1);
+			this.material.color.setRGB(...tint);
 			this.material.needsUpdate = true;
 		});
 	}
@@ -218,7 +222,7 @@ export class Laser {
 			this.group.add(mesh);
 			this.segments.push(mesh);
 		}
-		const width = 12;
+		const width = this.width;
 		this.segments.forEach((mesh, i) => {
 			const p = points[i];
 			mesh.visible = !!p;

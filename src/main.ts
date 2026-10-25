@@ -310,6 +310,16 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 	}
 }
 
+// the challenge mode HUD (Eyes view of a challenge mode recording), as the game draws it
+function showCmHud(stats: {portals: number; seconds: number} | null) {
+	$('cm-hud').hidden = !stats;
+	if (!stats) return;
+	const cs = Math.floor(stats.seconds * 100 + 1e-6);
+	const pad = (n: number) => String(n).padStart(2, '0');
+	$('cm-portals').textContent = String(stats.portals);
+	$('cm-time').textContent = `${pad(Math.floor(cs / 6000))}:${pad(Math.floor(cs / 100) % 60)}.${pad(cs % 100)}`;
+}
+
 function seekTo(tick: number) {
 	if (!pb) return;
 	t = Math.max(0, Math.min(pb.total, tick));
@@ -357,6 +367,7 @@ function render() {
 	const cmd = cmdAt(loc.track, loc.tick);
 	if (viewMode === '3d') view3d.update(view, loc.tick);
 	else pathView.draw(view, loc.tick, seg.sar);
+	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null);
 	timeline.draw(t, loc.index);
 	speedGraph.draw(loc.tick);
 	inputs.show(cmd);
