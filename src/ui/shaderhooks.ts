@@ -397,11 +397,12 @@ uniform samplerCube envCube;
 uniform vec3 envTint;
 uniform float envScale;
 uniform float envContrast;
-uniform float envSaturation;
+uniform vec3 envSaturation;
 uniform sampler2D envMaskMap;
 uniform float envLightScale;
 varying vec3 vEnvN;
 vec3 surfaceLight = vec3(1.0);
+vec3 envAdded = vec3(0.0);
 `;
 
 const ENV_FRAGMENT = `
@@ -431,13 +432,19 @@ const ENV_FRAGMENT = `
 		spec = mix(spec, spec * spec, envContrast);
 		spec = mix(vec3(dot(spec, vec3(0.299, 0.587, 0.114))), spec, envSaturation);
 		outgoingLight += spec;
+		envAdded = spec;
 	}
 #endif
 `;
 
-// Refract surfaces draw their (unlit) tint, multiplied onto what's behind
+// Refract surfaces draw their (unlit) tint, multiplied onto what's behind;
+// with a reflection, the reflection added and the tint as a grey level in
+// alpha (blended as reflection + behind x alpha)
 const REFRACT_FRAGMENT = `
-#ifdef REFRACT_TINT
+#if defined(REFRACT_TINT) && defined(REFRACT_ENV)
+	diffuseColor.a = dot(diffuseColor.rgb, vec3(1.0 / 3.0));
+	outgoingLight = envAdded;
+#elif defined(REFRACT_TINT)
 	outgoingLight = diffuseColor.rgb;
 #endif
 #ifdef REFRACT_UNSCALED
@@ -450,7 +457,7 @@ export interface EnvSettings {
 	tint: [number, number, number];
 	scale: number;
 	contrast: number;
-	saturation: number;
+	saturation: [number, number, number];
 	maskMap: THREE.Texture | null;
 	lightScale: number;
 }
@@ -471,7 +478,7 @@ export function setWorldDetail(material: THREE.Material, map: THREE.Texture, sca
 export interface ModelEnv {
 	tint: [number, number, number];
 	contrast: number;
-	saturation: number;
+	saturation: [number, number, number];
 	lightScale: number;
 	mask: 'none' | 'base' | 'texture';
 	maskMap: THREE.Texture | null;
@@ -491,7 +498,7 @@ export function setWorldEnv(material: THREE.Material, env: EnvSettings, mask: 'n
 	(u.envTint.value as THREE.Vector3).set(...env.tint);
 	u.envScale.value = env.scale;
 	u.envContrast.value = env.contrast;
-	u.envSaturation.value = env.saturation;
+	(u.envSaturation.value as THREE.Vector3).set(...env.saturation);
 	u.envMaskMap.value = env.maskMap;
 	u.envLightScale.value = env.lightScale;
 	material.defines = {...material.defines, ENVMAP_CUBE: ''};
@@ -510,7 +517,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			envTint: {value: new THREE.Vector3(1, 1, 1)},
 			envScale: {value: 1},
 			envContrast: {value: 0},
-			envSaturation: {value: 1},
+			envSaturation: {value: new THREE.Vector3(1, 1, 1)},
 			envMaskMap: {value: null},
 			envLightScale: {value: 0},
 			detailMap: {value: null},
@@ -526,7 +533,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			envTint: {value: new THREE.Vector3(...env.tint)},
 			envScale: {value: 1},
 			envContrast: {value: env.contrast},
-			envSaturation: {value: env.saturation},
+			envSaturation: {value: new THREE.Vector3(...env.saturation)},
 			envMaskMap: {value: env.maskMap},
 			envLightScale: {value: env.lightScale},
 		};
@@ -617,7 +624,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

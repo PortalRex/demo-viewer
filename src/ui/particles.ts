@@ -542,6 +542,22 @@ export class ParticleInstance {
 			case 'sequence random':
 				p.seq = Math.floor(this.r(num(o, 'sequence_min', 0), num(o, 'sequence_max', 0) + 0.999));
 				break;
+			case 'lifetime from sequence': {
+				// as long as its sheet sequence's frames take at the rate given
+				// (until the sheet has loaded, the default)
+				const list = this.def.material ? sheets.get(this.def.material) : undefined;
+				const seq = list?.[p.seq] ?? list?.[0];
+				if (seq?.frames.length) p.life = seq.frames.length / (num(o, 'Frames Per Second', 30) || 30);
+				break;
+			}
+			case 'lifetime pre-age noise':
+				// born already part way through its life (a random pick in the range)
+				p.born -= p.life * this.r(num(o, 'start age minimum', 0), num(o, 'start age maximum', 1));
+				break;
+			case 'rotation yaw flip random':
+				// turned half round, some of the time
+				if (this.r(0, 1) < num(o, 'Flip Percentage', 0.5)) p.rot += 180;
+				break;
 			case 'trail length random':
 				p.trail = this.r(num(o, 'length_min', 0.1), num(o, 'length_max', 0.1));
 				break;
@@ -744,6 +760,10 @@ export class ParticleInstance {
 	}
 }
 
+// sprite sheets by material, once the renderer has loaded them: the
+// simulation reads sequence lengths from them ("lifetime from sequence")
+const sheets = new Map<string, SheetSequence[] | null>();
+
 // ---- drawing ----
 
 interface SpriteMaterial {
@@ -841,7 +861,9 @@ export class ParticleRenderer {
 			return Number.isFinite(v) && m.params.has(k) ? v : d;
 		};
 		const size: [number, number, number, number] = [param('$minsize', 0), param('$maxsize', 20), param('$startfadesize', 10), param('$endfadesize', 20)];
-		return {material, sheet: bytes ? readVtfSheet(bytes) : null, orientation: Number(m.params.get('$orientation') ?? 0) || 0, size};
+		const sheet = bytes ? readVtfSheet(bytes) : null;
+		sheets.set(name, sheet);
+		return {material, sheet, orientation: Number(m.params.get('$orientation') ?? 0) || 0, size};
 	}
 
 	// rebuilds the quads of every live particle

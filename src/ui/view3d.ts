@@ -294,6 +294,17 @@ class MaterialLibrary {
 		delete mat.defines.BACKFACE_SHADE;
 		const k = info.refractTintTexture ? 2 : 1;
 		mat.color.setRGB(info.refractTint[0] * k, info.refractTint[1] * k, info.refractTint[2] * k, THREE.LinearSRGBColorSpace);
+		// a model's $envmap (broken glass): the reflection added on top, the
+		// tint then a grey level (src + dst x alpha); the cube is per object
+		if (info.envMap && mat.userData.ambientLit) {
+			mat.blendSrc = THREE.OneFactor;
+			mat.blendDst = THREE.SrcAlphaFactor;
+			mat.defines.REFRACT_ENV = '';
+			mat.userData.modelEnv = {
+				tint: info.envTint, contrast: info.envContrast, saturation: info.envSaturation, lightScale: info.envLightScale,
+				mask: 'none', maskMap: null, cube: info.envMap,
+			};
+		}
 		mat.needsUpdate = true;
 		if (info.refractTintTexture) {
 			this.textures.get(info.refractTintTexture).then(tex => {
@@ -2204,6 +2215,23 @@ export class View3D {
 					const color = reversed ? [255, 56, 8] : [0, 49, 189];
 					return new Map([[0, cp0], [1, cp1], [2, new THREE.Matrix4().setPosition(vel)], [3, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]);
 				});
+			} else if (t.className === 'CEntityFlame') {
+				// fire on something: burning_character (burning_gib_01 when
+				// cheap), both its control points on what's burning, followed
+				const i = keyIndexAt(t, tick);
+				if (i < 0) continue;
+				const k = t.keys[i], e = k.extra ?? {};
+				if (k.removed) continue;
+				const gone = t.keys.findIndex(q => q.removed);
+				const end = gone >= 0 ? t.keys[gone].tick : Infinity;
+				const name = Number(e.m_bCheapEffect) === 1 ? 'burning_gib_01' : 'burning_character';
+				const on = Number(e.m_hEntAttached ?? -1);
+				run(`flame:${t.index}:${t.keys[0].tick}`, name, t.keys[0].tick, end, () => {
+					const target = on >= 0 && (on & 2047) !== 2047 ? this.trackForHandle(on, tick) : undefined;
+					const at = target ? this.entityPose(target, tick).origin : this.entityPose(t, tick).origin;
+					const m = new THREE.Matrix4().setPosition(at);
+					return new Map([[0, m], [1, m.clone()]]);
+				}, {live: true});
 			} else if (t.className === 'CProp_Portal') {
 				// the edge of each placement, until the portal closes or moves
 				const i = keyIndexAt(t, tick);

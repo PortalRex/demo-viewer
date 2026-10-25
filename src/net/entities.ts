@@ -72,6 +72,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)
 	CEnvProjectedTexture: ['m_hTargetEntity', 'm_bCameraSpace', 'm_bState', 'm_flLightFOV', 'm_LightColor', 'm_flBrightnessScale', 'm_SpotlightTextureName', 'm_flNearZ', 'm_flFarZ', 'm_bEnableShadows', 'm_bLightWorld'],
+	// fire on something (C_EntityFlame's burning_character): what it's on
+	CEntityFlame: ['m_hEntAttached', 'm_bCheapEffect'],
 	// how a held object faces its holder (co-op's view model grab draws it so)
 	CPropWeightedCube: ['m_qPreferredPlayerCarryAngles'],
 	CPhysicsProp: ['m_qPreferredPlayerCarryAngles'],

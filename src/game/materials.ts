@@ -67,7 +67,7 @@ export interface MaterialInfo {
 	envMask: 'none' | 'base' | 'bump' | 'texture';  // where the reflection's strength comes from
 	envMaskTexture: string;
 	envContrast: number;
-	envSaturation: number;
+	envSaturation: [number, number, number];  // per channel (one number for all three)
 	refractTint: [number, number, number];  // Refract: what's behind is multiplied by this
 	refractTintTexture: string;             // (times twice this texture, where there is one)
 	detail: string;          // $detail: a second texture at $detailscale x the base's coordinates
@@ -91,7 +91,7 @@ export interface MaterialInfo {
 const MISSING: MaterialInfo = {
 	noPortal: false, translucent: false, liquid: false, found: false, shader: '', baseTexture: '', alphaTest: false,
 	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1], bumpMap: '', ssbump: false,
-	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envContrast: 0, envSaturation: 1,
+	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envContrast: 0, envSaturation: [1, 1, 1],
 	refractTint: [1, 1, 1], refractTintTexture: '',
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
 	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
@@ -190,7 +190,7 @@ export class Materials {
 			envMask: truthy(p.get('$basealphaenvmapmask')) ? 'base' : truthy(p.get('$normalmapalphaenvmapmask')) ? 'bump' : p.get('$envmapmask') ? 'texture' : 'none',
 			envMaskTexture: (p.get('$envmapmask') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			envContrast: Number(p.get('$envmapcontrast') ?? 0) || 0,
-			envSaturation: p.has('$envmapsaturation') ? Number(p.get('$envmapsaturation')) || 0 : 1,
+			envSaturation: parseTint(p.get('$envmapsaturation')) ?? [1, 1, 1],
 			refractTint: parseColor(p.get('$refracttint')) ?? [1, 1, 1],
 			refractTintTexture: (p.get('$refracttinttexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.(vtf|vmt)$/, ''),
 			detail: (p.get('$detail') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
