@@ -38,6 +38,11 @@ const DEFAULT_EYE = 64;
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 // viewmodel_fov 54 (Portal 2's default, read from client.dll; horizontal at 4:3), as a vertical angle
 const VIEWMODEL_FOV = 2 * Math.atan(Math.tan(27 * Math.PI / 180) * 3 / 4) * 180 / Math.PI;
+// First-person particles: the engine draws them in the world's view (fov
+// 90), only moving the view model's attachments to where they show in its
+// narrower view (FormatViewModelAttachment); drawn here with the view
+// model's camera, so their sprites are scaled by the ratio of the two
+const VM_PARTICLE_SCALE = Math.tan(27 * Math.PI / 180) / Math.tan(45 * Math.PI / 180);
 
 // entity classes that aren't worth a box
 const HIDDEN_CLASSES = new Set([
@@ -2163,7 +2168,7 @@ export class View3D {
 				const core = this.attachmentAt(fp ? p.index : gun.index, beamPoint, tick, fp);
 				if (!light || !core) return null;
 				return new Map([[0, light], [1, new THREE.Matrix4().setPosition(color[0], color[1], color[2])], [3, core]]);
-			}, {fp, live: true});
+			}, {fp, live: true, size: fp ? VM_PARTICLE_SCALE : 1});
 		}
 
 		// the arcs the gun draws while holding something (DoEffectHolding):
@@ -2236,7 +2241,7 @@ export class View3D {
 			run(`fx:${n}`, name, fx.tick, stop, () => {
 				const cp = this.attachmentAt(fx.entity, fx.attachment, tick, fp) ?? new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1));
 				return new Map([[0, cp]]);
-			}, {fp});
+			}, {fp, size: fp ? VM_PARTICLE_SCALE : 1});
 		});
 		for (const key of this.particleRuns.keys()) if (!seen.has(key)) this.particleRuns.delete(key);
 	}
@@ -3100,10 +3105,32 @@ export class View3D {
 		return d;
 	}
 	private flashKey = '';
+	// the shadow map, made up front: the shaders' shadow sampler needs a
+	// comparing depth texture bound even while no light casts (the draw
+	// fails otherwise)
+	private ensureFlashTarget() {
+		const r = this.renderer;
+		if (this.flashTarget || !r) return;
+		const size = 1024;
+		this.flashTarget = new THREE.WebGLRenderTarget(size, size, {depthBuffer: true});
+		this.flashTarget.depthTexture = new THREE.DepthTexture(size, size);
+		// (compared in the sampler, filtered: hardware PCF)
+		this.flashTarget.depthTexture.compareFunction = THREE.LessEqualCompare;
+		this.flashTarget.depthTexture.minFilter = this.flashTarget.depthTexture.magFilter = THREE.LinearFilter;
+		flashUniforms.flashDepth.value = this.flashTarget.depthTexture;
+		flashUniforms.flashTexel.value = 1 / size;
+		// (three only makes a depth texture when it's drawn into: cleared once,
+		// to the far plane, so it's there and lets all light through)
+		const target = r.getRenderTarget();
+		r.setRenderTarget(this.flashTarget);
+		r.clear();
+		r.setRenderTarget(target);
+	}
 	private flashCookieName = '';
 	private updateFlashlight(tick: number) {
 		const ents = this.entities, r = this.renderer;
 		const u = flashUniforms;
+		this.ensureFlashTarget();
 		// (where it is in the world: lights are often parented, like
 		// Wheatley's flashlight)
 		let best: {k: EntityKey; d: number; m: THREE.Matrix4} | null = null;
@@ -3167,16 +3194,7 @@ export class View3D {
 		const key = `${Math.floor(tick)}|${fc.position.toArray().join(',')}|${fwd.toArray().join(',')}|${fc.fov}`;
 		if (!u.flashShadows.value || key === this.flashKey) return;
 		this.flashKey = key;
-		const size = 1024;
-		if (!this.flashTarget) {
-			this.flashTarget = new THREE.WebGLRenderTarget(size, size, {depthBuffer: true});
-			this.flashTarget.depthTexture = new THREE.DepthTexture(size, size);
-			// (compared in the sampler, filtered: hardware PCF)
-			this.flashTarget.depthTexture.compareFunction = THREE.LessEqualCompare;
-			this.flashTarget.depthTexture.minFilter = this.flashTarget.depthTexture.magFilter = THREE.LinearFilter;
-			u.flashDepth.value = this.flashTarget.depthTexture;
-			u.flashTexel.value = 1 / size;
-		}
+		this.ensureFlashTarget();
 		// what casts: the solid scene (not the sky, effects, overlays, glass)
 		const hidden: THREE.Object3D[] = [];
 		const hide = (o: THREE.Object3D | null | undefined) => {
