@@ -4,7 +4,7 @@
 # screenshots. Console only (netcon); the game is quit cleanly, and only a
 # hung game is killed (by its PID, never Steam).
 #   python tools/refshots.py
-import os, random, shutil, socket, string, subprocess, sys, threading, time
+import os, random, re, shutil, socket, string, subprocess, sys, threading, time
 
 GAME = r"C:\Program Files (x86)\Steam\steamapps\common\Portal 2"
 CDB = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe"
@@ -195,11 +195,19 @@ def main():
         subprocess.run(["taskkill", "/PID", str(p), "/F"])
 
     os.makedirs(OUT, exist_ok=True)
+    text = log_text()
     for base, ticks, video in rendered:
         shutil.copy(video, os.path.join(OUT, base + ".mp4"))
+        # the render starts some ticks in (SAR's start correction): frame 0 is
+        # tick (demo ticks - frames rendered), with SAR's count of the ticks
+        demo = text[text.find("Playing demo from") if base not in text else text.find(base):]
+        total = re.search(r"Ticks:\s+(\d+)", demo)
+        frames = re.search(r"Rendered (\d+) frames to '[^']*%s\.mp4" % re.escape(base), text)
+        start = int(total.group(1)) - int(frames.group(1)) if total and frames else 0
         for t in ticks:
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "%.4f" % (t / 60), "-i", video, "-frames:v", "1", "-q:v", "2",
-                            os.path.join(OUT, "%s_%d.jpg" % (base, t))])
+            # (SAR's renders are full range though tagged limited)
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "%.4f" % (max(0, t - start) / 60), "-i", video, "-frames:v", "1",
+                            "-vf", "scale=in_range=full:out_range=full", "-q:v", "2", os.path.join(OUT, "%s_%d.jpg" % (base, t))])
     say("rendered: %s" % [b for b, _, _ in rendered])
     log = os.path.join(GD, "console.log")
     if os.path.exists(log):
