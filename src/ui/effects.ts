@@ -66,6 +66,10 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 			baseOffset: {value: new THREE.Vector2()}, detail1Offset: {value: new THREE.Vector2()}, detail2Offset: {value: new THREE.Vector2()},
 			detail1Mode: {value: 0}, detail2Mode: {value: 0}, hasDetail1: {value: 0}, hasDetail2: {value: 0},
 			intensity: {value: 1}, color: {value: new THREE.Color(1, 1, 1)}, edgeFade: {value: 0},
+			// $tangenttopacityranges (opacity by how the view runs along the
+			// surface's T axis, and its front faces' share), and a vertex colour
+			tangentRanges: {value: new THREE.Vector4(1, 1, 1, 1)}, useTangent: {value: 0},
+			vertexColor: {value: new THREE.Color(1, 1, 1)}, useVertexColor: {value: 0},
 		},
 		transparent: true,
 		depthWrite: false,
@@ -75,21 +79,26 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 			varying vec2 vUv;
 			varying vec3 vNormalV;
 			varying vec3 vViewDir;
+			varying vec3 vTangentV;
 			void main() {
 				vUv = uv;
 				vec4 mv = modelViewMatrix * vec4(position, 1.0);
 				vNormalV = normalize(normalMatrix * normal);
+				// T runs along the column (its local Y)
+				vTangentV = normalize((modelViewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
 				vViewDir = normalize(-mv.xyz);
 				gl_Position = projectionMatrix * mv;
 			}`,
 		fragmentShader: `
 			uniform sampler2D base, detail1, detail2;
 			uniform vec2 baseOffset, detail1Offset, detail2Offset;
-			uniform float detail1Mode, detail2Mode, hasDetail1, hasDetail2, intensity, edgeFade;
-			uniform vec3 color;
+			uniform float detail1Mode, detail2Mode, hasDetail1, hasDetail2, intensity, edgeFade, useTangent, useVertexColor;
+			uniform vec3 color, vertexColor;
+			uniform vec4 tangentRanges;
 			varying vec2 vUv;
 			varying vec3 vNormalV;
 			varying vec3 vViewDir;
+			varying vec3 vTangentV;
 			void main() {
 				vec4 c = texture2D(base, vUv + baseOffset);
 				if (hasDetail1 > 0.5) {
@@ -100,10 +109,24 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 					vec3 d2 = texture2D(detail2, vUv + detail2Offset).rgb;
 					c.rgb = detail2Mode < 0.5 ? c.rgb + d2 : c.rgb * d2;
 				}
-				// funnels fade where the surface faces the viewer
-				float facing = abs(dot(normalize(vNormalV), normalize(vViewDir)));
-				float a = mix(1.0, 1.0 - pow(facing, 2.0) * 0.85, edgeFade);
-				gl_FragColor = vec4(c.rgb * color * intensity * a, 1.0);
+				vec3 view = normalize(vViewDir);
+				float alpha = 1.0;
+				if (useTangent > 0.5) {
+					// as SolidEnergy's tangent-T opacity: faint looking along the
+					// column, and on its near side; additive, so it scales the colour
+					float along = abs(dot(normalize(vTangentV), view));
+					alpha = mix(tangentRanges.x, tangentRanges.y, pow(along, tangentRanges.z));
+					float front = dot(view, normalize(vNormalV)) * 0.5 + 0.5;
+					alpha *= mix(1.0, tangentRanges.w, front * front);
+					c.rgb *= 1.0 + alpha;
+				} else {
+					// funnels fade where the surface faces the viewer
+					float facing = abs(dot(normalize(vNormalV), view));
+					c.rgb *= mix(1.0, 1.0 - pow(facing, 2.0) * 0.85, edgeFade);
+				}
+				// the vertex colour, more saturated where it's fainter
+				if (useVertexColor > 0.5) c.rgb *= pow(vertexColor, vec3((2.0 - alpha) * 2.0));
+				gl_FragColor = vec4(max(c.rgb, 0.0) * color * intensity, 1.0);
 				#ifdef TONE_MAPPING
 				// SolidEnergy caps the exposure it takes at 1
 				gl_FragColor.rgb /= max(toneMappingExposure, 1.0);
@@ -132,6 +155,13 @@ async function loadSolidEnergy(assets: EffectAssets, name: string, m: THREE.Shad
 	}
 	u.intensity.value = outputIntensity(p);
 	u.color.value.setRGB(...vec(p, '$color', [1, 1, 1]));
+	if (p.has('$tangenttopacityranges')) {
+		const r = (p.get('$tangenttopacityranges') ?? '').replace(/["[\]{}]/g, ' ').trim().split(/\s+/).map(Number);
+		if (r.length >= 4 && r.every(isFinite)) {
+			u.tangentRanges.value.set(r[0], r[1], r[2], r[3]);
+			u.useTangent.value = 1;
+		}
+	}
 }
 
 // ---- lasers ----
@@ -234,37 +264,48 @@ export class Bridge {
 
 // ---- excursion funnels (effects/tractor_beam) ----
 
+// Two columns as the game draws them: tractor_beam at radius 58 and
+// tractor_beam2 around it at 60, coloured by vertex colour (blue, or orange
+// when reversed)
 export class Funnel {
-	readonly mesh: THREE.Mesh;
-	private material = solidEnergyMaterial();
+	readonly mesh = new THREE.Group();
+	private columns: {mesh: THREE.Mesh; material: THREE.ShaderMaterial; radius: number}[] = [];
 
 	constructor(assets: EffectAssets | null) {
-		this.mesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 32, 1, true), this.material);
-		this.mesh.renderOrder = 2;
-		this.material.uniforms.edgeFade.value = 1;
-		if (assets) loadSolidEnergy(assets, 'effects/tractor_beam', this.material);
+		for (const [name, radius] of [['effects/tractor_beam', 58], ['effects/tractor_beam2', 60]] as const) {
+			const material = solidEnergyMaterial();
+			const mesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 32, 1, true), material);
+			mesh.renderOrder = 2;
+			material.uniforms.edgeFade.value = 1;
+			material.uniforms.useVertexColor.value = 1;
+			if (assets) loadSolidEnergy(assets, name, material);
+			this.mesh.add(mesh);
+			this.columns.push({mesh, material, radius});
+		}
 	}
 
-	set(start: THREE.Vector3, end: THREE.Vector3, radius: number, reversed: boolean, time: number) {
-		placeBetween(this.mesh, start, end, radius);
-		// texture scrolls along the funnel with its flow; light blue, or orange
-		// when reversed (the game's colours, matched to its renders)
+	set(start: THREE.Vector3, end: THREE.Vector3, _radius: number, reversed: boolean, time: number) {
 		const rate = (reversed ? -1 : 1) * 0.25;
 		const len = start.distanceTo(end);
-		const g = this.mesh.geometry as THREE.CylinderGeometry;
-		const uv = g.getAttribute('uv') as THREE.BufferAttribute;
-		if (g.userData.len !== len) {
-			g.userData.len = len;
-			// around the funnel: u; along it: v, one repeat per diameter
-			const base = (g.userData.baseUv ??= Float32Array.from(uv.array as Float32Array)) as Float32Array;
-			for (let i = 0; i < uv.count; i++) uv.setXY(i, base[i * 2], base[i * 2 + 1] * len / (radius * 2));
-			uv.needsUpdate = true;
+		for (const {mesh, material, radius} of this.columns) {
+			placeBetween(mesh, start, end, radius);
+			// texture scrolls along the funnel with its flow
+			const g = mesh.geometry as THREE.CylinderGeometry;
+			const uv = g.getAttribute('uv') as THREE.BufferAttribute;
+			if (g.userData.len !== len) {
+				g.userData.len = len;
+				// around the funnel: u; along it: v, one repeat per diameter
+				const base = (g.userData.baseUv ??= Float32Array.from(uv.array as Float32Array)) as Float32Array;
+				for (let i = 0; i < uv.count; i++) uv.setXY(i, base[i * 2], base[i * 2 + 1] * len / (radius * 2));
+				uv.needsUpdate = true;
+			}
+			const u = material.uniforms;
+			u.baseOffset.value.set(0, -rate * time);
+			u.detail1Offset.value.set(0.017 * rate * time, 0.1 * rate * time);
+			u.detail2Offset.value.set(0, -1.15 * rate * time);
+			// the client's vertex colours: (10, 160, 255), reversed (255, 160, 32)
+			u.vertexColor.value.setRGB(...(reversed ? [1, 0.627, 0.125] as const : [0.039, 0.627, 1] as const), THREE.LinearSRGBColorSpace);
 		}
-		const u = this.material.uniforms;
-		u.baseOffset.value.set(0, -rate * time);
-		u.detail1Offset.value.set(0.017 * rate * time, 0.1 * rate * time);
-		u.detail2Offset.value.set(0, -1.15 * rate * time);
-		u.color.value.setRGB(...(reversed ? [1.0, 0.45, 0.12] as const : [0.3, 0.6, 1.0] as const));
 	}
 }
 
