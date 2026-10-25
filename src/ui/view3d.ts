@@ -17,7 +17,7 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints} from './particles.ts';
-import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv} from './shaderhooks.ts';
+import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -64,10 +64,10 @@ function geometry(m: MeshData) {
 
 // How bright the baked lighting is drawn. three's basic material divides
 // light maps by pi.
-// Portal 2 stores integer-HDR lightmaps at 1/16 and its shaders multiply by
-// 16 again, so the light drawn is the stored linear value; the frame is then
-// scaled by the auto exposure and clamped, with no filmic curve.
-const LIGHTMAP_EXPOSURE = 16;
+// The stored linear light times 2 (matched against frames the game renders,
+// in a map whose tonemap range pins the exposure); the frame is then scaled
+// by the auto exposure and clamped, with no filmic curve.
+const LIGHTMAP_EXPOSURE = 2;
 
 // a static prop's stored vertex light (a byte) as linear light, in the
 // lightmaps' units
@@ -223,6 +223,15 @@ class MaterialLibrary {
 			mat.needsUpdate = true;
 			this.onChange();
 			if (info.envMap && info.envMap !== 'env_cubemap' && !info.translucent) this.applyEnv(mat, info);
+			// detail modes drawn: mod2x, additive, two-pattern mod2x, multiply, ssbump detail
+			if (info.detail && !info.unlit && [0, 1, 7, 8, 10].includes(info.detailBlendMode) && info.shader === 'lightmappedgeneric') {
+				// (linear: only the fade and over modes are sRGB)
+				this.textures.get(info.detail, true).then(tex => {
+					if (!tex) return;
+					setWorldDetail(mat, tex, info.detailScale, info.detailBlendFactor, info.detailBlendMode);
+					this.onChange();
+				});
+			}
 		});
 		this.applyBackFaces(mat);
 		return mat;
@@ -242,7 +251,7 @@ class MaterialLibrary {
 			if (!bump) return;
 			mat.userData.bumpNormal = bump;
 		}
-		setWorldEnv(mat, {cube: cube.texture, tint: info.envTint, scale: cube.scale, contrast: info.envContrast, saturation: info.envSaturation, maskMap}, info.envMask);
+		setWorldEnv(mat, {cube: cube.texture, tint: info.envTint, scale: cube.scale, contrast: info.envContrast, saturation: info.envSaturation, maskMap, lightScale: info.envLightScale}, info.envMask);
 		this.onChange();
 	}
 
@@ -1545,9 +1554,14 @@ export class View3D {
 			// would cover the whole view here
 			const skyShown = this.sky.visible;
 			if (this.skyCamera) this.sky.visible = false;
+			// nor do the viewer's own overlays (the path line is bright enough
+			// to set the exposure by itself)
+			const overlays = ([this.pathLine, this.player] as (THREE.Object3D | null)[]).filter((o): o is THREE.Object3D => !!o && o.visible);
+			for (const o of overlays) o.visible = false;
 			r.setRenderTarget(this.meter);
 			r.render(this.scene, this.camera);
 			r.setRenderTarget(null);
+			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
 			this.scene.fog = fog;
 			const px = new Uint16Array(w * h * 4);

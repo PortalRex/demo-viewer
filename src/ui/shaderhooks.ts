@@ -116,7 +116,7 @@ export interface ModelLighting {
 	lights: {pos: number[]; color: number[]}[];
 }
 
-export const AMBIENT_SCALE = 16;  // the lightmap scale (see view3d)
+export const AMBIENT_SCALE = 2;  // the lightmap scale (see view3d)
 
 const AMBIENT_FRAGMENT_HEAD = `
 uniform vec3 ambCube[6];
@@ -191,6 +191,33 @@ uniform sampler2D bumpLight2;
 uniform sampler2D bumpNormal;
 `;
 
+// $detail (LightmappedGeneric's TextureCombine): a second texture at
+// detailScale x the base's coordinates, combined by mode
+export const DETAIL_HEAD = `
+uniform sampler2D detailMap;
+uniform float detailScale;
+uniform float detailBlend;
+vec4 detailTexel = vec4(1.0);
+`;
+
+const DETAIL_FRAGMENT = `
+#if defined(DETAIL_MODE) && defined(USE_MAP)
+	{
+		detailTexel = texture2D(detailMap, vMapUv * detailScale);
+		float baseA = texture2D(map, vMapUv).a;
+	#if DETAIL_MODE == 0
+		diffuseColor.rgb *= mix(vec3(1.0), 2.0 * detailTexel.rgb, detailBlend);
+	#elif DETAIL_MODE == 1
+		diffuseColor.rgb += detailBlend * detailTexel.rgb;
+	#elif DETAIL_MODE == 7
+		diffuseColor.rgb *= mix(vec3(1.0), vec3(2.0 * mix(detailTexel.r, detailTexel.a, baseA)), detailBlend);
+	#elif DETAIL_MODE == 8
+		diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * detailTexel.rgb, detailBlend);
+	#endif
+	}
+#endif
+`;
+
 const BUMP_FRAGMENT = `
 		vec3 lmColor = lightMapTexel.rgb;
 	#if defined(BUMPLIGHT) && defined(USE_MAP)
@@ -200,6 +227,10 @@ const BUMP_FRAGMENT = `
 			vec3 b2 = texture2D(bumpLight2, vLightMapUv).rgb;
 			vec3 bn = texture2D(bumpNormal, vMapUv).rgb;
 		#ifdef SSBUMP
+		#if defined(DETAIL_MODE) && DETAIL_MODE == 10
+			// an ssbump detail texture modulates the bump
+			bn *= 2.0 * detailTexel.rgb;
+		#endif
 			// self-shadowed: the texture holds each direction's weight directly
 			lmColor = (bn.x * b0 + bn.y * b1 + bn.z * b2) * 0.57735;
 		#else
@@ -214,6 +245,7 @@ const BUMP_FRAGMENT = `
 		}
 	#endif
 		reflectedLight.indirectDiffuse += lmColor * lightMapIntensity * RECIPROCAL_PI;
+		surfaceLight = lmColor * lightMapIntensity * RECIPROCAL_PI;
 `;
 
 // Reflections (LightmappedGeneric's $envmap): the cubemap along the view
@@ -226,7 +258,9 @@ uniform float envScale;
 uniform float envContrast;
 uniform float envSaturation;
 uniform sampler2D envMaskMap;
+uniform float envLightScale;
 varying vec3 vEnvN;
+vec3 surfaceLight = vec3(1.0);
 `;
 
 const ENV_FRAGMENT = `
@@ -238,12 +272,18 @@ const ENV_FRAGMENT = `
 		vec3 spec = envScale * textureCube(envCube, reflect(eye, n)).rgb * envTint;
 		spec = mix(spec, spec * spec, envContrast);
 		spec = mix(vec3(dot(spec, vec3(0.299, 0.587, 0.114))), spec, envSaturation);
+		// $envmaplightscale: darker where the surface's light is
+		spec = mix(spec, spec * clamp(surfaceLight, 0.0, 1.0), envLightScale);
 		float mask = 1.0;
 	#if defined(ENVMASK_BASE) && defined(USE_MAP)
 		mask = texture2D(map, vMapUv).a;
 	#elif defined(ENVMASK_BUMP) && defined(USE_MAP)
 		mask = texture2D(bumpNormal, vMapUv).a;
-	#elif defined(ENVMASK_TEXTURE) && defined(USE_MAP)
+	#endif
+	#if defined(DETAIL_MODE) && DETAIL_MODE == 7 && defined(USE_MAP)
+		mask *= 2.0 * mix(detailTexel.g, detailTexel.b, texture2D(map, vMapUv).a);
+	#endif
+	#if defined(ENVMASK_TEXTURE) && defined(USE_MAP) && !defined(ENVMASK_BASE) && !defined(ENVMASK_BUMP)
 		mask = texture2D(envMaskMap, vMapUv).r;
 	#endif
 		outgoingLight += spec * mask;
@@ -265,6 +305,17 @@ export interface EnvSettings {
 	contrast: number;
 	saturation: number;
 	maskMap: THREE.Texture | null;
+	lightScale: number;
+}
+
+// gives a world material its $detail texture
+export function setWorldDetail(material: THREE.Material, map: THREE.Texture, scale: number, blend: number, mode: number) {
+	const u = material.userData.envUniforms as Record<string, {value: unknown}>;
+	u.detailMap.value = map;
+	u.detailScale.value = scale;
+	u.detailBlend.value = blend;
+	material.defines = {...material.defines, DETAIL_MODE: String(mode)};
+	material.needsUpdate = true;
 }
 
 // gives a world material its reflection (once its cubemap has loaded)
@@ -276,6 +327,7 @@ export function setWorldEnv(material: THREE.Material, env: EnvSettings, mask: 'n
 	u.envContrast.value = env.contrast;
 	u.envSaturation.value = env.saturation;
 	u.envMaskMap.value = env.maskMap;
+	u.envLightScale.value = env.lightScale;
 	material.defines = {...material.defines, ENVMAP_CUBE: ''};
 	for (const k of ['ENVMASK_BASE', 'ENVMASK_BUMP', 'ENVMASK_TEXTURE']) delete material.defines[k];
 	if (mask === 'base') material.defines.ENVMASK_BASE = '';
@@ -294,6 +346,10 @@ function hook(material: THREE.Material, paint: boolean) {
 			envContrast: {value: 0},
 			envSaturation: {value: 1},
 			envMaskMap: {value: null},
+			envLightScale: {value: 0},
+			detailMap: {value: null},
+			detailScale: {value: 4},
+			detailBlend: {value: 1},
 		};
 	}
 	if (lit) {
@@ -309,7 +365,7 @@ function hook(material: THREE.Material, paint: boolean) {
 		if (paint) {
 			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
-			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + shader.fragmentShader.replace(
+			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + DETAIL_HEAD + shader.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' + DETAIL_FRAGMENT).replace(
 				'reflectedLight.indirectDiffuse += lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;',
 				BUMP_FRAGMENT,
 			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + ENV_FRAGMENT);
@@ -339,7 +395,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

@@ -70,6 +70,11 @@ export interface MaterialInfo {
 	envSaturation: number;
 	refractTint: [number, number, number];  // Refract: what's behind is multiplied by this
 	refractTintTexture: string;             // (times twice this texture, where there is one)
+	detail: string;          // $detail: a second texture at $detailscale x the base's coordinates
+	detailScale: number;
+	detailBlendFactor: number;
+	detailBlendMode: number; // how it combines (LightmappedGeneric's TCOMBINE_ modes)
+	envLightScale: number;   // $envmaplightscale: reflections darkened where the light is
 }
 
 const MISSING: MaterialInfo = {
@@ -77,6 +82,7 @@ const MISSING: MaterialInfo = {
 	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1], bumpMap: '', ssbump: false,
 	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envContrast: 0, envSaturation: 1,
 	refractTint: [1, 1, 1], refractTintTexture: '',
+	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -172,6 +178,11 @@ export class Materials {
 			envSaturation: p.has('$envmapsaturation') ? Number(p.get('$envmapsaturation')) || 0 : 1,
 			refractTint: parseColor(p.get('$refracttint')) ?? [1, 1, 1],
 			refractTintTexture: (p.get('$refracttinttexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.(vtf|vmt)$/, ''),
+			detail: (p.get('$detail') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			detailScale: p.has('$detailscale') ? Number(p.get('$detailscale')) || 4 : 4,
+			detailBlendFactor: p.has('$detailblendfactor') ? Number(p.get('$detailblendfactor')) || 0 : 1,
+			detailBlendMode: Number(p.get('$detailblendmode') ?? 0) || 0,
+			envLightScale: Number(p.get('$envmaplightscale') ?? 0) || 0,
 		};
 	}
 }
