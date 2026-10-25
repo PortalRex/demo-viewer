@@ -13,6 +13,8 @@ STEAM = r"C:\Program Files (x86)\Steam\steam.exe"
 GAMEDIR = "refshots/portal2"
 GD = os.path.join(GAME, *GAMEDIR.split("/"))
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from servertick import server_tick  # noqa: E402
 FIXTURES = os.path.join(HERE, "..", "fixtures")
 OUT = os.path.join(FIXTURES, "shots", "ref")
 
@@ -22,6 +24,8 @@ SHOTS = [
     ("cm_duallasers.dem", [451, 600]),
     ("cm_laserovergoo.dem", [500]),
     ("pair_Buttons_1818_76561198795823814_229948.dem", [300, 690]),
+    ("pair_TeamRetrieval_1498_76561198795823814_201453.dem", [400, 900]),
+    ("cm_bridgeintro.dem", [400]),
 ]
 
 
@@ -83,16 +87,59 @@ def main():
                 pass
         return alive()
 
+    log = os.path.join(GD, "console.log")
+
+    def log_text():
+        try:
+            return open(log, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return ""
+
+    def wait_log(marker, start, limit):
+        # the console log growing past `start` with `marker` in it
+        end = time.time() + limit
+        while time.time() < end and alive():
+            if marker in log_text()[start:]:
+                return True
+            time.sleep(0.25)
+        return False
+
+    seq = [0]
+
+    def sync(limit):
+        # an echo the game must get round to: proves it's still responding
+        seq[0] += 1
+        mark = "[ref] sync %d" % seq[0]
+        at = len(log_text())
+        cmd("echo %s" % mark, 0.1)
+        return wait_log(mark, at, limit)
+
     taken = []
     cmd("echo warm", 10)
+    # demo_gototick hangs the game in these maps (both ways), so each shot
+    # is a fresh playback that pauses itself at the tick's server tick
     for name, ticks in SHOTS:
         base = name[:-4]
-        cmd("playdemo %s" % base, 25)
         for t in ticks:
-            cmd("demo_gototick %d 0 1" % t, 8)  # absolute tick, paused
-            cmd("jpeg", 3)
+            st = server_tick(os.path.join(FIXTURES, name), t)
+            at = len(log_text())
+            cmd("playdemo %s" % base, 0.1)
+            if not wait_log("Receiving uncompressed update", at, 90) or not sync(30):
+                print("demo didn't load:", base)
+                break
+            cmd("demo_pauseatservertick %d" % st, 0.1)
+            cmd("demo_timescale 2", t / 60 / 2 + 8)
+            if not sync(20):
+                print("game stopped responding playing", base)
+                break
+            cmd("jpeg", 0.1)
+            if not sync(20):
+                break
             taken.append("%s_%d" % (base, t))
-        cmd("stopdemo", 3)
+            cmd("stopdemo", 3)
+        else:
+            continue
+        break
 
     cmd("quit", 3)
     for limit in (90, 60):
@@ -111,7 +158,6 @@ def main():
     print("screenshots:", files)
     for f, label in zip(files, taken):
         shutil.copy(os.path.join(shots, f), os.path.join(OUT, label + os.path.splitext(f)[1]))
-    log = os.path.join(GD, "console.log")
     if os.path.exists(log):
         shutil.copy(log, os.path.join(OUT, "console.log"))
     print("copied to", OUT)
