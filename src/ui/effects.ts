@@ -50,6 +50,10 @@ export class EffectAssets {
 		this.white.needsUpdate = true;
 	}
 
+	dispose() {
+		this.white.dispose();
+	}
+
 	async texture(path: string | undefined): Promise<THREE.Texture> {
 		if (!path) return this.white;
 		return (await this.textures.get(path.toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''))) ?? this.white;
@@ -186,9 +190,11 @@ export class Laser {
 
 	constructor(assets: EffectAssets | null) {
 		this.material = new THREE.MeshBasicMaterial({color: 0xff4020, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false});
+		this.material.userData.effect = true;  // (freed with its object)
 		assets?.texture('effects/redlaser1').then(t => {
 			if (t === assets.white) return;
 			const tex = t.clone();
+			tex.userData.owned = true;  // (freed with its material)
 			// the texture's u runs across the beam (hot core, red edges), v along it
 			tex.wrapS = THREE.ClampToEdgeWrapping;
 			tex.wrapT = THREE.RepeatWrapping;
@@ -429,6 +435,7 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 			const u = m.uniforms;
 			const repeat = (t: THREE.Texture) => {
 				const c = t.clone();
+				c.userData.owned = true;
 				c.wrapS = c.wrapT = THREE.RepeatWrapping;
 				c.needsUpdate = true;
 				return c;
@@ -526,6 +533,7 @@ export function portalMaterial(assets: EffectAssets | null, orange: boolean, tin
 	if (assets) {
 		const clamp = (t: THREE.Texture, repeat: boolean) => {
 			const c = t.clone();
+			c.userData.owned = true;
 			c.wrapS = c.wrapT = repeat ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
 			c.needsUpdate = true;
 			return c;

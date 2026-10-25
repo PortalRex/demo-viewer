@@ -147,6 +147,12 @@ class MaterialLibrary {
 			cache.clear();
 		}
 		this.textures.dispose();
+		for (const p of this.cubes.values()) p.then(c => {
+			if (!c) return;
+			for (const f of c.texture.image as THREE.Texture[]) f.dispose?.();
+			c.texture.dispose();
+		});
+		this.cubes.clear();
 	}
 	onChange = () => {};
 
@@ -634,6 +640,7 @@ export class View3D {
 						const raw = geometry(g);
 						const posed = mats ? bakePose(g, mats) : null;
 						const baked = posed ? geometry({...g, positions: posed.positions, normals: posed.normals}) : raw;
+						raw.userData.shared = baked.userData.shared = true;  // (the model cache's: not freed with objects)
 						return {group: g, raw, baked, material: library.forModel(g.materialCandidates), name: `${name} ${g.materialCandidates[0]}`};
 					});
 					return {name, model: m, skeleton, parts};
@@ -675,10 +682,18 @@ export class View3D {
 		for (const g of [this.mapGroup, this.propGroup, this.sky]) {
 			g.traverse(o => {
 				const mesh = o as THREE.Mesh;
-				if (mesh.isMesh) mesh.geometry.dispose();
+				if (!mesh.isMesh) return;
+				mesh.geometry.dispose();
+				// (the sky's materials and texture copies are its own)
+				if (g === this.sky && !Array.isArray(mesh.material)) {
+					(mesh.material as THREE.MeshBasicMaterial).map?.dispose();
+					mesh.material.dispose();
+				}
 			});
 			g.clear();
 		}
+		this.effects?.dispose();
+		this.paint?.texture.dispose();
 		this.models.forEach(p => p.then(a => a?.parts.forEach(part => {
 			part.raw.dispose();
 			if (part.baked !== part.raw) part.baked.dispose();
@@ -1189,6 +1204,7 @@ export class View3D {
 			else this.tracksByIndex.set(t.index, [t]);
 		}
 		this.interval = track.seg.intervalPerTick;
+		this.paint?.texture.dispose();
 		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint) : null;
 		paintUniforms.paintMap.value = this.paint?.texture ?? null;
 		paintUniforms.paintOn.value = this.paint ? 1 : 0;
@@ -1221,7 +1237,10 @@ export class View3D {
 		this.frozen.clear();
 		this.frozenCandidates = null;
 		this.objects.clear();
-		for (const g of this.vmObjects.values()) this.vmScene.remove(g);
+		for (const g of this.vmObjects.values()) {
+			this.vmScene.remove(g);
+			disposeOwn(g);
+		}
 		this.vmObjects.clear();
 		this.vmShown = null;
 	}
@@ -1233,6 +1252,7 @@ export class View3D {
 			// a new skin (a cube lighting up on a button) or body groups
 			// (PotatOS on the gun): rebuild
 			this.entityGroup.remove(o);
+			disposeOwn(o);
 			this.objects.delete(t);
 		}
 		o = this.makeObject(t, skin, body) ?? new THREE.Group();
@@ -1869,6 +1889,7 @@ export class View3D {
 		if (g && (g.userData.body ?? 0) !== body) {
 			// body groups changed (PotatOS on the gun): rebuild
 			this.vmScene.remove(g);
+			disposeOwn(g);
 			this.vmObjects.delete(t);
 			g = undefined;
 		}
@@ -2759,9 +2780,17 @@ function worldCollision(m: ModelMesh): MeshBVH | null {
 function disposeOwn(root: THREE.Object3D) {
 	root.traverse(o => {
 		const mesh = o as THREE.Mesh;
-		if (!mesh.isMesh) return;
-		if (mesh.userData.ambHooked && !Array.isArray(mesh.material)) mesh.material.dispose();
-		if ((mesh as THREE.SkinnedMesh).isSkinnedMesh || mesh.userData.frozenKid) mesh.geometry.dispose();
+		if (!mesh.isMesh && !(o as THREE.Line).isLine) return;
+		if (!mesh.geometry.userData.shared) mesh.geometry.dispose();
+		for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+			// its own lit copies and effect materials (with the texture copies
+			// they made); the library's shared ones stay
+			const effect = (m as THREE.ShaderMaterial).isShaderMaterial || m.userData.effect;
+			if (!mesh.userData.ambHooked && !effect) continue;
+			const textures = [(m as THREE.MeshBasicMaterial).map, ...Object.values((m as THREE.ShaderMaterial).uniforms ?? {}).map(u => u.value)];
+			for (const t of textures) if ((t as THREE.Texture | null)?.isTexture && (t as THREE.Texture).userData.owned) (t as THREE.Texture).dispose();
+			m.dispose();
+		}
 	});
 }
 

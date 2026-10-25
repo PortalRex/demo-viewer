@@ -113,7 +113,9 @@ if (import.meta.env.DEV) {
 // dev: how long the 3D view's loading steps take (window.timings)
 const timings: [string, number, number][] = [];
 function timing(name: string, start: number) {
-	if (import.meta.env.DEV) timings.push([name, Math.round(start), Math.round(performance.now() - start)]);
+	if (!import.meta.env.DEV) return;
+	timings.push([name, Math.round(start), Math.round(performance.now() - start)]);
+	if (timings.length > 100) timings.splice(0, timings.length - 100);
 }
 function timed<T>(p: Promise<T>, name: string, start: number): Promise<T> {
 	return p.then(v => (timing(name, start), v));
