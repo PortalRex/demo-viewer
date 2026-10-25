@@ -18,8 +18,8 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints} from './particles.ts';
-import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
-import {TextureCache} from './textures.ts';
+import {AMBIENT_SCALE, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
+import {TextureCache, compressedSupport} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
@@ -139,6 +139,15 @@ class MaterialLibrary {
 	private world = new Map<string, THREE.Material>();
 	private model = new Map<string, THREE.Material>();
 	private litModel = new Map<string, THREE.Material>();
+
+	// frees the map's materials and textures (when the map changes)
+	dispose() {
+		for (const cache of [this.world, this.model, this.litModel]) {
+			for (const m of cache.values()) m.dispose();
+			cache.clear();
+		}
+		this.textures.dispose();
+	}
 	onChange = () => {};
 
 	constructor(files: GameFiles, materials: Materials, lightmap: THREE.Texture | null) {
@@ -197,7 +206,7 @@ class MaterialLibrary {
 			mat.vertexColors = false;
 			mat.toneMapped = false;
 			mat.lightMap = null;
-			mat.defines = {...mat.defines, REFRACT_TINT: ''};
+			mat.defines = {...mat.defines, REFRACT_TINT: '', REFRACT_UNSCALED: ''};
 			delete mat.defines.BACKFACE_SHADE;
 			mat.color.setRGB(info.refractTint[0], info.refractTint[1], info.refractTint[2], THREE.LinearSRGBColorSpace);
 			mat.needsUpdate = true;
@@ -247,6 +256,10 @@ class MaterialLibrary {
 		t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
 		t.needsUpdate = true;
 		return t;
+	}
+
+	get showsBackFaces() {
+		return this.backFaces;
 	}
 
 	// draw the backs of the world's one-sided faces too (shaded darker), or not
@@ -489,9 +502,16 @@ export class View3D {
 	// compile the shaders of everything in the scene, hidden entities too,
 	// so nothing stalls the first time it shows
 	private loaded() {
+		this.compileNeeded = true;
 		this.onLoaded();
 		clearTimeout(this.precompileTimer);
-		this.precompileTimer = setTimeout(() => this.precompile(), 400);
+		this.precompileTimer = setTimeout(() => {
+			if (this.freezeStatics()) {
+				this.mergeProps();
+				this.mergeFrozenKids();
+			}
+			this.precompile();
+		}, 400);
 	}
 	private precompileTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -507,10 +527,23 @@ export class View3D {
 				}
 			});
 		}
+		// (for the HDR frame, which is what scenes are drawn into)
+		const target = r.getRenderTarget();
+		if (this.frame) r.setRenderTarget(this.frame);
 		try {
 			r.compile(this.scene, this.camera);
 			r.compile(this.vmScene, this.vmCam);
+			// and the world as the other camera modes draw it (with or
+			// without back faces), so switching is instant
+			const lib = this.library;
+			if (lib) {
+				const on = lib.showsBackFaces;
+				lib.setBackFaces(!on);
+				r.compile(this.scene, this.camera);
+				lib.setBackFaces(on);
+			}
 		} finally {
+			r.setRenderTarget(target);
 			for (const o of hidden) o.visible = false;
 		}
 	}
@@ -543,12 +576,15 @@ export class View3D {
 
 	private ensureRenderer() {
 		if (this.renderer) return this.renderer;
-		this.renderer = new THREE.WebGLRenderer({antialias: true, stencil: true});
+		// (antialiased in the frame target instead: see render)
+		this.renderer = new THREE.WebGLRenderer({antialias: false, stencil: false, depth: false});
 		// HDR lighting needs its highlights rolled off, as the game's tone
 		// mapping does
 		this.renderer.toneMapping = THREE.LinearToneMapping;
 		this.renderer.toneMappingExposure = 3;
 		this.renderer.setPixelRatio(window.devicePixelRatio || 1);
+		compressedSupport.dxt = this.renderer.extensions.has('WEBGL_compressed_texture_s3tc');
+		compressedSupport.srgb = this.renderer.extensions.has('WEBGL_compressed_texture_s3tc_srgb');
 		this.container.appendChild(this.renderer.domElement);
 		this.controls = new OrbitControls(this.camera, this.renderer.domElement);
 		this.controls.enableDamping = false;
@@ -559,6 +595,7 @@ export class View3D {
 	}
 
 	setMode(mode: CameraMode) {
+		this.compileNeeded = true;  // (the back faces change the world's shaders)
 		this.library?.setBackFaces(mode !== 'eyes');
 		if (mode === 'free' && this.mode !== 'free') {
 			// start from wherever the camera is, looking the same way
@@ -632,10 +669,30 @@ export class View3D {
 	setMap(bsp: BspMap | null, files: GameFiles | null = null, materials: Materials | null = null) {
 		this.bsp = bsp;
 		this.files = files;
-		this.models.clear();
-		this.mapGroup.clear();
-		this.propGroup.clear();
 		this.clearEntities();
+		// the last map's GPU resources: its geometry (the world's and the
+		// props', each their own), materials, textures, light maps, portal views
+		for (const g of [this.mapGroup, this.propGroup, this.sky]) {
+			g.traverse(o => {
+				const mesh = o as THREE.Mesh;
+				if (mesh.isMesh) mesh.geometry.dispose();
+			});
+			g.clear();
+		}
+		this.models.forEach(p => p.then(a => a?.parts.forEach(part => {
+			part.raw.dispose();
+			if (part.baked !== part.raw) part.baked.dispose();
+		})));
+		this.models.clear();
+		this.readyModels.clear();
+		this.windowed = [];
+		this.library?.dispose();
+		this.lightTex?.dispose();
+		for (const t of this.bumpTex) t.dispose();
+		for (const rt of this.portalTargets.values()) rt.dispose();
+		this.portalTargets.clear();
+		this.particleRenderer?.dispose();
+		this.vmParticleRenderer?.dispose();
 		const token = ++this.mapToken;
 		if (!bsp || !files || !materials) return;
 
@@ -764,6 +821,218 @@ export class View3D {
 		});
 	}
 
+	// Dynamic props that, all recording long, are there from the start and
+	// never move, animate, change skin or hide are drawn as static props:
+	// posed once, lit once (the ambient cube and lights baked into vertex
+	// colours, as the model shader would light them), merged with the rest
+	private frozen = new Set<EntityTrack>();
+	private windowed: THREE.Object3D[] = [];  // frozen props shown over some ticks only
+	private readyModels = new Map<string, ModelAsset | null>();
+	private frozenCandidates: EntityTrack[] | null = null;
+
+	private freezeStatics(): boolean {
+		const ents = this.entities, amb = this.bsp?.ambient, library = this.library;
+		if (!ents || !amb || !library) return false;
+		if (!this.frozenCandidates) {
+			const first = Math.min(...ents.tracks.filter(t => t.keys.length).map(t => t.keys[0].tick));
+			const same = (a: number[], b: number[]) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+			// placed in the map and shown from the start (sent once in view),
+			// rather than spawned, or enabled by the map's logic later: no
+			// name for inputs to reach it, not StartDisabled
+			const placed = new Set((this.bsp?.entities ?? []).filter(e => /^prop_dynamic/.test(e.classname ?? '') && e.model && e.origin && !e.targetname && e.startdisabled !== '1')
+				.map(e => `${(e.model ?? '').toLowerCase().replace(/\\/g, '/')}@${(e.origin ?? '').split(/\s+/).map(v => Math.round(Number(v))).join(',')}`));
+			const inMap = (t: EntityTrack) => placed.has(`${t.model.toLowerCase()}@${t.keys[0].origin.map(v => Math.round(v)).join(',')}`);
+			this.frozenCandidates = ents.tracks.filter(t => {
+				if (t.className !== 'CDynamicProp' || !t.model.endsWith('.mdl') || !t.keys.length) return false;
+				// shown from the start (placed in the map), or from when it
+				// appears; until it's removed, for good
+				const gone = t.keys.findIndex(k => k.removed);
+				if (gone === 0 || (gone > 0 && t.keys.slice(gone).some(k => !k.removed))) return false;
+				const live = gone > 0 ? t.keys.slice(0, gone) : t.keys;
+				t.userData ??= {};
+				t.userData.frozenWindow = [t.keys[0].tick <= first + 2 || inMap(t) ? -Infinity : t.keys[0].tick, gone > 0 ? t.keys[gone].tick : Infinity];
+				const k0 = t.keys[0];
+				// (on a parent: fixed to it, moving with it)
+				return live.every(k => !k.removed && !k.nodraw && (k.visible || k.dormant) && k.parent === k0.parent && k.attachment === undefined
+					&& same(k.origin, k0.origin) && same(k.angles, k0.angles) && (k.skin ?? 0) === (k0.skin ?? 0)
+					&& Number(k.extra?.m_nBody ?? 0) === Number(k0.extra?.m_nBody ?? 0)
+					&& (!k.anim || (k0.anim && k.anim.sequence === k0.anim.sequence && k.anim.cycle === k0.anim.cycle && (!k.anim.clientSide || !k.anim.rate))));
+			});
+		}
+		let added = false;
+		for (const t of this.frozenCandidates) {
+			if (this.frozen.has(t)) continue;
+			const k = t.keys[0];
+			// its model (loaded now if it hasn't been; this runs again once
+			// loading goes quiet)
+			const key = `${t.model.toLowerCase()}#${k.skin ?? 0}#${Number(k.extra?.m_nBody ?? 0)}`;
+			const pending = this.models.get(key);
+			if (!pending) {
+				this.model(t.model, k.skin ?? 0, Number(k.extra?.m_nBody ?? 0)).then(() => this.loaded());
+				continue;
+			}
+			const asset = this.readyModels.get(key);
+			if (asset === undefined) {
+				pending.then(a => {
+					this.readyModels.set(key, a);
+					this.loaded();
+				});
+				continue;
+			}
+			if (!asset) {
+				this.frozen.add(t);  // (no model: nothing to draw either way)
+				continue;
+			}
+			if (k.parent !== undefined) {
+				if (this.freezeOnParent(t, k, asset)) added = true;
+				continue;
+			}
+			const o = this.objects.get(t);
+			const world = new THREE.Matrix4().compose(new THREE.Vector3(...k.origin), new THREE.Quaternion().setFromEuler(toEuler(k.angles)), new THREE.Vector3(1, 1, 1));
+			// the pose: its sequence at its cycle, or sequence 0 as static props
+			const sk = asset.skeleton;
+			let mats: THREE.Matrix4[] | null = null;
+			if (sk && sk.sequences.length) {
+				const pose = referencePose(sk);
+				samplePose(sk, k.anim ? k.anim.sequence : 0, k.anim ? k.anim.cycle : 0, pose);
+				mats = skinMatrices(sk, pose);
+			}
+			// lit at the model's centre, as lightModels does
+			const box = new THREE.Box3();
+			for (const part of asset.parts) {
+				part.raw.computeBoundingBox();
+				if (part.raw.boundingBox) box.union(part.raw.boundingBox);
+			}
+			const centre = box.isEmpty() ? new THREE.Vector3(...k.origin) : box.getCenter(new THREE.Vector3()).applyMatrix4(world);
+			const light = amb.at([centre.x, centre.y, centre.z]);
+			const normalMat = new THREE.Matrix3().getNormalMatrix(world);
+			const p = new THREE.Vector3(), n = new THREE.Vector3(), l = new THREE.Vector3();
+			const k2 = AMBIENT_SCALE / LIGHTMAP_EXPOSURE;
+			for (const part of asset.parts) {
+				const posed = mats ? bakePose(part.group, mats) : null;
+				const positions = posed?.positions ?? part.group.positions, normals = posed?.normals ?? part.group.normals;
+				const count = positions.length / 3;
+				const outPos = new Float32Array(count * 3), outNrm = new Float32Array(count * 3), colors = new Float32Array(count * 3);
+				for (let i = 0; i < count; i++) {
+					p.fromArray(positions, i * 3).applyMatrix4(world);
+					n.fromArray(normals, i * 3).applyMatrix3(normalMat).normalize();
+					p.toArray(outPos, i * 3);
+					n.toArray(outNrm, i * 3);
+					for (let c = 0; c < 3; c++) {
+						const cube = light.cube;
+						let v = n.x * n.x * cube[(n.x >= 0 ? 0 : 3) + c] + n.y * n.y * cube[(n.y >= 0 ? 6 : 9) + c] + n.z * n.z * cube[(n.z >= 0 ? 12 : 15) + c];
+						for (const li of light.lights.slice(0, 2)) {
+							l.set(li.pos[0] - p.x, li.pos[1] - p.y, li.pos[2] - p.z).normalize();
+							v += li.color[c] * Math.max(0, n.dot(l));
+						}
+						colors[i * 3 + c] = v * k2;
+					}
+				}
+				const g = new THREE.BufferGeometry();
+				g.setAttribute('position', new THREE.BufferAttribute(outPos, 3));
+				g.setAttribute('normal', new THREE.BufferAttribute(outNrm, 3));
+				g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+				if (part.group.uv) g.setAttribute('uv', new THREE.BufferAttribute(part.group.uv, 2));
+				const mesh = new THREE.Mesh(g, library.forModel(part.group.materialCandidates, true));
+				mesh.name = `frozen ${part.name}`;
+				mesh.matrixAutoUpdate = false;
+				mesh.userData.window = t.userData?.frozenWindow;
+				this.propGroup.add(mesh);
+			}
+			this.frozen.add(t);
+			if (o) o.visible = false;
+			added = true;
+		}
+		return added;
+	}
+
+	// A prop fixed to a moving parent: its parts in the parent's space, in a
+	// group on the parent's object (moving and lit with it), merged per
+	// material with its siblings'; false until the parent is there
+	private freezeOnParent(t: EntityTrack, k: EntityKey, asset: ModelAsset): boolean {
+		const pt = (this.tracksByIndex.get(k.parent!) ?? []).find(c => c.keys.length && c.keys[0].tick <= k.tick + 2 && c.keys[c.keys.length - 1].tick >= k.tick);
+		const pk = pt && keyAt(pt, Math.max(k.tick, pt.keys[0].tick));
+		const po = pt && pk ? this.objectFor(pt, pk.skin ?? 0, Number(pk.extra?.m_nBody ?? 0)) : null;
+		if (!po || !this.library) return false;
+		let kids = po.userData.frozenKids as THREE.Group | undefined;
+		if (!kids) {
+			kids = new THREE.Group();
+			kids.name = 'frozen children';
+			po.userData.frozenKids = kids;
+			po.add(kids);
+		}
+		const local = new THREE.Matrix4().compose(new THREE.Vector3(...k.origin), new THREE.Quaternion().setFromEuler(toEuler(k.angles)), new THREE.Vector3(1, 1, 1));
+		const sk = asset.skeleton;
+		let mats: THREE.Matrix4[] | null = null;
+		if (sk && sk.sequences.length) {
+			const pose = referencePose(sk);
+			samplePose(sk, k.anim ? k.anim.sequence : 0, k.anim ? k.anim.cycle : 0, pose);
+			mats = skinMatrices(sk, pose);
+		}
+		const normalMat = new THREE.Matrix3().getNormalMatrix(local);
+		for (const part of asset.parts) {
+			const posed = mats ? bakePose(part.group, mats) : null;
+			const g = new THREE.BufferGeometry();
+			g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(posed?.positions ?? part.group.positions), 3));
+			g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(posed?.normals ?? part.group.normals), 3));
+			g.setAttribute('color', new THREE.BufferAttribute(part.group.colors, 3));
+			if (part.group.uv) g.setAttribute('uv', new THREE.BufferAttribute(part.group.uv, 2));
+			g.applyMatrix4(local);
+			(g.getAttribute('normal') as THREE.BufferAttribute).applyNormalMatrix(normalMat);
+			const mesh = new THREE.Mesh(g, part.material);
+			mesh.name = `frozen ${part.name}`;
+			mesh.userData.window = t.userData?.frozenWindow;
+			mesh.userData.frozenKid = true;
+			kids.add(mesh);
+		}
+		this.frozen.add(t);
+		const own = this.objects.get(t);
+		if (own) {
+			own.removeFromParent();
+			disposeOwn(own);
+			this.objects.delete(t);
+		}
+		kids.userData.dirty = true;
+		return true;
+	}
+
+	// a parent's frozen children merged per material and visible ticks (the
+	// bounds of what's drawn with the parent's lighting)
+	private mergeFrozenKids() {
+		this.windowedKids = [];
+		for (const o of this.objects.values()) {
+			const kids = o.userData.frozenKids as THREE.Group | undefined;
+			if (!kids) continue;
+			if (kids.userData.dirty) {
+				kids.userData.dirty = false;
+				const by = new Map<string, THREE.Mesh[]>();
+				for (const c of kids.children as THREE.Mesh[]) {
+					const key = `${(c.material as THREE.Material).uuid}@${String(c.userData.window ?? '')}@${Object.keys(c.geometry.attributes).sort().join(',')}`;
+					by.set(key, [...(by.get(key) ?? []), c]);
+				}
+				for (const list of by.values()) {
+					if (list.length < 2) continue;
+					const merged = mergeGeometries(list.map(m => m.geometry));
+					if (!merged) continue;
+					const mesh = new THREE.Mesh(merged, list[0].material);
+					mesh.name = `merged ${list[0].name}`;
+					mesh.userData.window = list[0].userData.window;
+					mesh.userData.frozenKid = true;
+					for (const m of list) {
+						m.removeFromParent();
+						m.geometry.dispose();
+					}
+					kids.add(mesh);
+				}
+			}
+			for (const c of kids.children) {
+				const w = c.userData.window;
+				if (w && (w[0] > -Infinity || w[1] < Infinity)) this.windowedKids.push(c);
+			}
+		}
+	}
+	private windowedKids: THREE.Object3D[] = [];
+
 	// Static props with baked vertex light never move or change: their parts
 	// that share a material become one mesh (hundreds of draw calls fewer),
 	// with a bounds tree for ray tests
@@ -775,7 +1044,8 @@ export class View3D {
 			const g = mesh.geometry;
 			const key = mesh.material;
 			// (merged only with parts of the same layout)
-			const sig = Object.keys(g.attributes).sort().join(',') + (g.index ? '+i' : '');
+			// (and shown over the same ticks)
+			const sig = Object.keys(g.attributes).sort().join(',') + (g.index ? '+i' : '') + '@' + String(mesh.userData.window ?? '');
 			(mesh.userData as {mergeSig?: string}).mergeSig = sig;
 			const list = byMaterial.get(key) ?? [];
 			list.push(mesh);
@@ -796,11 +1066,15 @@ export class View3D {
 				const merged = mergeGeometries(parts);
 				parts.forEach(p => p.dispose());
 				if (!merged) continue;
-				merged.boundsTree = new MeshBVH(merged);
 				const mesh = new THREE.Mesh(merged, material);
-				mesh.raycast = acceleratedRaycast;
+				// (its bounds tree built on the first ray test)
+				mesh.raycast = function (this: THREE.Mesh, ray: THREE.Raycaster, hits: THREE.Intersection[]) {
+					merged.boundsTree ??= new MeshBVH(merged);
+					acceleratedRaycast.call(this, ray, hits);
+				};
 				mesh.name = `merged props ${list[0].name}`;
 				mesh.matrixAutoUpdate = false;
+				mesh.userData.window = list[0].userData.window;
 				for (const m of list) {
 					m.removeFromParent();
 					m.geometry.dispose();  // (each lit prop's own copy, see litProp)
@@ -810,6 +1084,7 @@ export class View3D {
 		}
 		// prop groups left empty
 		for (const o of [...this.propGroup.children]) if (!(o as THREE.Mesh).isMesh && !o.children.length) o.removeFromParent();
+		this.windowed = this.propGroup.children.filter(o => o.userData.window && (o.userData.window[0] > -Infinity || o.userData.window[1] < Infinity));
 	}
 
 	// The 2D skybox: six faces around the camera, drawn behind everything.
@@ -919,7 +1194,11 @@ export class View3D {
 		paintUniforms.paintOn.value = this.paint ? 1 : 0;
 		this.clearEntities();
 		// the path as line segments, broken at teleports
-		if (this.pathLine) this.scene.remove(this.pathLine);
+		if (this.pathLine) {
+			this.scene.remove(this.pathLine);
+			this.pathLine.geometry.dispose();
+			(this.pathLine.material as THREE.Material).dispose();
+		}
 		const views = track.seg.views;
 		const pts: number[] = [];
 		for (let i = 1; i < views.length; i++) {
@@ -936,7 +1215,11 @@ export class View3D {
 	private clearEntities() {
 		this.particleRuns.clear();
 		this.particlesShown = [];
+		disposeOwn(this.entityGroup);
+		this.windowedKids = [];
 		this.entityGroup.clear();
+		this.frozen.clear();
+		this.frozenCandidates = null;
 		this.objects.clear();
 		for (const g of this.vmObjects.values()) this.vmScene.remove(g);
 		this.vmObjects.clear();
@@ -1076,6 +1359,7 @@ export class View3D {
 		this.model(t.model, skin).then(asset => {
 			if (box) group.remove(box);
 			if (!asset) return;
+			group.userData.asset = asset;
 			if (asset.skeleton && asset.skeleton.sequences.length && t.keys.some(k => k.anim)) {
 				const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material: p.material})));
 				group.add(anim.group);
@@ -1122,7 +1406,7 @@ export class View3D {
 			const right = new THREE.Vector3(0, -1, 0).applyEuler(toEuler(k.angles));
 			(o.userData.bridge as Bridge).set(vec3(e.m_vecStartPoint)!, vec3(e.m_vecEndPoint)!, right, Number(e.m_flWidth) || 64, time);
 		} else if (o.userData.funnel) {
-			(o.userData.funnel as Funnel).set(vec3(e.m_vStart)!, vec3(e.m_vEnd)!, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time);
+			(o.userData.funnel as Funnel).set(vec3(e.m_vStart)!, vec3(e.m_vEnd)!, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time, Number(e.m_bFromPortal) === 1, Number(e.m_bToPortal) === 1);
 		}
 	}
 
@@ -1167,9 +1451,32 @@ export class View3D {
 		return out;
 	}
 
+	// a mesh's bounds on screen in pixels (from the top left), padded a
+	// little; null when part of it is behind the camera
+	private screenRect(mesh: THREE.Mesh, size: THREE.Vector2): {x: number; y: number; w: number; h: number} | null {
+		const g = mesh.geometry;
+		g.boundingBox ?? g.computeBoundingBox();
+		const b = g.boundingBox!;
+		mesh.updateMatrixWorld();
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+		const v = new THREE.Vector4();
+		for (let i = 0; i < 8; i++) {
+			v.set(i & 1 ? b.max.x : b.min.x, i & 2 ? b.max.y : b.min.y, i & 4 ? b.max.z : b.min.z, 1)
+				.applyMatrix4(mesh.matrixWorld).applyMatrix4(this.camera.matrixWorldInverse).applyMatrix4(this.camera.projectionMatrix);
+			if (v.w <= 0.01) return null;
+			const sx = (v.x / v.w * 0.5 + 0.5) * size.x, sy = (0.5 - v.y / v.w * 0.5) * size.y;
+			x0 = Math.min(x0, sx); x1 = Math.max(x1, sx);
+			y0 = Math.min(y0, sy); y1 = Math.max(y1, sy);
+		}
+		const x = Math.max(0, Math.floor(x0) - 2), y = Math.max(0, Math.floor(y0) - 2);
+		const w = Math.min(size.x, Math.ceil(x1) + 2) - x, h = Math.min(size.y, Math.ceil(y1) + 2) - y;
+		return w > 0 && h > 0 ? {x, y, w, h} : null;
+	}
+
 	// what each visible, linked portal shows: the scene from the camera moved
 	// through the portal pair, clipped at the exit portal
 	private renderPortalViews(r: THREE.WebGLRenderer) {
+		const frameTarget = r.getRenderTarget();
 		const size = r.getDrawingBufferSize(new THREE.Vector2());
 		const dither = ditherUniforms.ditherOn.value;
 		ditherUniforms.ditherOn.value = 0;
@@ -1208,6 +1515,20 @@ export class View3D {
 			cam.aspect = this.camera.aspect;
 			cam.near = this.camera.near;
 			cam.far = this.camera.far;
+			// only the part of the screen the portal covers is drawn: the same
+			// pixels (a view offset of the full projection into that viewport),
+			// and whatever's outside it culled
+			const rect = this.screenRect(surface, size);
+			if (rect && rect.w < size.x * 0.95) {
+				cam.setViewOffset(size.x, size.y, rect.x, rect.y, rect.w, rect.h);
+				rt.viewport.set(rect.x, size.y - rect.y - rect.h, rect.w, rect.h);
+				rt.scissor.copy(rt.viewport);
+				rt.scissorTest = true;
+			} else {
+				cam.clearViewOffset();
+				rt.viewport.set(0, 0, size.x, size.y);
+				rt.scissorTest = false;
+			}
 			cam.updateProjectionMatrix();
 			m.decompose(cam.position, cam.quaternion, cam.scale);
 			cam.updateMatrixWorld(true);
@@ -1223,7 +1544,7 @@ export class View3D {
 			this.sky.position.setFromMatrixPosition(cam.matrixWorld);
 			r.setRenderTarget(rt);
 			r.render(this.scene, cam);
-			r.setRenderTarget(null);
+			r.setRenderTarget(frameTarget);
 			r.clippingPlanes = [];
 			surface.visible = linkedSurface.visible = true;
 
@@ -1829,11 +2150,11 @@ export class View3D {
 	// frames the view is drawn small, and the scale is set from a histogram
 	// of it (see histogramTarget); within the tonemap controller's range,
 	// approached gradually.
-	private meterExposure(r: THREE.WebGLRenderer) {
+	private meterExposure(r: THREE.WebGLRenderer, measure = true) {
 		const now = performance.now();
 		const dt = Math.min(0.5, (now - this.lastRender) / 1000);
 		this.lastRender = now;
-		if (this.meterCount++ % 8 === 0 && !this.meterPending) {
+		if (this.meterCount++ % 8 === 0 && !this.meterPending && measure) {
 			const w = 64, h = 36;
 			// (with a stencil buffer: the sky is masked to the sky faces by it)
 			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType, stencilBuffer: true});
@@ -1847,6 +2168,7 @@ export class View3D {
 			// to set the exposure by itself)
 			const overlays = ([this.pathLine, this.player] as (THREE.Object3D | null)[]).filter((o): o is THREE.Object3D => !!o && o.visible);
 			for (const o of overlays) o.visible = false;
+			const frameTarget = r.getRenderTarget();
 			r.setRenderTarget(this.meter);
 			r.render(this.scene, this.camera);
 			// the view model counts too (the game meters the whole frame, and
@@ -1862,7 +2184,7 @@ export class View3D {
 				r.render(this.vmScene, this.vmCam);
 				r.autoClear = auto;
 			}
-			r.setRenderTarget(null);
+			r.setRenderTarget(frameTarget);
 			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
 			this.scene.fog = fog;
@@ -1878,6 +2200,7 @@ export class View3D {
 		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
 		this.exposure += (t - this.exposure) * Math.min(1, dt * 1.5);
 		r.toneMappingExposure = this.exposure;
+		exposureUniforms.sceneExposure.value = this.exposure;
 	}
 	private meterTarget: number | null = null;
 	private meterPending = false;
@@ -1891,18 +2214,15 @@ export class View3D {
 			fogUniforms.fogMaxDensity.value = 0;
 			return;
 		}
-		const enc = (v: number) => {
-			const lin = Math.min(1, Math.pow(v / 255, 2.2) * this.exposure);
-			return lin <= 0.0031308 ? lin * 12.92 : 1.055 * Math.pow(lin, 1 / 2.4) - 0.055;
-		};
-		sceneFog.color.setRGB(enc(fog.color[0]), enc(fog.color[1]), enc(fog.color[2]), THREE.LinearSRGBColorSpace);
+		// (linear and unexposed, as the frame is drawn)
+		const lin = (v: number) => Math.pow(v / 255, 2.2);
+		sceneFog.color.setRGB(lin(fog.color[0]), lin(fog.color[1]), lin(fog.color[2]), THREE.LinearSRGBColorSpace);
 		sceneFog.near = fog.start;
 		sceneFog.far = fog.end;
 		fogUniforms.fogMaxDensity.value = fog.maxDensity;
-		// the clear colour is encoded but not exposed by three
 		if (this.scene.background instanceof THREE.Color) {
-			const lin = (v: number) => Math.min(1, Math.pow(v / 255, 2.2) * this.exposure * fog.maxDensity);
-			this.scene.background.setRGB(lin(fog.color[0]), lin(fog.color[1]), lin(fog.color[2]), THREE.LinearSRGBColorSpace);
+			const m = fog.maxDensity;
+			this.scene.background.setRGB(lin(fog.color[0]) * m, lin(fog.color[1]) * m, lin(fog.color[2]) * m, THREE.LinearSRGBColorSpace);
 		}
 	}
 
@@ -1999,6 +2319,8 @@ export class View3D {
 			this.updateLightStyles(tick);
 			// what players hold: the server hides it from its holder (the game
 			// draws a copy in front of the view instead), so it's shown here
+			for (const o of this.windowed) o.visible = tick >= o.userData.window[0] && tick < o.userData.window[1];
+			for (const o of this.windowedKids) o.visible = tick >= o.userData.window[0] && tick < o.userData.window[1];
 			const held = new Set<number>();
 			for (const p of ents.tracks) {
 				if (p.className !== 'CPortal_Player') continue;
@@ -2007,6 +2329,7 @@ export class View3D {
 			}
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
+				if (this.frozen.has(t)) continue;  // (drawn with the static props)
 				const show = !!k && (this.shows(t, k) || (held.has(t.index) && t.model.endsWith('.mdl')));
 				const o = show ? this.objectFor(t, k?.skin ?? 0, Number(k?.extra?.m_nBody ?? 0)) : this.objects.get(t);
 				if (!o) continue;
@@ -2099,6 +2422,59 @@ export class View3D {
 		this.render();
 	}
 
+	private frame: THREE.WebGLRenderTarget | null = null;
+	private compileNeeded = true;
+	private recheck: ReturnType<typeof setTimeout> | undefined;
+	private compiling = new Set<THREE.Material>();
+
+	// the drawn meshes whose shaders are still compiling (none once all are)
+	private notReady(r: THREE.WebGLRenderer): THREE.Object3D[] {
+		if (!this.compiling.size) return [];
+		const props = (r as unknown as {properties: {get(m: THREE.Material): {currentProgram?: {isReady(): boolean}}}}).properties;
+		for (const m of [...this.compiling]) {
+			const program = props.get(m).currentProgram;
+			if (!program || program.isReady()) this.compiling.delete(m);
+		}
+		if (!this.compiling.size) return [];
+		const out: THREE.Object3D[] = [];
+		const visit = (o: THREE.Object3D) => {
+			if (!o.visible) return;
+			const mesh = o as THREE.Mesh;
+			if (mesh.material && !Array.isArray(mesh.material) && this.compiling.has(mesh.material)) {
+				out.push(o);
+				return;
+			}
+			for (const c of o.children) visit(c);
+		};
+		visit(this.scene);
+		visit(this.vmScene);
+		return out;
+	}
+	// the final pass: the frame times the exposure, clamped (the game's
+	// linear tone mapping) and sRGB-encoded
+	private composite = new THREE.ShaderMaterial({
+		uniforms: {frame: {value: null}, exposure: {value: 1}},
+		depthTest: false,
+		depthWrite: false,
+		vertexShader: `
+			varying vec2 vUv;
+			void main() {
+				vUv = uv;
+				gl_Position = vec4(position.xy, 0.0, 1.0);
+			}`,
+		fragmentShader: `
+			uniform sampler2D frame;
+			uniform float exposure;
+			varying vec2 vUv;
+			void main() {
+				vec3 c = clamp(texture2D(frame, vUv).rgb * exposure, 0.0, 1.0);
+				c = mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+				gl_FragColor = vec4(c, 1.0);
+			}`,
+	});
+	private compositeScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.composite), {frustumCulled: false}));
+	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
 	render() {
 		const r = this.renderer;
 		if (!r) return;
@@ -2107,13 +2483,32 @@ export class View3D {
 		// before metering, which must see what's drawn
 		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
 		this.camera.updateMatrixWorld();
+		// shaders compile in the background (parallel compile) and whatever
+		// is still compiling sits this frame out (the meter's too), rather
+		// than the page stalling until the driver has built it
+		const size = r.getDrawingBufferSize(new THREE.Vector2());
+		if (!this.frame) {
+			this.frame = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 4});
+		} else if (this.frame.width !== size.x || this.frame.height !== size.y) this.frame.setSize(size.x, size.y);
+		r.setRenderTarget(this.frame);
+		if (this.compileNeeded) {
+			this.compileNeeded = false;
+			for (const m of r.compile(this.scene, this.camera)) this.compiling.add(m);
+			for (const m of r.compile(this.vmScene, this.vmCam)) this.compiling.add(m);
+		}
+		const waiting = this.notReady(r);
+		for (const o of waiting) o.visible = false;
 		if (this.bsp) {
 			if (!this.skyCamera) this.sky.position.copy(this.camera.position);
-			this.meterExposure(r);
+			// (not metered while anything sits out: it'd read too dark)
+			this.meterExposure(r, waiting.length === 0);
 			this.updateFog();
 		}
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
 		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
+		// Everything is drawn linear and unexposed into one HDR frame (as the
+		// portal views and the meter are, so each material compiles once),
+		// then exposed, clamped and encoded to the screen by a final pass
 		this.renderScene(r);
 		if (this.mode === 'eyes' && this.vmShown) {
 			this.vmCam.position.copy(this.camera.position);
@@ -2129,6 +2524,16 @@ export class View3D {
 			ditherUniforms.ditherOn.value = dither;
 			r.autoClear = auto;
 		}
+		for (const o of waiting) o.visible = true;
+		// (and drawn again once they're ready, even while paused)
+		if (waiting.length && !this.recheck) this.recheck = setTimeout(() => {
+			this.recheck = undefined;
+			this.onLoaded();
+		}, 30);
+		r.setRenderTarget(null);
+		this.composite.uniforms.frame.value = this.frame.texture;
+		this.composite.uniforms.exposure.value = this.exposure;
+		r.render(this.compositeScene, this.compositeCam);
 		if (saved) {
 			this.camera.position.copy(saved);
 			this.camera.updateMatrixWorld();
@@ -2299,6 +2704,12 @@ export class View3D {
 		return limit + (1 - limit) * t;
 	}
 
+	// debugging: renderer counters (of the last frame) and GPU memory
+	debugStats(): Record<string, number> {
+		const i = this.renderer?.info;
+		return i ? {calls: i.render.calls, triangles: i.render.triangles, programs: i.programs?.length ?? 0, textures: i.memory.textures, geometries: i.memory.geometries} : {};
+	}
+
 	// debugging: the recording player's track
 	debugPlayer(): EntityTrack | undefined {
 		return this.entities?.player;
@@ -2341,6 +2752,17 @@ function worldCollision(m: ModelMesh): MeshBVH | null {
 	const geom = new THREE.BufferGeometry();
 	geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
 	return new MeshBVH(geom);
+}
+
+// frees what an entity object owns: its meshes' own lit materials, skinned
+// geometry and frozen-prop geometry (the model's shared ones stay cached)
+function disposeOwn(root: THREE.Object3D) {
+	root.traverse(o => {
+		const mesh = o as THREE.Mesh;
+		if (!mesh.isMesh) return;
+		if (mesh.userData.ambHooked && !Array.isArray(mesh.material)) mesh.material.dispose();
+		if ((mesh as THREE.SkinnedMesh).isSkinnedMesh || mesh.userData.frozenKid) mesh.geometry.dispose();
+	});
 }
 
 // a stable seed from a run's key

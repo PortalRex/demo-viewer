@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import type {PropValue} from '../net/props.ts';
 import type {Materials} from '../game/materials.ts';
 import type {TextureCache} from './textures.ts';
+import {exposureUniforms} from './shaderhooks.ts';
 
 export const vec3 = (v: PropValue | undefined): THREE.Vector3 | null =>
 	Array.isArray(v) && v.length >= 3 && typeof v[0] === 'number' ? new THREE.Vector3(v[0] as number, v[1] as number, v[2] as number) : null;
@@ -62,6 +63,7 @@ export class EffectAssets {
 function solidEnergyMaterial(): THREE.ShaderMaterial {
 	return new THREE.ShaderMaterial({
 		uniforms: {
+			...exposureUniforms,
 			base: {value: null}, detail1: {value: null}, detail2: {value: null},
 			baseOffset: {value: new THREE.Vector2()}, detail1Offset: {value: new THREE.Vector2()}, detail2Offset: {value: new THREE.Vector2()},
 			detail1Mode: {value: 0}, detail2Mode: {value: 0}, hasDetail1: {value: 0}, hasDetail2: {value: 0},
@@ -95,6 +97,7 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 				gl_Position = projectionMatrix * mv;
 			}`,
 		fragmentShader: `
+			uniform float sceneExposure;
 			uniform sampler2D base, detail1, detail2;
 			uniform vec2 baseOffset, detail1Offset, detail2Offset;
 			uniform float detail1Mode, detail2Mode, hasDetail1, hasDetail2, intensity, edgeFade, useTangent, useVertexColor;
@@ -139,10 +142,8 @@ function solidEnergyMaterial(): THREE.ShaderMaterial {
 				// the vertex colour, more saturated where it's fainter
 				if (useVertexColor > 0.5) c.rgb *= pow(vertexColor, vec3((2.0 - alpha) * 2.0));
 				gl_FragColor = vec4(max(c.rgb, 0.0) * color * intensity, 1.0);
-				#ifdef TONE_MAPPING
 				// SolidEnergy caps the exposure it takes at 1
-				gl_FragColor.rgb /= max(toneMappingExposure, 1.0);
-				#endif
+				gl_FragColor.rgb /= max(sceneExposure, 1.0);
 				#include <tonemapping_fragment>
 				#include <colorspace_fragment>
 			}`,
@@ -279,6 +280,47 @@ export class Bridge {
 // Two columns as the game draws them: tractor_beam at radius 58 and
 // tractor_beam2 around it at 60, coloured by vertex colour (blue, or orange
 // when reversed)
+// A funnel column of unit radius and length (along +Y, centred), as the
+// client's mesh: 64 segments round, u along it (1/256 per unit), v once
+// round; where it enters or leaves a portal it narrows over its last 64
+// units to about the portal's width (it's wider than the opening)
+function funnelColumn(len: number, pinchStart: boolean, pinchEnd: boolean): THREE.BufferGeometry {
+	const TAPER = 64, PINCH = 0.5;
+	const at = new Set([0, len]);
+	for (const d of [8, 16, 32, 48, TAPER]) {
+		if (d < len) at.add(d);
+		if (len - d > 0) at.add(len - d);
+	}
+	const rings = [...at].sort((a, b) => a - b);
+	const ease = (x: number) => x * x * (3 - 2 * x);
+	const radius = (d: number) => Math.min(
+		pinchStart ? PINCH + (1 - PINCH) * ease(Math.min(1, d / TAPER)) : 1,
+		pinchEnd ? PINCH + (1 - PINCH) * ease(Math.min(1, (len - d) / TAPER)) : 1);
+	const pos: number[] = [], nrm: number[] = [], uv: number[] = [], index: number[] = [];
+	const SEG = 64;
+	for (const d of rings) {
+		const r = radius(d), y = len > 0 ? d / len - 0.5 : 0;
+		for (let i = 0; i <= SEG; i++) {
+			const a = i / SEG * Math.PI * 2;
+			pos.push(Math.sin(a) * r, y, Math.cos(a) * r);
+			nrm.push(Math.sin(a), 0, Math.cos(a));
+			uv.push(d / 256, i / SEG);
+		}
+	}
+	for (let k = 0; k + 1 < rings.length; k++) {
+		for (let i = 0; i < SEG; i++) {
+			const a = k * (SEG + 1) + i, b = a + SEG + 1;
+			index.push(a, b, a + 1, b, b + 1, a + 1);
+		}
+	}
+	const g = new THREE.BufferGeometry();
+	g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+	g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+	g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+	g.setIndex(index);
+	return g;
+}
+
 export class Funnel {
 	readonly mesh = new THREE.Group();
 	private columns: {mesh: THREE.Mesh; material: THREE.ShaderMaterial; radius: number}[] = [];
@@ -286,7 +328,7 @@ export class Funnel {
 	constructor(assets: EffectAssets | null) {
 		for (const [name, radius] of [['effects/tractor_beam', 58], ['effects/tractor_beam2', 60]] as const) {
 			const material = solidEnergyMaterial();
-			const mesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 64, 1, true), material);
+			const mesh = new THREE.Mesh(funnelColumn(1, false, false), material);
 			mesh.renderOrder = 2;
 			material.uniforms.edgeFade.value = 1;
 			material.uniforms.useVertexColor.value = 1;
@@ -297,7 +339,7 @@ export class Funnel {
 		}
 	}
 
-	set(start: THREE.Vector3, end: THREE.Vector3, _radius: number, reversed: boolean, time: number) {
+	set(start: THREE.Vector3, end: THREE.Vector3, _radius: number, reversed: boolean, time: number, fromPortal = false, toPortal = false) {
 		// tractor_beam's scroll comes from the TractorBeam proxy (with the
 		// flow); tractor_beam2's is a fixed -0.4
 		const flow = (reversed ? -1 : 1) * 0.25 * time, fixed = -0.4 * time;
@@ -306,13 +348,11 @@ export class Funnel {
 			placeBetween(mesh, start, end, radius);
 			// as the client's column mesh (C_Trigger_TractorBeam): u along the
 			// funnel, one repeat per 256 units; v once round it
-			const g = mesh.geometry as THREE.CylinderGeometry;
-			const uv = g.getAttribute('uv') as THREE.BufferAttribute;
-			if (g.userData.len !== len) {
-				g.userData.len = len;
-				const base = (g.userData.baseUv ??= Float32Array.from(uv.array as Float32Array)) as Float32Array;
-				for (let i = 0; i < uv.count; i++) uv.setXY(i, base[i * 2 + 1] * len / 256, base[i * 2]);
-				uv.needsUpdate = true;
+			const shape = `${len.toFixed(1)}:${fromPortal}:${toPortal}`;
+			if (mesh.userData.shape !== shape) {
+				mesh.userData.shape = shape;
+				mesh.geometry.dispose();
+				mesh.geometry = funnelColumn(len, fromPortal, toPortal);
 			}
 			// TextureScroll proxies: rate along the scroll angle
 			const scroll = (v: THREE.Vector2, rate: number, angle: number) => v.set(Math.cos(angle * Math.PI / 180) * rate, Math.sin(angle * Math.PI / 180) * rate);
@@ -340,6 +380,7 @@ export class Funnel {
 export function fizzlerMaterial(assets: EffectAssets | null, name: string): THREE.ShaderMaterial {
 	const m = new THREE.ShaderMaterial({
 		uniforms: {
+			...exposureUniforms,
 			base: {value: null}, flow: {value: null}, bounds: {value: null},
 			time: {value: 0}, interval: {value: 1.2}, scroll: {value: 0.25}, worldScale: {value: 0.008},
 			flowColor: {value: new THREE.Color(0.025, 0.08, 0.1)}, intensity: {value: 2.0},
@@ -360,6 +401,7 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 				gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
 			}`,
 		fragmentShader: `
+			uniform float sceneExposure;
 			uniform sampler2D base, flow, bounds;
 			uniform float time, interval, scroll, worldScale, intensity;
 			uniform vec3 flowColor;
@@ -374,10 +416,8 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 				vec4 c = texture2D(base, uv + f * t1 * scroll) * w1 + texture2D(base, uv + f * t2 * scroll) * (1.0 - w1);
 				vec3 rgb = (c.a * flowColor + b.g * flowColor * 4.0) * b.b * intensity;
 				gl_FragColor = vec4(rgb, 1.0);
-				#ifdef TONE_MAPPING
 				// SolidEnergy caps the exposure it takes at 1
-				gl_FragColor.rgb /= max(toneMappingExposure, 1.0);
-				#endif
+				gl_FragColor.rgb /= max(sceneExposure, 1.0);
 				#include <tonemapping_fragment>
 				#include <colorspace_fragment>
 			}`,
@@ -474,7 +514,10 @@ export function portalMaterial(assets: EffectAssets | null, orange: boolean, tin
 				vec3 flameColor = (tinted > 0.5 ? tint * clamp(sampleAt, 0.0, 1.0) : texture2D(gradient, vec2(sampleAt, 0.5)).rgb) * colorScale;
 				alpha = clamp(alpha, 0.0, 1.0);
 
-				vec3 inside = hasView > 0.5 ? texture2D(view, gl_FragCoord.xy / resolution).rgb * exposure : vec3(0.0);
+				// (the view through is as unexposed as the frame; the flames
+				// are drawn at a fixed brightness, so undo the frame's exposure)
+				flameColor /= exposure;
+				vec3 inside = hasView > 0.5 ? texture2D(view, gl_FragCoord.xy / resolution).rgb : vec3(0.0);
 				vec4 outColor = hole > 0.5 ? vec4(mix(inside, flameColor, alpha), 1.0) : vec4(flameColor, alpha);
 				if (outColor.a <= 0.003) discard;
 				gl_FragColor = linearToOutputTexel(outColor);

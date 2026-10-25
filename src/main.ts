@@ -68,6 +68,33 @@ if (import.meta.env.DEV) {
 		const len = Math.hypot(d[0], d[1], d[2]);
 		return (w.shot as (n: string, e: number[], a: number[]) => Promise<string>)(name, eye, [-Math.asin(d[2] / len) * 180 / Math.PI, Math.atan2(d[1], d[0]) * 180 / Math.PI]);
 	};
+	// timing: opening the 3D view until loading goes quiet, then the CPU cost
+	// of a frame (seek = update + render) in Eyes and Orbit at `tick`
+	w.bench = async (tick = 1000) => {
+		const t0 = performance.now();
+		let last = t0;
+		const orig = view3d.onLoaded;
+		view3d.onLoaded = () => {
+			last = performance.now();
+			orig();
+		};
+		if (viewMode !== '3d') ($('view-3d') as HTMLButtonElement | null)?.click() ?? [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === '3D')?.click();
+		while (performance.now() - t0 < 60000) {
+			await new Promise(r => setTimeout(r, 100));
+			if (view3d.debugPlayer() && performance.now() - last > 1500) break;
+		}
+		view3d.onLoaded = orig;
+		const out: Record<string, string | number> = {settled: ((last - t0) / 1000).toFixed(2)};
+		for (const mode of ['eyes', 'orbit'] as const) {
+			view3d.setMode(mode);
+			for (let i = 0; i < 20; i++) seekTo(tick - 40 + i);
+			const t = performance.now();
+			for (let i = 0; i < 60; i++) seekTo(tick + i * 0.5);
+			out[mode] = ((performance.now() - t) / 60).toFixed(2);
+		}
+		Object.assign(out, view3d.debugStats());
+		return out;
+	};
 	// frames of a tick range into fixtures/shots/<name>/ (as JPEGs), for videos
 	w.record = async (name: string, from: number, to: number, step = 2, width = 960, height = 540) => {
 		let n = 0;
@@ -83,6 +110,15 @@ if (import.meta.env.DEV) {
 		return fetch(`/__shot?name=${name}`, {method: 'POST', body: url}).then(r => r.text());
 	};
 }
+// dev: how long the 3D view's loading steps take (window.timings)
+const timings: [string, number, number][] = [];
+function timing(name: string, start: number) {
+	if (import.meta.env.DEV) timings.push([name, Math.round(start), Math.round(performance.now() - start)]);
+}
+function timed<T>(p: Promise<T>, name: string, start: number): Promise<T> {
+	return p.then(v => (timing(name, start), v));
+}
+if (import.meta.env.DEV) (window as unknown as {timings: typeof timings}).timings = timings;
 const entityCache = new Map<number, EntityTimeline | null>();
 const mapCache = new Map<string, Promise<BspMap>>();
 let gameFS: GameFS | null = null;
@@ -113,7 +149,9 @@ function entitiesFor(index: number): EntityTimeline | null {
 		let tl: EntityTimeline | null = null;
 		if (tables) {
 			try {
+				const t = performance.now();
 				tl = decodeEntities(seg, tables);
+				timing('decodeEntities', t);
 				if (tl.errors.length) console.warn(`entities in ${seg.map}:`, tl.errors);
 			} catch (e) {
 				console.warn(`couldn't decode entities in ${seg.map}`, e);
@@ -172,7 +210,8 @@ async function load3dMap() {
 		promise = (async () => {
 			for (const path of mapPaths(seg.map, pb!.run.gameDir)) {
 				if ((await fs.size(path)) !== null) {
-					return loadBsp(fs, path, seg.map, {
+					const t = performance.now();
+					return timed(loadBsp(fs, path, seg.map, {
 						materials: async (names, pak) => {
 							const zip = pak ? new Zip(pak) : null;
 							mapPaks.set(seg.map, zip);
@@ -181,7 +220,7 @@ async function load3dMap() {
 							await Promise.all(names.map(async n => out.set(n, await mats.get(n))));
 							return out;
 						},
-					});
+					}), 'loadBsp', t);
 				}
 			}
 			throw new Error(`${seg.map}.bsp isn't in the game folder (${fs.label}).`);
@@ -193,8 +232,13 @@ async function load3dMap() {
 		const bsp = await promise;
 		if (token !== mapToken) return;
 		files.mapPak = mapPaks.get(seg.map) ?? null;
+		let t = performance.now();
 		view3d.setMap(bsp, files, mats);
-		view3d.setSegment(pb.tracks[currentSeg], entitiesFor(currentSeg));
+		timing('setMap', t);
+		const ents = entitiesFor(currentSeg);
+		t = performance.now();
+		view3d.setSegment(pb.tracks[currentSeg], ents);
+		timing('setSegment', t);
 		showViewAs();
 		message3d(null);
 		render();

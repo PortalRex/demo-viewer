@@ -217,7 +217,7 @@ export class ParticleInstance {
 		return this.cps.get(n) ?? this.cps.get(0) ?? new THREE.Matrix4();
 	}
 
-	private cpPos(n: number): THREE.Vector3 {
+	cpPos(n: number): THREE.Vector3 {
 		return new THREE.Vector3().setFromMatrixPosition(this.cp(n));
 	}
 
@@ -610,6 +610,7 @@ export class ParticleInstance {
 interface SpriteMaterial {
 	material: THREE.ShaderMaterial;
 	sheet: SheetSequence[] | null;
+	orientation: number;  // SpriteCard $orientation (3: along the particles' normals)
 }
 
 const VERTEX = `
@@ -692,7 +693,7 @@ export class ParticleRenderer {
 			blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
 			side: THREE.DoubleSide,
 		});
-		return {material, sheet: bytes ? readVtfSheet(bytes) : null};
+		return {material, sheet: bytes ? readVtfSheet(bytes) : null, orientation: Number(m.params.get('$orientation') ?? 0) || 0};
 	}
 
 	// rebuilds the quads of every live particle
@@ -718,7 +719,7 @@ export class ParticleRenderer {
 			let b = batches.get(def.material);
 			if (!b) batches.set(def.material, b = {pos: [], uv: [], col: []});
 			if (r.fn === 'render_rope') {
-				this.rope(b, inst, r, camPos, quad);
+				this.rope(b, inst, r, camPos, quad, sprite.orientation);
 				continue;
 			}
 			const trail = r.fn === 'render_sprite_trail';
@@ -775,10 +776,15 @@ export class ParticleRenderer {
 	}
 
 	// A rope through the particles in spawn order, smoothed (Catmull-Rom),
-	// facing the camera, as wide as each particle's radius; the texture
-	// runs along it by distance and scrolls
+	// facing the camera (or, for $orientation 3 materials, widened across
+	// the particles' normals: those that "remap direction to cp to vector"
+	// points at a control point, so the rope stands edge-on to it), as wide
+	// as each particle's radius; the texture runs along it by distance and
+	// scrolls
 	private rope(b: {pos: number[]; uv: number[]; col: number[]}, inst: ParticleInstance, r: ParticleOperator, camPos: THREE.Vector3,
-		quad: (b: {pos: number[]; uv: number[]; col: number[]}, c: THREE.Vector3[], uv: number[][], col: number[][]) => void) {
+		quad: (b: {pos: number[]; uv: number[]; col: number[]}, c: THREE.Vector3[], uv: number[][], col: number[][]) => void, orientation = 0) {
+		const aim = orientation === 3 ? inst.def.operators.find(o => o.fn === 'remap direction to cp to vector') : undefined;
+		const aimAt = aim ? inst.cpPos(num(aim, 'control point', 0)) : null;
 		const ps = [...inst.particles].sort((x, y) => x.index - y.index);
 		if (ps.length < 2) return;
 		const sub = Math.max(1, Math.floor(num(r, 'subdivision_count', 3)));
@@ -806,8 +812,9 @@ export class ParticleRenderer {
 			const len = dir.length();
 			if (len < 1e-4) continue;
 			dir.divideScalar(len);
-			const sideA = dir.clone().cross(camPos.clone().sub(a.p)).normalize();
-			const sideZ = dir.clone().cross(camPos.clone().sub(z.p)).normalize();
+			const toward = aimAt ?? camPos;
+			const sideA = dir.clone().cross(toward.clone().sub(a.p)).normalize();
+			const sideZ = dir.clone().cross(toward.clone().sub(z.p)).normalize();
 			const u0 = dist * texel + scroll, u1 = (dist + len) * texel + scroll;
 			dist += len;
 			quad(b,
@@ -821,6 +828,18 @@ export class ParticleRenderer {
 		for (const m of this.meshes.values()) m.geometry.dispose();
 		this.meshes.clear();
 		this.group.clear();
+	}
+
+	// clear, and free the sprite materials and their texture copies
+	dispose() {
+		this.clear();
+		for (const s of this.loaded.values()) {
+			if (!s) continue;
+			(s.material.uniforms.map.value as THREE.Texture | null)?.dispose();
+			s.material.dispose();
+		}
+		this.loaded.clear();
+		this.sprites.clear();
 	}
 }
 

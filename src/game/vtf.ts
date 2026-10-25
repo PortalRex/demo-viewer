@@ -83,6 +83,34 @@ export function vtfLevel(bytes: Uint8Array, maxSize = 1024): (Omit<VtfImage, 'da
 	return {width: w, height: h, format, offset, size, hasAlpha};
 }
 
+// the drawn level (as vtfLevel picks it) and every smaller one, largest
+// first: where each level's first frame is in the file
+export function vtfMips(bytes: Uint8Array, maxSize = 1024): {width: number; height: number; offset: number; size: number}[] | null {
+	const top = vtfLevel(bytes, maxSize);
+	if (!top) return null;
+	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const width = v.getUint16(16, true), height = v.getUint16(18, true);
+	const flags = v.getUint32(20, true);
+	const frames = v.getUint16(24, true);
+	const minor = v.getUint32(8, true);
+	const depth = minor >= 2 ? Math.max(1, v.getUint16(63, true)) : 1;
+	const faces = flags & 0x4000 ? (minor < 5 ? 7 : 6) : 1;
+	if (faces > 1 || depth > 1) return null;
+	const mipCount = v.getUint8(56);
+	let level = 0;
+	while (level < mipCount - 1 && Math.max(width >> level, height >> level) > maxSize) level++;
+	// back from the drawn level towards the smallest
+	const out: {width: number; height: number; offset: number; size: number}[] = [];
+	let offset = top.offset;
+	for (let m = level; m < mipCount; m++) {
+		const w = Math.max(1, width >> m), h = Math.max(1, height >> m);
+		const size = bytesFor(top.format, w, h);
+		out.push({width: w, height: h, offset, size});
+		if (m + 1 < mipCount) offset -= bytesFor(top.format, Math.max(1, width >> (m + 1)), Math.max(1, height >> (m + 1))) * frames;
+	}
+	return out;
+}
+
 // an environment map's six faces (right, left, back, front, up, down: +x
 // -x +y -y +z -z in the world) at the largest level up to `maxSize`
 export function readVtfCube(bytes: Uint8Array, maxSize = 256): VtfImage[] | null {

@@ -24,7 +24,20 @@ export class DirectoryFS implements GameFS {
 		this.label = root.name;
 	}
 
-	private async file(path: string): Promise<File | null> {
+	// File objects by path (looking one up walks the folders: many reads hit
+	// the same few archives)
+	private files = new Map<string, Promise<File | null>>();
+
+	private file(path: string): Promise<File | null> {
+		let f = this.files.get(path);
+		if (!f) {
+			f = this.lookup(path);
+			this.files.set(path, f);
+		}
+		return f;
+	}
+
+	private async lookup(path: string): Promise<File | null> {
 		const parts = path.split('/').filter(Boolean);
 		let dir = this.root;
 		try {
@@ -76,7 +89,50 @@ export class HttpFS implements GameFS {
 		this.base = base;
 	}
 
-	async read(path: string, offset = 0, length?: number) {
+	// small ranges asked for together go out as one request
+	private queue: {path: string; offset: number; length: number; done: (b: Uint8Array | null) => void; fail: (e: unknown) => void}[] = [];
+	private flushing = false;
+
+	read(path: string, offset = 0, length?: number): Promise<Uint8Array | null> {
+		if (length === undefined || length > 4 << 20) return this.readOne(path, offset, length);
+		return new Promise((done, fail) => {
+			this.queue.push({path, offset, length, done, fail});
+			if (!this.flushing) {
+				this.flushing = true;
+				setTimeout(() => this.flush(), 0);
+			}
+		});
+	}
+
+	private async flush() {
+		this.flushing = false;
+		const batch = this.queue.splice(0, this.queue.length);
+		// (in requests of up to 32 MB)
+		for (let i = 0; i < batch.length;) {
+			let total = 0, j = i;
+			while (j < batch.length && (j === i || total + batch[j].length < 32 << 20)) total += batch[j++].length;
+			const part = batch.slice(i, j);
+			i = j;
+			fetch(`${this.base}__ranges`, {method: 'POST', body: JSON.stringify(part.map(q => [q.path, q.offset, q.length]))})
+				.then(r => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`ranges: ${r.status}`))))
+				.then(buf => {
+					const v = new DataView(buf);
+					let o = 0;
+					for (const q of part) {
+						const n = v.getInt32(o, true);
+						o += 4;
+						if (n < 0) q.done(null);
+						else {
+							q.done(new Uint8Array(buf, o, n));
+							o += n;
+						}
+					}
+				})
+				.catch(e => part.forEach(q => q.fail(e)));
+		}
+	}
+
+	private async readOne(path: string, offset = 0, length?: number) {
 		const headers: HeadersInit = offset || length !== undefined ? {Range: `bytes=${offset}-${length === undefined ? '' : offset + length - 1}`} : {};
 		const r = await fetch(this.base + path.split('/').map(encodeURIComponent).join('/'), {headers});
 		if (!r.ok || r.status === 204) return null;

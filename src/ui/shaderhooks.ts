@@ -13,18 +13,20 @@ export const paintUniforms = {
 
 // Source's range fog: by distance from the eye, linear from start to end
 // and capped at the maximum density, then squared and blended in linear
-// light (the frame here is already sRGB-encoded, as is the fog colour)
+// light (the frame is drawn linear and unexposed, as is the fog colour; the
+// view's final pass exposes and encodes it)
 export const fogUniforms = {
 	fogMaxDensity: {value: 1},
 };
 
+// the frame's exposure, which the view's final pass applies: what must not
+// be scaled by it (unlit Refract textures, SolidEnergy past 1) divides by it
+export const exposureUniforms = {
+	sceneExposure: {value: 1},
+};
+
 const FOG_HEAD = `
-vec3 srgbToLinear(vec3 c) {
-	return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
-}
-vec3 linearToSrgb(vec3 c) {
-	return mix(c * 12.92, 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
-}
+uniform float sceneExposure;
 `;
 
 const FOG_FRAGMENT = `
@@ -32,9 +34,7 @@ const FOG_FRAGMENT = `
 	{
 		float dist = length(vDitherWorld - cameraPosition);
 		float f = min(fogMaxDensity, clamp((dist - fogNear) / max(fogFar - fogNear, 1.0), 0.0, 1.0));
-		vec3 lin = srgbToLinear(gl_FragColor.rgb);
-		vec3 fogLin = srgbToLinear(fogColor);
-		gl_FragColor.rgb = linearToSrgb(mix(lin, fogLin, f * f));
+		gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, f * f);
 	}
 #endif
 `;
@@ -312,6 +312,9 @@ const REFRACT_FRAGMENT = `
 #ifdef REFRACT_TINT
 	outgoingLight = diffuseColor.rgb;
 #endif
+#ifdef REFRACT_UNSCALED
+	outgoingLight /= sceneExposure;
+#endif
 `;
 
 export interface EnvSettings {
@@ -377,7 +380,7 @@ function hook(material: THREE.Material, paint: boolean) {
 		};
 	}
 	material.onBeforeCompile = shader => {
-		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms);
+		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms, exposureUniforms);
 		if (paint) {
 			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
@@ -411,7 +414,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

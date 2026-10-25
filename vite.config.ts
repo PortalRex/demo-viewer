@@ -1,6 +1,6 @@
 import {defineConfig} from 'vite';
 import type {Plugin} from 'vite';
-import {createReadStream, mkdirSync, readdirSync, statSync, writeFileSync} from 'node:fs';
+import {closeSync, createReadStream, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync} from 'node:fs';
 import {join, normalize} from 'node:path';
 
 // Dev only: serves the local Portal 2 install at /__game/ (with Range
@@ -46,6 +46,51 @@ function devGameFiles(): Plugin {
 				}
 				res.setHeader('Content-Type', 'application/json');
 				res.end(JSON.stringify(out));
+			});
+			// many small ranges in one request (POST [[path, offset, length], ...]):
+			// each answered as a 4-byte length (-1 = missing) and its bytes
+			server.middlewares.use('/__game/__ranges', (req, res) => {
+				const parts: Buffer[] = [];
+				req.on('data', (c: Buffer) => parts.push(c));
+				req.on('end', () => {
+					let list: [string, number, number][];
+					try {
+						list = JSON.parse(Buffer.concat(parts).toString());
+					} catch {
+						res.statusCode = 400;
+						return res.end();
+					}
+					const fds = new Map<string, number | null>();
+					const out: Buffer[] = [];
+					try {
+						for (const [file, offset, length] of list) {
+							const rel = normalize(file).replace(/^([/\\])+/, '');
+							let fd = fds.get(rel);
+							if (fd === undefined) {
+								try {
+									fd = rel.startsWith('..') ? null : openSync(join(P2_DIR, rel), 'r');
+								} catch {
+									fd = null;
+								}
+								fds.set(rel, fd);
+							}
+							const head = Buffer.alloc(4);
+							if (fd === null) {
+								head.writeInt32LE(-1);
+								out.push(head);
+								continue;
+							}
+							const buf = Buffer.alloc(Math.max(0, length));
+							const n = readSync(fd, buf, 0, buf.length, offset);
+							head.writeInt32LE(n);
+							out.push(head, buf.subarray(0, n));
+						}
+					} finally {
+						for (const fd of fds.values()) if (fd !== null && fd !== undefined) closeSync(fd);
+					}
+					res.setHeader('Content-Type', 'application/octet-stream');
+					res.end(Buffer.concat(out));
+				});
 			});
 			server.middlewares.use('/__game/', (req, res) => {
 				const rel = normalize(decodeURIComponent((req.url ?? '/').split('?')[0])).replace(/^([/\\])+/, '');
