@@ -54,6 +54,9 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController', 'm_hAttachedObject', 'm_bUseVMGrab', 'm_bUsingVMGrabState', 'm_fFlags'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
 	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
+	// whose view model it is (co-op recordings have one per player)
+	CPredictedViewModel: ['m_hOwner', 'm_nViewModelIndex'],
+	CBaseViewModel: ['m_hOwner', 'm_nViewModelIndex'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],
 };
 
@@ -73,6 +76,7 @@ export interface EntityTrack {
 	maxs: Vec3;
 	orange?: boolean;   // portals
 	keys: EntityKey[];
+	userData?: Record<string, unknown>;  // the viewer's per-track cache
 }
 
 export interface EntityTimeline {

@@ -62,11 +62,21 @@ export interface MaterialInfo {
 	color: [number, number, number];  // $color / $color2 tint
 	bumpMap: string;        // $bumpmap (a normal map, or a self-shadowed one with $ssbump)
 	ssbump: boolean;
+	envMap: string;         // $envmap: a cubemap reflected (env_cubemap: the nearest one)
+	envTint: [number, number, number];
+	envMask: 'none' | 'base' | 'bump' | 'texture';  // where the reflection's strength comes from
+	envMaskTexture: string;
+	envContrast: number;
+	envSaturation: number;
+	refractTint: [number, number, number];  // Refract: what's behind is multiplied by this
+	refractTintTexture: string;             // (times twice this texture, where there is one)
 }
 
 const MISSING: MaterialInfo = {
 	noPortal: false, translucent: false, liquid: false, found: false, shader: '', baseTexture: '', alphaTest: false,
 	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1], bumpMap: '', ssbump: false,
+	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envContrast: 0, envSaturation: 1,
+	refractTint: [1, 1, 1], refractTintTexture: '',
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -75,6 +85,15 @@ function parseColor(v: string | undefined): [number, number, number] | null {
 	if (nums.length < 3 || nums.some(n => !isFinite(n))) return null;
 	const scale = v.includes('{') ? 1 / 255 : 1;
 	return [nums[0] * scale, nums[1] * scale, nums[2] * scale];
+}
+
+// a tint: three numbers, or one for all three
+function parseTint(v: string | undefined): [number, number, number] | null {
+	if (!v) return null;
+	const c = parseColor(v);
+	if (c) return c;
+	const n = Number(v.replace(/[[\]{}]/g, ' ').trim());
+	return isFinite(n) ? [n, n, n] : null;
 }
 
 const truthy = (v: string | undefined) => v !== undefined && v !== '0' && v.toLowerCase() !== 'false';
@@ -145,6 +164,14 @@ export class Materials {
 			color: parseColor(p.get('$color')) ?? parseColor(p.get('$color2')) ?? parseColor(p.get('$refracttint')) ?? [1, 1, 1],
 			bumpMap: (p.get('$bumpmap') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			ssbump: truthy(p.get('$ssbump')),
+			envMap: (p.get('$envmap') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			envTint: parseTint(p.get('$envmaptint')) ?? [1, 1, 1],
+			envMask: truthy(p.get('$basealphaenvmapmask')) ? 'base' : truthy(p.get('$normalmapalphaenvmapmask')) ? 'bump' : p.get('$envmapmask') ? 'texture' : 'none',
+			envMaskTexture: (p.get('$envmapmask') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			envContrast: Number(p.get('$envmapcontrast') ?? 0) || 0,
+			envSaturation: p.has('$envmapsaturation') ? Number(p.get('$envmapsaturation')) || 0 : 1,
+			refractTint: parseColor(p.get('$refracttint')) ?? [1, 1, 1],
+			refractTintTexture: (p.get('$refracttinttexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.(vtf|vmt)$/, ''),
 		};
 	}
 }

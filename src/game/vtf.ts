@@ -76,6 +76,43 @@ export function readVtf(bytes: Uint8Array, maxSize = 1024): VtfImage | null {
 	return {width: w, height: h, format, data: bytes.subarray(offset, offset + size), hasAlpha};
 }
 
+// an environment map's six faces (right, left, back, front, up, down: +x
+// -x +y -y +z -z in the world) at the largest level up to `maxSize`
+export function readVtfCube(bytes: Uint8Array, maxSize = 256): VtfImage[] | null {
+	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (v.getUint32(0, true) !== 0x00465456) return null;
+	const minor = v.getUint32(8, true);
+	const headerSize = v.getUint32(12, true);
+	const width = v.getUint16(16, true), height = v.getUint16(18, true);
+	const flags = v.getUint32(20, true);
+	const frames = v.getUint16(24, true);
+	const format = v.getInt32(52, true);
+	const mipCount = v.getUint8(56);
+	const lowFormat = v.getInt32(57, true);
+	const lowW = v.getUint8(61), lowH = v.getUint8(62);
+	if (!(flags & 0x4000) || bytesFor(format, 1, 1) < 0) return null;
+	const faces = minor < 5 ? 7 : 6;
+	let dataStart = -1;
+	if (minor >= 3) {
+		const numResources = v.getUint32(68, true);
+		for (let i = 0; i < numResources; i++) {
+			const o = 80 + i * 8;
+			if ((v.getUint32(o, true) & 0xffffff) === 0x30) dataStart = v.getUint32(o + 4, true);
+		}
+		if (dataStart < 0) return null;
+	} else {
+		dataStart = headerSize + (lowFormat >= 0 ? bytesFor(lowFormat, lowW, lowH) : 0);
+	}
+	let level = 0;
+	while (level < mipCount - 1 && Math.max(width >> level, height >> level) > maxSize) level++;
+	let offset = dataStart;
+	for (let m = mipCount - 1; m > level; m--) offset += bytesFor(format, Math.max(1, width >> m), Math.max(1, height >> m)) * frames * faces;
+	const w = Math.max(1, width >> level), h = Math.max(1, height >> level);
+	const size = bytesFor(format, w, h);
+	if (offset + size * 6 > bytes.length) return null;
+	return [0, 1, 2, 3, 4, 5].map(f => ({width: w, height: h, format, data: bytes.subarray(offset + f * size, offset + (f + 1) * size), hasAlpha: false}));
+}
+
 // ---- decoding to RGBA8 ----
 
 function rgb565(c: number): [number, number, number] {

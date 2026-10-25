@@ -7,6 +7,7 @@ import {composeLightmap, styleValue} from '../game/bsp.ts';
 import type {BspMap, MeshData, MaterialGroup, ModelMesh} from '../game/bsp.ts';
 import type {GameFiles} from '../game/files.ts';
 import type {Materials, MaterialInfo} from '../game/materials.ts';
+import {readVtfCube, decodeVtf, VtfFormat} from '../game/vtf.ts';
 import {loadModel} from '../game/mdl.ts';
 import type {StudioModel, ModelGroup} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
@@ -16,7 +17,7 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints} from './particles.ts';
-import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms} from './shaderhooks.ts';
+import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -63,11 +64,14 @@ function geometry(m: MeshData) {
 
 // How bright the baked lighting is drawn. three's basic material divides
 // light maps by pi.
-// Portal 2's lightmaps (and prop vertex lighting) come out of the shaders
-// 16x brighter than the stored linear values (the integer-HDR lightmap
-// scale); the frame is then scaled by the auto exposure and clamped, with no
-// filmic curve.
+// Portal 2 stores integer-HDR lightmaps at 1/16 and its shaders multiply by
+// 16 again, so the light drawn is the stored linear value; the frame is then
+// scaled by the auto exposure and clamped, with no filmic curve.
 const LIGHTMAP_EXPOSURE = 16;
+
+// a static prop's stored vertex light (a byte) as linear light, in the
+// lightmaps' units
+const vertexLight = (b: number) => Math.pow(b / 255 / 2, 2.2);
 
 // three.js materials for the map's materials: textured once the texture
 // loads (flat colour until then), lit by the lightmap atlas for the world
@@ -87,6 +91,10 @@ class MaterialLibrary {
 	}
 
 	private apply(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
+		if (info.shader === 'refract') {
+			this.applyRefract(mat, info);
+			return;
+		}
 		if (info.shader === 'water' && info.baseTexture) {
 			// goo: opaque (its fog ends within inches), flowing, lit
 			mat.transparent = false;
@@ -108,13 +116,6 @@ class MaterialLibrary {
 		}
 		if (!info.baseTexture) {
 			mat.userData.textureless = true;
-			// refraction only (glass): a faint tint of what's behind
-			if (info.shader === 'refract') {
-				mat.vertexColors = false;
-				mat.opacity = 0.18;
-				mat.color.setRGB(...info.color);
-				mat.needsUpdate = true;
-			}
 			return;
 		}
 		this.textures.get(info.baseTexture).then(tex => {
@@ -127,6 +128,37 @@ class MaterialLibrary {
 			mat.needsUpdate = true;
 			this.onChange();
 		});
+	}
+
+	// glass and other Refract surfaces: what's behind them multiplied by
+	// their tint (and tint texture), unlit, as the shader draws them
+	private applyRefract(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
+		mat.transparent = true;
+		mat.depthWrite = false;
+		mat.side = THREE.DoubleSide;
+		mat.userData.twoSided = true;
+		mat.userData.textureless = true;
+		mat.vertexColors = false;
+		mat.blending = THREE.CustomBlending;
+		mat.blendEquation = THREE.AddEquation;
+		mat.blendSrc = THREE.ZeroFactor;
+		mat.blendDst = THREE.SrcColorFactor;
+		mat.toneMapped = false;
+		mat.fog = false;
+		mat.lightMap = null;
+		mat.defines = {...mat.defines, REFRACT_TINT: ''};
+		delete mat.defines.BACKFACE_SHADE;
+		const k = info.refractTintTexture ? 2 : 1;
+		mat.color.setRGB(info.refractTint[0] * k, info.refractTint[1] * k, info.refractTint[2] * k, THREE.LinearSRGBColorSpace);
+		mat.needsUpdate = true;
+		if (info.refractTintTexture) {
+			this.textures.get(info.refractTintTexture).then(tex => {
+				if (!tex) return;
+				mat.map = tex;
+				mat.needsUpdate = true;
+				this.onChange();
+			});
+		}
 	}
 
 	// a skybox face's texture (skybox/<name><side>)
@@ -190,9 +222,64 @@ class MaterialLibrary {
 			this.applyBackFaces(mat);
 			mat.needsUpdate = true;
 			this.onChange();
+			if (info.envMap && info.envMap !== 'env_cubemap' && !info.translucent) this.applyEnv(mat, info);
 		});
 		this.applyBackFaces(mat);
 		return mat;
+	}
+
+	// a world material's reflection: its cubemap (map patches name the
+	// nearest of the map's built ones), mask and tint
+	private async applyEnv(mat: THREE.Material, info: MaterialInfo) {
+		const [cube, maskMap] = await Promise.all([
+			this.cube(info.envMap),
+			info.envMask === 'texture' && info.envMaskTexture ? this.textures.get(info.envMaskTexture, true) : Promise.resolve(null),
+		]);
+		if (!cube) return;
+		if (info.envMask === 'bump' && !mat.userData.bumpNormal) {
+			// the mask is in the bump map's alpha
+			const bump = info.bumpMap ? await this.textures.get(info.bumpMap, true) : null;
+			if (!bump) return;
+			mat.userData.bumpNormal = bump;
+		}
+		setWorldEnv(mat, {cube: cube.texture, tint: info.envTint, scale: cube.scale, contrast: info.envContrast, saturation: info.envSaturation, maskMap}, info.envMask);
+		this.onChange();
+	}
+
+	private cubes = new Map<string, Promise<{texture: THREE.CubeTexture; scale: number} | null>>();
+
+	// a cubemap: the HDR version where there is one, else the plain one;
+	// both drawn as stored (linear)
+	private cube(path: string): Promise<{texture: THREE.CubeTexture; scale: number} | null> {
+		let p = this.cubes.get(path);
+		if (!p) {
+			p = (async () => {
+				for (const [ext, scale] of [['.hdr.vtf', 1], ['.vtf', 1]] as const) {
+					const bytes = await this.materials.files.read(`materials/${path}${ext}`);
+					const faces = bytes && readVtfCube(bytes, 128);
+					if (!faces) continue;
+					const half = faces[0].format === VtfFormat.RGBA16161616F;
+					const images = faces.map(f => {
+						const t = half
+							? new THREE.DataTexture(new Uint16Array(f.data.buffer.slice(f.data.byteOffset, f.data.byteOffset + f.width * f.height * 8)), f.width, f.height, THREE.RGBAFormat, THREE.HalfFloatType)
+							: new THREE.DataTexture(decodeVtf(f), f.width, f.height, THREE.RGBAFormat, THREE.UnsignedByteType);
+						return t;
+					});
+					const texture = new THREE.CubeTexture(images as unknown as HTMLImageElement[]);
+					texture.type = half ? THREE.HalfFloatType : THREE.UnsignedByteType;
+					texture.format = THREE.RGBAFormat;
+					texture.colorSpace = THREE.NoColorSpace;
+					texture.magFilter = THREE.LinearFilter;
+					texture.minFilter = THREE.LinearFilter;
+					texture.generateMipmaps = false;
+					texture.needsUpdate = true;
+					return {texture, scale};
+				}
+				return null;
+			})().catch(() => null);
+			this.cubes.set(path, p);
+		}
+		return p;
 	}
 
 	// `vertexLit`: the geometry's colours are vrad's baked light (static props)
@@ -610,9 +697,10 @@ export class View3D {
 				const vl = light.meshes[Math.floor(mv[i] / 1048576)];
 				const k = (mv[i] % 1048576) * 4;
 				if (!vl || k + 3 > vl.length) return null;
-				colors[i * 3] = vl[k + 2] / 255;      // stored BGRA
-				colors[i * 3 + 1] = vl[k + 1] / 255;
-				colors[i * 3 + 2] = vl[k] / 255;
+				// stored BGRA, as vrad writes vertex light: linear^(1/2.2) x 2
+				colors[i * 3] = vertexLight(vl[k + 2]);
+				colors[i * 3 + 1] = vertexLight(vl[k + 1]);
+				colors[i * 3 + 2] = vertexLight(vl[k]);
 			}
 			const g = part.baked.clone();
 			g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -1175,7 +1263,10 @@ export class View3D {
 		const t = (this.tracksByIndex.get(index) ?? []).find(c => keyAt(c, tick));
 		if (!t) return undefined;
 		if (t.className === 'CPortal_Player') return t.index;
-		if (t.className === 'CPredictedViewModel' || t.className === 'CBaseViewModel') return this.entities?.player?.index;
+		if (t.className === 'CPredictedViewModel' || t.className === 'CBaseViewModel') {
+			const h = Number(keyAt(t, tick)?.extra?.m_hOwner ?? -1);
+			return h >= 0 && (h & 2047) !== 2047 ? h & 2047 : this.entities?.player?.index;
+		}
 		return keyAt(t, tick)?.parent;
 	}
 
@@ -1207,7 +1298,17 @@ export class View3D {
 		const ents = this.entities;
 		// the view model belongs to the recording player
 		if (!ents || this.mode !== 'eyes' || this.followed) return;
-		const t = ents.tracks.find(c => (c.className === 'CPredictedViewModel' || c.className === 'CBaseViewModel') && keyAt(c, tick)?.visible && c.model.endsWith('.mdl'));
+		// co-op recordings carry both players' view models: the one the
+		// recording player owns
+		const me = ents.player?.index;
+		const isVm = (c: EntityTrack) => (c.className === 'CPredictedViewModel' || c.className === 'CBaseViewModel') && keyAt(c, tick)?.visible && c.model.endsWith('.mdl');
+		const owner = (c: EntityTrack) => {
+			const h = Number(keyAt(c, tick)?.extra?.m_hOwner ?? -1);
+			return h < 0 || (h & 2047) === 2047 ? undefined : h & 2047;
+		};
+		const vms = ents.tracks.filter(isVm);
+		const t = vms.find(c => me !== undefined && owner(c) === me && !Number(keyAt(c, tick)?.extra?.m_nViewModelIndex ?? 0))
+			?? (vms.some(c => owner(c) !== undefined) ? undefined : vms[0]);
 		const k = t && keyAt(t, tick);
 		if (!t || !k) return;
 		let g = this.vmObjects.get(t);
@@ -1425,10 +1526,11 @@ export class View3D {
 		}
 	}
 
-	// Auto exposure, as the engine's: every few frames the view is drawn
-	// small without exposure, and the scale is set so the 60th percentile of
-	// luminance lands at 0.6 (and the brightest 5% don't blow out), within
-	// the tonemap controller's range, approached gradually.
+	// Auto exposure, as the engine's (mat_tonemap_algorithm 1): every few
+	// frames the view is drawn small without exposure, and the scale is set
+	// so the brightest 2% of pixels start at 0.6 (sRGB), unless that leaves
+	// the median under 0.03; within the tonemap controller's range,
+	// approached gradually.
 	private meterExposure(r: THREE.WebGLRenderer) {
 		const now = performance.now();
 		const dt = Math.min(0.5, (now - this.lastRender) / 1000);
@@ -1451,7 +1553,9 @@ export class View3D {
 			}
 			lum.sort((a, b) => a - b);
 			const at = (p: number) => Math.max(1e-4, lum[Math.floor(lum.length * p)]);
-			const target = Math.min(0.6 / at(0.6), 1 / at(0.95));
+			// (the engine's histogram reads the sRGB-encoded frame: 0.6 and
+			// 0.03 there are 0.319 and 0.0023 linear)
+			const target = Math.max(0.319 / at(0.98), 0.0023 / at(0.5));
 			this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
 		}
 		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
@@ -1528,7 +1632,14 @@ export class View3D {
 		const a = k.anim!;
 		const looping = sk.sequences[a.sequence]?.looping ?? false;
 		const wrap = (c: number) => (looping ? c - Math.floor(c) : Math.min(1, Math.max(0, c)));
-		if (a.clientSide) {
+		// a view model the recording player predicts carries no cycle (always
+		// 0): it runs on the client, from when each sequence started
+		let clientRun = t.userData?.clientRun as boolean | undefined;
+		if (clientRun === undefined) {
+			clientRun = (t.className === 'CPredictedViewModel' || t.className === 'CBaseViewModel') && t.keys.every(c => !c.anim || c.anim.cycle === 0);
+			(t.userData ??= {}).clientRun = clientRun;
+		}
+		if (a.clientSide || clientRun) {
 			let start = i;
 			while (start > 0) {
 				const p = t.keys[start - 1].anim;
@@ -1621,8 +1732,6 @@ export class View3D {
 		}
 
 		if (ents) this.placeAttached(tick);
-		this.updateViewModel(tick);
-		this.updateParticles(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
@@ -1660,8 +1769,11 @@ export class View3D {
 				this.controls.update();
 			}
 		}
-		// after the camera: what the recording player holds follows their view
+		// after the camera: the view model and what the recording player
+		// holds follow this frame's view
+		this.updateViewModel(tick);
 		if (ents) this.placeHeld(tick);
+		this.updateParticles(tick);
 		this.lightModels();
 		this.render();
 	}

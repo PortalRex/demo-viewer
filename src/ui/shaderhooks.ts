@@ -216,8 +216,86 @@ const BUMP_FRAGMENT = `
 		reflectedLight.indirectDiffuse += lmColor * lightMapIntensity * RECIPROCAL_PI;
 `;
 
+// Reflections (LightmappedGeneric's $envmap): the cubemap along the view
+// reflected off the surface, tinted, contrast and saturation adjusted,
+// scaled by a mask, added on top of the lit colour
+const ENV_FRAGMENT_HEAD = `
+uniform samplerCube envCube;
+uniform vec3 envTint;
+uniform float envScale;
+uniform float envContrast;
+uniform float envSaturation;
+uniform sampler2D envMaskMap;
+varying vec3 vEnvN;
+`;
+
+const ENV_FRAGMENT = `
+#ifdef ENVMAP_CUBE
+	{
+		vec3 eye = normalize(vDitherWorld - cameraPosition);
+		vec3 n = normalize(vEnvN);
+		if (!gl_FrontFacing) n = -n;
+		vec3 spec = envScale * textureCube(envCube, reflect(eye, n)).rgb * envTint;
+		spec = mix(spec, spec * spec, envContrast);
+		spec = mix(vec3(dot(spec, vec3(0.299, 0.587, 0.114))), spec, envSaturation);
+		float mask = 1.0;
+	#if defined(ENVMASK_BASE) && defined(USE_MAP)
+		mask = texture2D(map, vMapUv).a;
+	#elif defined(ENVMASK_BUMP) && defined(USE_MAP)
+		mask = texture2D(bumpNormal, vMapUv).a;
+	#elif defined(ENVMASK_TEXTURE) && defined(USE_MAP)
+		mask = texture2D(envMaskMap, vMapUv).r;
+	#endif
+		outgoingLight += spec * mask;
+	}
+#endif
+`;
+
+// Refract surfaces draw their (unlit) tint, multiplied onto what's behind
+const REFRACT_FRAGMENT = `
+#ifdef REFRACT_TINT
+	outgoingLight = diffuseColor.rgb;
+#endif
+`;
+
+export interface EnvSettings {
+	cube: THREE.CubeTexture;
+	tint: [number, number, number];
+	scale: number;
+	contrast: number;
+	saturation: number;
+	maskMap: THREE.Texture | null;
+}
+
+// gives a world material its reflection (once its cubemap has loaded)
+export function setWorldEnv(material: THREE.Material, env: EnvSettings, mask: 'none' | 'base' | 'bump' | 'texture') {
+	const u = material.userData.envUniforms as Record<string, {value: unknown}>;
+	u.envCube.value = env.cube;
+	(u.envTint.value as THREE.Vector3).set(...env.tint);
+	u.envScale.value = env.scale;
+	u.envContrast.value = env.contrast;
+	u.envSaturation.value = env.saturation;
+	u.envMaskMap.value = env.maskMap;
+	material.defines = {...material.defines, ENVMAP_CUBE: ''};
+	for (const k of ['ENVMASK_BASE', 'ENVMASK_BUMP', 'ENVMASK_TEXTURE']) delete material.defines[k];
+	if (mask === 'base') material.defines.ENVMASK_BASE = '';
+	if (mask === 'bump') material.defines.ENVMASK_BUMP = '';
+	if (mask === 'texture' && env.maskMap) material.defines.ENVMASK_TEXTURE = '';
+	material.needsUpdate = true;
+}
+
 function hook(material: THREE.Material, paint: boolean) {
 	const lit = !!material.userData.ambientLit;
+	if (paint) {
+		material.userData.envUniforms = {
+			envCube: {value: null},
+			envTint: {value: new THREE.Vector3(1, 1, 1)},
+			envScale: {value: 1},
+			envContrast: {value: 0},
+			envSaturation: {value: 1},
+			envMaskMap: {value: null},
+		};
+	}
 	if (lit) {
 		material.userData.ambUniforms = {
 			ambCube: {value: Array.from({length: 6}, () => new THREE.Vector3())},
@@ -229,11 +307,15 @@ function hook(material: THREE.Material, paint: boolean) {
 	material.onBeforeCompile = shader => {
 		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms);
 		if (paint) {
-			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms);
+			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
-			shader.fragmentShader = BUMP_FRAGMENT_HEAD + shader.fragmentShader.replace(
+			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + shader.fragmentShader.replace(
 				'reflectedLight.indirectDiffuse += lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;',
 				BUMP_FRAGMENT,
+			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + ENV_FRAGMENT);
+			shader.vertexShader = 'varying vec3 vEnvN;\n' + shader.vertexShader.replace(
+				'#include <project_vertex>',
+				'#include <project_vertex>\n\tvEnvN = normalize(mat3(modelMatrix) * normal);',
 			);
 		}
 		if (lit) {
@@ -251,12 +333,13 @@ function hook(material: THREE.Material, paint: boolean) {
 			'#include <project_vertex>',
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n\tvDitherUp = normalize(mat3(modelMatrix) * normal).z;',
 		);
+		shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', REFRACT_FRAGMENT + '#include <opaque_fragment>');
 		shader.fragmentShader = DITHER_FRAGMENT_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);
