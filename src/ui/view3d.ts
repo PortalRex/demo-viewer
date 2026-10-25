@@ -150,13 +150,13 @@ class MaterialLibrary {
 	private model = new Map<string, THREE.Material>();
 	private litModel = new Map<string, THREE.Material>();
 
-	// frees the map's materials and textures (when the map changes)
+	// frees the map's materials (when the map changes; the textures are kept
+	// for the next)
 	dispose() {
 		for (const cache of [this.world, this.model, this.litModel]) {
 			for (const m of cache.values()) m.dispose();
 			cache.clear();
 		}
-		this.textures.dispose();
 		for (const p of this.cubes.values()) p.then(c => {
 			if (!c) return;
 			for (const f of c.texture.image as THREE.Texture[]) f.dispose?.();
@@ -166,9 +166,9 @@ class MaterialLibrary {
 	}
 	onChange = () => {};
 
-	constructor(files: GameFiles, materials: Materials, lightmap: THREE.Texture | null) {
+	constructor(textures: TextureCache, materials: Materials, lightmap: THREE.Texture | null) {
 		this.materials = materials;
-		this.textures = new TextureCache(files);
+		this.textures = textures;
 		this.lightmap = lightmap;
 	}
 
@@ -521,6 +521,7 @@ export class View3D {
 	private camera = new THREE.PerspectiveCamera(VERTICAL_FOV, 1, 1, 40000);
 	private controls: OrbitControls | null = null;
 	private library: MaterialLibrary | null = null;
+	private textures: TextureCache | null = null;
 	private mapGroup = new THREE.Group();
 	private entityGroup = new THREE.Group();
 	private pathLine: THREE.LineSegments | null = null;
@@ -801,7 +802,12 @@ export class View3D {
 		this.particleRenderer?.dispose();
 		this.vmParticleRenderer?.dispose();
 		const token = ++this.mapToken;
-		if (!bsp || !files || !materials) return;
+		if (!bsp || !files || !materials) {
+			// (no map: nothing to carry over)
+			this.textures?.dispose();
+			this.textures = null;
+			return;
+		}
 
 		let lightTex: THREE.DataTexture | null = null;
 		if (bsp.lightmap) {
@@ -830,7 +836,12 @@ export class View3D {
 		this.styleValues.clear();
 		this.styleGen++;
 		this.tracksByIndex.clear();
-		this.library = new MaterialLibrary(files, materials, lightTex);
+		// (textures carry over from the last map, unless the game folder changed)
+		if (this.textures?.files !== files) {
+			this.textures?.dispose();
+			this.textures = new TextureCache(files);
+		} else this.textures.newMap();
+		this.library = new MaterialLibrary(this.textures, materials, lightTex);
 		this.library.setBackFaces(this.mode !== 'eyes');
 		this.library.onChange = () => this.loaded();
 		this.effects = new EffectAssets(materials, this.library.textures);

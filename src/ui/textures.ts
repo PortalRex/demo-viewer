@@ -1,4 +1,7 @@
-// Materials' base textures as three.js textures, loaded once per map.
+// Materials' base textures as three.js textures, kept from map to map:
+// those a map's own files supplied, the ones not found (the next map's files
+// may have them) and the ones no map has used for a while go when the map
+// changes.
 import * as THREE from 'three';
 import type {GameFiles} from '../game/files.ts';
 import {vtfLevel, vtfMips, decodeVtf, VtfFormat} from '../game/vtf.ts';
@@ -8,9 +11,16 @@ import {vtfLevel, vtfMips, decodeVtf, VtfFormat} from '../game/vtf.ts';
 // Set once the renderer knows: s3tc, and s3tc in sRGB for colour textures.
 export const compressedSupport = {dxt: false, srgb: false};
 
+// (maps a texture can go unused for and stay)
+const KEEP_MAPS = 2;
+
 export class TextureCache {
-	private files: GameFiles;
+	readonly files: GameFiles;
 	private cache = new Map<string, Promise<THREE.Texture | null>>();
+	private fromMap = new Set<string>();
+	private lastUsed = new Map<string, number>();
+	private loaded = new Map<string, THREE.Texture | null>();
+	private generation = 0;
 	maxSize: number;
 
 	constructor(files: GameFiles, maxSize = 512) {
@@ -18,18 +28,41 @@ export class TextureCache {
 		this.maxSize = maxSize;
 	}
 
-	// frees every texture loaded (the cache is per map)
+	// frees every texture loaded
 	dispose() {
 		for (const p of this.cache.values()) p.then(t => t?.dispose());
 		this.cache.clear();
+		this.fromMap.clear();
+		this.lastUsed.clear();
+		this.loaded.clear();
+	}
+
+	// a new map: drop what the last map's files supplied, what wasn't found,
+	// and what's gone unused (of what has finished loading)
+	newMap() {
+		this.generation++;
+		for (const [key, t] of this.loaded) {
+			if (t && !this.fromMap.has(key) && this.generation - (this.lastUsed.get(key) ?? 0) <= KEEP_MAPS) continue;
+			t?.dispose();
+			this.cache.delete(key);
+			this.fromMap.delete(key);
+			this.lastUsed.delete(key);
+			this.loaded.delete(key);
+		}
 	}
 
 	// `path` under materials/, without .vtf; `linear`: data, not colour (normal maps)
 	get(path: string, linear = false): Promise<THREE.Texture | null> {
 		const key = path.toLowerCase() + (linear ? '|linear' : '');
+		this.lastUsed.set(key, this.generation);
 		let p = this.cache.get(key);
 		if (!p) {
-			p = this.load(path.toLowerCase(), linear).catch(() => null);
+			if (this.files.mapPak?.has(`materials/${path.toLowerCase()}.vtf`)) this.fromMap.add(key);
+			const loading: Promise<THREE.Texture | null> = this.load(path.toLowerCase(), linear).catch(() => null).then(t => {
+				if (this.cache.get(key) === loading) this.loaded.set(key, t);
+				return t;
+			});
+			p = loading;
 			this.cache.set(key, p);
 		}
 		return p;
