@@ -85,6 +85,7 @@ export interface MaterialInfo {
 	phongTint: [number, number, number];
 	phongBaseMask: boolean;  // $basemapalphaphongmask: the mask is in the base texture's alpha (else the bump map's)
 	phongExponentTexture: string;  // $phongexponenttexture: exponent 1 + 149 x its red
+	cloakFactor: number;     // $cloakfactor (VertexLitGeneric): how far it's drawn as the screen behind it
 }
 
 const MISSING: MaterialInfo = {
@@ -95,6 +96,7 @@ const MISSING: MaterialInfo = {
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
 	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
 	phong: false, phongExponent: 5, phongBoost: 1, phongFresnel: [0, 0.5, 1], phongTint: [1, 1, 1], phongBaseMask: false, phongExponentTexture: '',
+	cloakFactor: 0,
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -207,6 +209,7 @@ export class Materials {
 			phongTint: parseTint(p.get('$phongtint')) ?? [1, 1, 1],
 			phongBaseMask: truthy(p.get('$basemapalphaphongmask')),
 			phongExponentTexture: (p.get('$phongexponenttexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			cloakFactor: Number(p.get('$cloakfactor') ?? 0) || 0,
 		};
 	}
 }

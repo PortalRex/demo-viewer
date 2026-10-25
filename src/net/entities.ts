@@ -70,6 +70,10 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)
 	CEnvProjectedTexture: ['m_hTargetEntity', 'm_bCameraSpace', 'm_bState', 'm_flLightFOV', 'm_LightColor', 'm_flBrightnessScale', 'm_SpotlightTextureName', 'm_flNearZ', 'm_flFarZ', 'm_bEnableShadows', 'm_bLightWorld'],
+	// how a held object faces its holder (co-op's view model grab draws it so)
+	CPropWeightedCube: ['m_qPreferredPlayerCarryAngles'],
+	CPhysicsProp: ['m_qPreferredPlayerCarryAngles'],
+	CPhysicsPropMultiplayer: ['m_qPreferredPlayerCarryAngles'],
 	// ropes: their ends and how they hang (see Ropes)
 	CRopeKeyframe: ['m_hStartPoint', 'm_hEndPoint', 'm_iStartAttachment', 'm_iEndAttachment', 'm_Slack', 'm_RopeLength', 'm_fLockedPoints', 'm_RopeFlags', 'm_nSegments', 'm_Subdiv', 'm_TextureScale', 'm_Width'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax', 'm_bUseCustomBloomScale', 'm_flCustomBloomScale'],

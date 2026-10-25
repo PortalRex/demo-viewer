@@ -177,6 +177,14 @@ class MaterialLibrary {
 			this.applyRefract(mat, info);
 			return;
 		}
+		// a cloak pass that's fully opaque (CloakBlendedPassIsFullyOpaque: the
+		// factor 0.444 or more) replaces the model's own drawing with the screen
+		// behind it, unbent at a factor of 1: nothing to draw (the reflection
+		// cube's lens)
+		if (info.cloakFactor >= 0.6 / 1.35) {
+			mat.visible = false;
+			return;
+		}
 		// the Black shader: solid black (the void behind backdrops)
 		if (info.shader === 'black') {
 			mat.userData.textureless = true;
@@ -2628,7 +2636,18 @@ export class View3D {
 			}
 			if (offset.length() <= HOLD_MAX) o.userData.heldOffset = offset.clone();
 			else local.setPosition(o.userData.heldOffset ?? HOLD_OFFSET);
-			const apparent = this.eyeMatrix(p, tick, this.mode === 'eyes' && p === this.followTrack).multiply(local);
+			const eye = this.eyeMatrix(p, tick, this.mode === 'eyes' && p === this.followTrack);
+			let apparent = eye.clone().multiply(local);
+			// co-op's view model grab: the client draws it facing the way the
+			// holder faces (their yaw, turned by the object's preferred carry
+			// angles), not as the server has it
+			const carry = ok.extra?.m_qPreferredPlayerCarryAngles as number[] | undefined;
+			if (Number(k.extra?.m_bUseVMGrab) === 1 && carry) {
+				const yaw = new THREE.Vector3(1, 0, 0).transformDirection(eye);
+				const yawAngle = Math.atan2(yaw.y, yaw.x) * 180 / Math.PI;
+				const q = new THREE.Quaternion().setFromEuler(toEuler([0, yawAngle, 0])).multiply(new THREE.Quaternion().setFromEuler(toEuler(carry as Vec3)));
+				apparent = new THREE.Matrix4().compose(new THREE.Vector3().setFromMatrixPosition(apparent), q, new THREE.Vector3(1, 1, 1));
+			}
 			// (where the holder sees it, for the gun's arcs)
 			o.userData.heldApparent = new THREE.Vector3().setFromMatrixPosition(apparent);
 			o.matrixAutoUpdate = false;
