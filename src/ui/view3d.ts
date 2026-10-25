@@ -648,9 +648,20 @@ export class View3D {
 			// the gun in a player's hand (the third-person model; the
 			// network carries the view model's name)
 			const group = new THREE.Group();
+			// Bone-merged as the game does: the gun's weapon_bone takes the
+			// hand's weapon_bone transform, so the mesh is drawn unposed and
+			// brought into that bone's space with its bind (pose-to-bone) matrix
 			this.model('models/weapons/w_portalgun.mdl', skin).then(asset => {
 				if (!asset) return;
-				group.add(this.staticObject(asset));
+				const inner = new THREE.Group();
+				for (const part of asset.parts) inner.add(new THREE.Mesh(part.raw, part.material));
+				const bone = asset.skeleton?.bones.find(b => b.name.toLowerCase() === 'weapon_bone') ?? asset.skeleton?.bones[0];
+				if (bone) {
+					const m = bone.poseToBone;
+					inner.matrix.set(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0, 0, 0, 1);
+					inner.matrixAutoUpdate = false;
+				}
+				group.add(inner);
 				this.onLoaded();
 			});
 			return group;

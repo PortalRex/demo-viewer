@@ -324,6 +324,23 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		}
 		return s;
 	};
+	// A face's front: its plane's normal, turned to agree with the vertex
+	// winding (clockwise seen from the front). The face's `side` byte isn't
+	// a reliable guide to that.
+	const facingOf = (f: number, vs: number[][]): {normal: [number, number, number]; dist: number} => {
+		const pn = faces.getUint16(f * 56, true);
+		const n0 = [planes.getFloat32(pn * 20, true), planes.getFloat32(pn * 20 + 4, true), planes.getFloat32(pn * 20 + 8, true)];
+		let wx = 0, wy = 0, wz = 0;
+		for (let i = 1; i + 1 < vs.length; i++) {
+			const a = vs[0], b = vs[i], c = vs[i + 1];
+			const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+			wx += e1[1] * e2[2] - e1[2] * e2[1];
+			wy += e1[2] * e2[0] - e1[0] * e2[2];
+			wz += e1[0] * e2[1] - e1[1] * e2[0];
+		}
+		const sign = wx * n0[0] + wy * n0[1] + wz * n0[2] <= 0 ? 1 : -1;
+		return {normal: [n0[0] * sign, n0[1] * sign, n0[2] * sign], dist: planes.getFloat32(pn * 20 + 12, true) * sign};
+	};
 	const faceVerts = (f: number) => {
 		const o = f * 56;
 		const first = faces.getInt32(o + 4, true);
@@ -490,10 +507,8 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			const c: [number, number, number] = [0, 0, 0];
 			for (const v of vs) for (let k = 0; k < 3; k++) c[k] += v[k] / vs.length;
 			const radius = Math.max(...vs.map(v => Math.hypot(v[0] - c[0], v[1] - c[1], v[2] - c[2])));
-			const pn = faces.getUint16(o, true);
-			const flip = faces.getUint8(o + 2) ? -1 : 1;
-			const n: [number, number, number] = [planes.getFloat32(pn * 20, true) * flip, planes.getFloat32(pn * 20 + 4, true) * flip, planes.getFloat32(pn * 20 + 8, true) * flip];
-			paintFaces.set(f, {x: b.x, y: b.y, w: b.w, h: b.h, mins: b.mins, lmVecs: tex.lmVecs, normal: n, dist: planes.getFloat32(pn * 20 + 12, true) * flip, center: c, radius});
+			const {normal, dist} = facingOf(f, vs);
+			paintFaces.set(f, {x: b.x, y: b.y, w: b.w, h: b.h, mins: b.mins, lmVecs: tex.lmVecs, normal, dist, center: c, radius});
 		}
 	}
 
@@ -548,9 +563,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			}
 			const disp = faces.getInt16(o + 12, true);
 			const vs = faceVerts(f);
-			const pn = faces.getUint16(o, true);
-			const flip = faces.getUint8(o + 2) ? -1 : 1;
-			const facing = [planes.getFloat32(pn * 20, true) * flip, planes.getFloat32(pn * 20 + 4, true) * flip, planes.getFloat32(pn * 20 + 8, true) * flip];
+			const facing = facingOf(f, vs).normal;
 			for (let i = 0; i < vs.length; i++) edgeList.push(...vs[i], ...vs[(i + 1) % vs.length]);
 			if (disp >= 0 && vs.length === 4) {
 				buildDisplacement(g.b, vs, dispinfo, dispverts, disp, tex.color, facing, (p, base) => vertexFor(p, tex, f, base));

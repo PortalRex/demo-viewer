@@ -82,9 +82,16 @@ for (let f = 0; f < faces.byteLength / 56; f++) {
 		else if (s < -0.01) neg++;
 	}
 	if (pos && neg) continue;
+	// the facing the vertex winding gives (Source winds clockwise seen from the front)
+	let wn = [0, 0, 0];
+	for (let i = 1; i + 1 < vs.length; i++) {
+		const e1 = [0, 1, 2].map(k => vs[i][k] - vs[0][k]), e2 = [0, 1, 2].map(k => vs[i + 1][k] - vs[0][k]);
+		wn = [wn[0] + e1[1] * e2[2] - e1[2] * e2[1], wn[1] + e1[2] * e2[0] - e1[0] * e2[2], wn[2] + e1[0] * e2[1] - e1[1] * e2[0]];
+	}
+	const windingAgrees = (wn[0] * n[0] + wn[1] * n[1] + wn[2] * n[2]) < 0 ? 'cw' : 'ccw';
 	const ti = faces.getInt16(fo + 10, true);
 	const flags = ti >= 0 ? texinfo.getInt32(ti * 72 + 64, true) : -1;
-	out.push([t, `t=${t.toFixed(0)} face ${f} model ${modelOf(f)} ${ti >= 0 ? texName(ti) : '-'} flags 0x${flags.toString(16)} disp ${faces.getInt16(fo + 12, true)} ${denom < 0 ? 'front' : 'back'} ${luxels(f)}`]);
+	out.push([t, `t=${t.toFixed(0)} face ${f} model ${modelOf(f)} ${ti >= 0 ? texName(ti) : '-'} flags 0x${flags.toString(16)} side ${side} wind ${windingAgrees} disp ${faces.getInt16(fo + 12, true)} ${denom < 0 ? 'front' : 'back'} ${luxels(f)}`]);
 }
 out.sort((a, b) => a[0] - b[0]);
 for (const [, s] of out.slice(0, 12)) hits.push(s);
