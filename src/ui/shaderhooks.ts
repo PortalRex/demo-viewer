@@ -9,6 +9,10 @@ import * as THREE from 'three';
 export const paintUniforms = {
 	paintMap: {value: null as THREE.Texture | null},
 	paintOn: {value: 0},
+	// paint/splatnormal_default: its alpha breaks up the gel's edges; tiled
+	// every 12.8 luxels (40 across the engine's 512-luxel paint map)
+	paintSplat: {value: null as THREE.Texture | null},
+	paintTiles: {value: new THREE.Vector2(1, 1)},
 };
 
 // Source's range fog: by distance from the eye, linear from start to end
@@ -110,18 +114,35 @@ const DITHER_FRAGMENT = `
 
 const PAINT_FRAGMENT_HEAD = `
 uniform sampler2D paintMap;
+uniform sampler2D paintSplat;
+uniform vec2 paintTiles;
 uniform float paintOn;
+float paintAlpha = 0.0;
+vec3 paintColor = vec3(0.0);
+vec3 paintLight = vec3(0.0);
 `;
 
+// Gel, as the engine's paint shader draws it over a surface: coverage
+// (with the splat texture's alpha averaged in) sets how thick it is, thin
+// gel is desaturated and darker, and it's lit by the flat light map
+// (times 0.82, plus a little of its own colour) and blended over
 const PAINT_FRAGMENT = `
 	#ifdef USE_LIGHTMAP
 	if (paintOn > 0.5) {
 		vec4 gel = texture2D(paintMap, vLightMapUv);
-		// coverage builds up per splat; the gel reads as solid past about half
-		float cover = smoothstep(0.28, 0.5, gel.a);
-		diffuseColor.rgb = mix(diffuseColor.rgb, gel.rgb * gel.rgb, cover);
+		if (gel.a > 0.01) {
+			paintAlpha = clamp((gel.a + texture2D(paintSplat, vLightMapUv * paintTiles).a) * 0.5, 0.0, 1.0);
+			float thick = smoothstep(0.34, 0.63, paintAlpha);
+			vec3 c = pow(gel.rgb, vec3(2.2));
+			paintColor = mix(vec3(dot(c, vec3(0.299, 0.587, 0.114)) * 0.5), c, thick);
+		}
 	}
 	#endif
+`;
+
+// (in the light maps' units, a scale of 1.5 over the engine's)
+const PAINT_FINAL = `
+	if (paintAlpha > 0.0) outgoingLight = mix(outgoingLight, (paintLight * 0.82 + 0.06) * paintColor * vec3(0.8, 0.85, 1.0), paintAlpha);
 `;
 
 // A projected spotlight (env_projectedtexture), as the engine's flashlight
@@ -188,6 +209,12 @@ uniform vec3 ambLightPos[2];
 uniform vec3 ambLightColor[2];
 uniform float ambScale;
 uniform vec3 selfIllumTint;
+uniform float phongExponent;
+uniform float phongBoost;
+uniform vec3 phongFresnel;
+uniform vec3 phongTint;
+uniform sampler2D phongMaskMap;
+uniform sampler2D phongExpMap;
 uniform sampler2D selfIllumMask;
 varying vec3 vAmbN;
 `;
@@ -207,6 +234,31 @@ const AMBIENT_FRAGMENT = `
 		reflectedLight.directDiffuse = vec3(0.0);
 		reflectedLight.directSpecular = vec3(0.0);
 		reflectedLight.indirectDiffuse = diffuseColor.rgb * amb * ambScale;
+	#ifdef PHONG
+		{
+			// VertexLitGeneric's: (N.H)^exponent x sqrt(N.L) per light, times
+			// the mask, boost and the fresnel ranges (low/mid/high by (1-N.V)^2)
+			vec3 eye = normalize(cameraPosition - vDitherWorld);
+			float f = 1.0 - clamp(dot(n, eye), 0.0, 1.0);
+			f *= f;
+			float fresnel = f > 0.5 ? mix(phongFresnel.y, phongFresnel.z, 2.0 * f - 1.0) : mix(phongFresnel.x, phongFresnel.y, 2.0 * f);
+			float exponent = phongExponent;
+		#if defined(PHONG_EXPMAP) && defined(USE_MAP)
+			exponent = 1.0 + 149.0 * texture2D(phongExpMap, vMapUv).r;
+		#endif
+			vec3 spec = vec3(0.0);
+			for (int i = 0; i < 2; i++) {
+				vec3 l = normalize(ambLightPos[i] - vDitherWorld);
+				spec += pow(clamp(dot(n, normalize(eye + l)), 0.0, 1.0), exponent) * sqrt(clamp(dot(n, l), 0.0, 1.0)) * ambLightColor[i];
+			}
+		#if defined(PHONG_BASEMASK) && defined(USE_MAP)
+			spec *= texture2D(map, vMapUv).a;
+		#elif defined(PHONG_BUMPMASK) && defined(USE_MAP)
+			spec *= texture2D(phongMaskMap, vMapUv).a;
+		#endif
+			reflectedLight.indirectDiffuse += spec * phongBoost * fresnel * phongTint * ambScale;
+		}
+	#endif
 	#if defined(SELFILLUM) && defined(USE_MAP)
 		{
 		#ifdef SELFILLUM_MASK
@@ -230,7 +282,7 @@ const NEUTRAL: ModelLighting = {cube: new Array(18).fill(0.1), lights: []};
 // share one); its texture and settings are copied from the shared one
 export function ownLitMaterial(shared: THREE.Material): THREE.Material {
 	const m = shared.clone();
-	m.userData = {ambientLit: true, modelEnv: shared.userData.modelEnv, selfIllum: shared.userData.selfIllum};
+	m.userData = {ambientLit: true, modelEnv: shared.userData.modelEnv, selfIllum: shared.userData.selfIllum, phong: shared.userData.phong};
 	hook(m, false);
 	return m;
 }
@@ -326,6 +378,7 @@ const BUMP_FRAGMENT = `
 	#endif
 		reflectedLight.indirectDiffuse += lmColor * lightMapIntensity * RECIPROCAL_PI;
 		surfaceLight = lmColor * lightMapIntensity * RECIPROCAL_PI;
+		paintLight = lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;
 		// (in the light maps' units: their scale, lightMapIntensity / pi)
 		reflectedLight.indirectDiffuse += flashLight(vDitherWorld, normalize(vEnvN)) * lightMapIntensity * RECIPROCAL_PI;
 `;
@@ -483,6 +536,19 @@ function hook(material: THREE.Material, paint: boolean) {
 			ambScale: {value: AMBIENT_SCALE},
 		};
 		// $selfillum: the unlit colour (times the tint) where the mask says
+		// $phong: highlights from the two local lights
+		const ph = material.userData.phong as {exponent: number; boost: number; fresnel: number[]; tint: number[]; baseMask: boolean; maskMap: THREE.Texture | null; expMap: THREE.Texture | null} | undefined;
+		if (ph) {
+			Object.assign(material.userData.ambUniforms, {
+				phongExponent: {value: ph.exponent}, phongBoost: {value: ph.boost},
+				phongFresnel: {value: new THREE.Vector3(...ph.fresnel)}, phongTint: {value: new THREE.Vector3(...ph.tint)},
+				phongMaskMap: {value: ph.maskMap}, phongExpMap: {value: ph.expMap},
+			});
+			material.defines = {...material.defines, PHONG: ''};
+			if (ph.baseMask) material.defines.PHONG_BASEMASK = '';
+			else if (ph.maskMap) material.defines.PHONG_BUMPMASK = '';
+			if (ph.expMap) material.defines.PHONG_EXPMAP = '';
+		}
 		const si = material.userData.selfIllum as {tint: [number, number, number]; mask: THREE.Texture | null} | undefined;
 		if (si) {
 			Object.assign(material.userData.ambUniforms, {selfIllumTint: {value: new THREE.Vector3(...si.tint)}, selfIllumMask: {value: si.mask}});
@@ -498,7 +564,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + DETAIL_HEAD + shader.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' + DETAIL_FRAGMENT).replace(
 				'reflectedLight.indirectDiffuse += lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;',
 				BUMP_FRAGMENT,
-			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + ENV_FRAGMENT);
+			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + ENV_FRAGMENT).replace('#include <opaque_fragment>', PAINT_FINAL + '#include <opaque_fragment>');
 			shader.vertexShader = 'varying vec3 vEnvN;\n' + shader.vertexShader.replace(
 				'#include <project_vertex>',
 				'#include <project_vertex>\n\tvEnvN = normalize(mat3(modelMatrix) * normal);',
@@ -530,7 +596,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

@@ -78,6 +78,13 @@ export interface MaterialInfo {
 	selfIllum: boolean;      // $selfillum (VertexLitGeneric): unlit where the mask (or base alpha) says
 	selfIllumMask: string;
 	selfIllumTint: [number, number, number];
+	phong: boolean;          // $phong (VertexLitGeneric): highlights from the model's lights
+	phongExponent: number;
+	phongBoost: number;
+	phongFresnel: [number, number, number];  // $phongfresnelranges: low, mid, high
+	phongTint: [number, number, number];
+	phongBaseMask: boolean;  // $basemapalphaphongmask: the mask is in the base texture's alpha (else the bump map's)
+	phongExponentTexture: string;  // $phongexponenttexture: exponent 1 + 149 x its red
 }
 
 const MISSING: MaterialInfo = {
@@ -87,6 +94,7 @@ const MISSING: MaterialInfo = {
 	refractTint: [1, 1, 1], refractTintTexture: '',
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
 	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
+	phong: false, phongExponent: 5, phongBoost: 1, phongFresnel: [0, 0.5, 1], phongTint: [1, 1, 1], phongBaseMask: false, phongExponentTexture: '',
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -192,6 +200,13 @@ export class Materials {
 			// (some name the mask with a .tga extension; the engine finds the .vtf)
 			selfIllumMask: (p.get('$selfillummask') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.(vtf|tga)$/, ''),
 			selfIllumTint: parseTint(p.get('$selfillumtint')) ?? [1, 1, 1],
+			phong: truthy(p.get('$phong')),
+			phongExponent: p.has('$phongexponent') ? Number(p.get('$phongexponent')) || 5 : 5,
+			phongBoost: p.has('$phongboost') ? Number(p.get('$phongboost')) || 0 : 1,
+			phongFresnel: (parseColor(p.get('$phongfresnelranges')) ?? [0, 0.5, 1]) as [number, number, number],
+			phongTint: parseTint(p.get('$phongtint')) ?? [1, 1, 1],
+			phongBaseMask: truthy(p.get('$basemapalphaphongmask')),
+			phongExponentTexture: (p.get('$phongexponenttexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 		};
 	}
 }

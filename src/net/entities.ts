@@ -59,7 +59,7 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CPredictedViewModel: ['m_hOwner', 'm_nViewModelIndex', 'm_nBody'],
 	CBaseViewModel: ['m_hOwner', 'm_nViewModelIndex', 'm_nBody'],
 	// body groups (PotatOS)
-	CWeaponPortalgun: ['m_nBody'],
+	CWeaponPortalgun: ['m_nBody', 'm_iLastFiredPortal'],
 	// a doorway's fade brush, drawn by distance (see View3D)
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)

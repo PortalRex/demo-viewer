@@ -167,6 +167,14 @@ class MaterialLibrary {
 			this.applyRefract(mat, info);
 			return;
 		}
+		// the Black shader: solid black (the void behind backdrops)
+		if (info.shader === 'black') {
+			mat.userData.textureless = true;
+			mat.vertexColors = false;
+			mat.color.setRGB(0, 0, 0);
+			mat.needsUpdate = true;
+			return;
+		}
 		if (info.shader === 'water' && info.baseTexture) {
 			// goo: opaque (its fog ends within inches), flowing, lit
 			mat.transparent = false;
@@ -196,10 +204,20 @@ class MaterialLibrary {
 			? (info.envMask === 'texture' && info.envMaskTexture ? this.textures.get(info.envMaskTexture, true) : Promise.resolve(null))
 			: null;
 		const glowMask = mat.userData.ambientLit && info.selfIllum && info.selfIllumMask ? this.textures.get(info.selfIllumMask, true) : Promise.resolve(null);
-		Promise.all([this.textures.get(info.baseTexture), envMask, glowMask]).then(([tex, maskMap, glow]) => {
+		// $phong's mask (the bump map's alpha, unless it's the base's) and exponents
+		const phong = mat.userData.ambientLit && info.phong;
+		const phongMask = phong && !info.phongBaseMask && info.bumpMap ? this.textures.get(info.bumpMap, true) : Promise.resolve(null);
+		const phongExp = phong && info.phongExponentTexture ? this.textures.get(info.phongExponentTexture, true) : Promise.resolve(null);
+		Promise.all([this.textures.get(info.baseTexture), envMask, glowMask, phongMask, phongExp]).then(([tex, maskMap, glow, phMask, phExp]) => {
 			if (!tex) return;
 			// (with neither a mask nor alpha in the base texture, the engine drops it)
 			if (mat.userData.ambientLit && info.selfIllum && (glow || tex.userData.hasAlpha)) mat.userData.selfIllum = {tint: info.selfIllumTint, mask: glow};
+			if (mat.userData.ambientLit && info.phong) {
+				mat.userData.phong = {
+					exponent: info.phongExponent, boost: info.phongBoost, fresnel: info.phongFresnel, tint: info.phongTint,
+					baseMask: info.phongBaseMask && !!tex.userData.hasAlpha, maskMap: phMask?.userData.hasAlpha ? phMask : null, expMap: phExp,
+				};
+			}
 			if (envMask) {
 				mat.userData.modelEnv = {
 					tint: info.envTint, contrast: info.envContrast, saturation: info.envSaturation, lightScale: info.envLightScale,
@@ -699,6 +717,7 @@ export class View3D {
 	}
 
 	setMap(bsp: BspMap | null, files: GameFiles | null = null, materials: Materials | null = null) {
+		this.meterSnap = true;
 		this.bsp = bsp;
 		this.files = files;
 		this.clearEntities();
@@ -1254,6 +1273,16 @@ export class View3D {
 		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint) : null;
 		paintUniforms.paintMap.value = this.paint?.texture ?? null;
 		paintUniforms.paintOn.value = this.paint ? 1 : 0;
+		if (this.paint && this.bsp?.lightmap) {
+			paintUniforms.paintTiles.value.set(this.bsp.lightmap.width / 12.8, this.bsp.lightmap.height / 12.8);
+			this.library?.textures.get('paint/splatnormal_default', true).then(tex => {
+				if (!tex) return;
+				tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+				tex.needsUpdate = true;
+				paintUniforms.paintSplat.value = tex;
+				this.loaded();
+			});
+		}
 		this.clearEntities();
 		// the path as line segments, broken at teleports
 		if (this.pathLine) {
@@ -1851,6 +1880,27 @@ export class View3D {
 			}
 		}
 
+		// the gun's top light (portalgun_top_light_*person at Body_light, its
+		// core glow at Inside_effects, in the barrel), in the colour of the
+		// last portal it fired
+		for (const p of ents.tracks) {
+			if (p.className !== 'CPortal_Player' || !keyAt(p, tick)) continue;
+			const gun = ents.tracks.find(g => g.className === 'CWeaponPortalgun' && keyAt(g, tick)?.parent === p.index);
+			const gk = gun && keyAt(gun, tick);
+			if (!gun || !gk) continue;
+			const fp = this.mode === 'eyes' && p === this.followTrack && !!this.vmShown;
+			if (!fp && !gk.visible) continue;
+			const [bodyLight, beamPoint] = fp ? [11, 17] : [12, 18];
+			const team = Number(keyAt(p, tick)?.extra?.m_iTeamNum ?? 0);
+			const color = this.portalColor(Number(gk.extra?.m_iLastFiredPortal ?? 0) === 2, team);
+			run(`toplight:${fp ? 'fp' : 'tp'}:${p.index}:${gun.keys[0].tick}`, fp ? 'portalgun_top_light_firstperson' : 'portalgun_top_light_thirdperson', gun.keys[0].tick, Infinity, () => {
+				const light = this.attachmentAt(fp ? p.index : gun.index, bodyLight, tick, fp);
+				const core = this.attachmentAt(fp ? p.index : gun.index, beamPoint, tick, fp);
+				if (!light || !core) return null;
+				return new Map([[0, light], [1, new THREE.Matrix4().setPosition(color[0], color[1], color[2])], [3, core]]);
+			}, {fp, live: true});
+		}
+
 		// the arcs the gun draws while holding something (DoEffectHolding):
 		// between its three claw tips and its muzzle (control points 0
 		// muzzle, 1-3 Arm1-3_attach3, 4 the player, 5 what's held), on the
@@ -2446,10 +2496,17 @@ export class View3D {
 	// of it (see histogramTarget); within the tonemap controller's range,
 	// approached gradually.
 	private meterExposure(r: THREE.WebGLRenderer, measure = true) {
+		// the eye adapts in the recording's time (while playing; by the clock
+		// when paused), and starts over after a jump: it takes the next
+		// reading as it is
 		const now = performance.now();
-		const dt = Math.min(0.5, (now - this.lastRender) / 1000);
+		const wall = Math.min(0.5, (now - this.lastRender) / 1000);
 		this.lastRender = now;
-		if (this.meterCount++ % 8 === 0 && !this.meterPending && measure) {
+		const step = Math.abs(this.meterTick - this.meterTickLast) * this.interval;
+		this.meterTickLast = this.meterTick;
+		if (step > 1) this.meterSnap = true;
+		const dt = step > 0 && step <= 1 ? step : wall;
+		if ((this.meterCount++ % 8 === 0 || this.meterSnap) && !this.meterPending && measure) {
 			const w = 64, h = 36;
 			// (with a stencil buffer: the sky is masked to the sky faces by it)
 			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType, stencilBuffer: true});
@@ -2490,6 +2547,10 @@ export class View3D {
 			r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px).then(() => {
 				const target = histogramTarget(px, w, h, exposed);
 				if (target) this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
+				if (target && this.meterSnap) {
+					this.exposure = this.meterTarget!;
+					this.meterSnap = false;
+				}
 			}).catch(() => {}).finally(() => { this.meterPending = false; });
 		}
 		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
@@ -2499,6 +2560,9 @@ export class View3D {
 	}
 	private meterTarget: number | null = null;
 	private meterPending = false;
+	private meterTick = 0;
+	private meterTickLast = 0;
+	private meterSnap = true;
 
 	// the fog colour as drawn: three mixes fog in after exposure and output
 	// encoding, so it's given already exposed and encoded
@@ -2604,6 +2668,7 @@ export class View3D {
 	}
 
 	update(view: ViewState | null, tick: number) {
+		this.meterTick = tick;
 		this.resize();
 		const ents = this.entities;
 		if (ents) {

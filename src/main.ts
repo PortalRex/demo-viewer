@@ -95,6 +95,36 @@ if (import.meta.env.DEV) {
 		Object.assign(out, view3d.debugStats());
 		return out;
 	};
+	// a small shot of every segment (at `frac` through it) into
+	// fixtures/shots/<name>/<index>_<map>.jpg, each once loading goes quiet
+	w.tour = async (name: string, frac = 0.5, first = 0, last = Infinity, width = 480, height = 270) => {
+		if (!pb) return 'no run';
+		if (viewMode !== '3d') [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === '3D')?.click();
+		const done: string[] = [];
+		for (let i = first; i < Math.min(pb.tracks.length, last + 1); i++) {
+			const tr = pb.tracks[i];
+			let quiet = performance.now();
+			const orig = view3d.onLoaded;
+			view3d.onLoaded = () => {
+				quiet = performance.now();
+				orig();
+			};
+			const t = tr.start + Math.floor(tr.length * frac);
+			const t0 = performance.now();
+			while (performance.now() - t0 < 30000) {
+				seekTo(t);
+				await new Promise(r => setTimeout(r, 250));
+				if (view3d.debugPlayer() && performance.now() - quiet > 1500) break;
+			}
+			view3d.onLoaded = orig;
+			seekTo(t);
+			const url = view3d.snapshot(width, height, undefined, undefined, 'image/jpeg');
+			const file = `${name}/${String(i).padStart(3, '0')}_${tr.seg.map}`;
+			await fetch(`/__shot?name=${file}&ext=jpg`, {method: 'POST', body: url});
+			done.push(file);
+		}
+		return done.length;
+	};
 	// frames of a tick range into fixtures/shots/<name>/ (as JPEGs), for videos
 	w.record = async (name: string, from: number, to: number, step = 2, width = 960, height = 540) => {
 		let n = 0;
@@ -461,9 +491,9 @@ window.addEventListener('drop', async e => {
 });
 
 // dev convenience: #load=fixtures/name.sarp opens a file served next to the page
+const openPath = (path: string) => fetch(path).then(r => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.statusText))))
+	.then(b => open([{bytes: new Uint8Array(b), name: decodeURIComponent(path.split('/').pop()!)}]))
+	.catch(e => showError(`Couldn't load ${path}: ${e.message}`));
 const m = location.hash.match(/^#load=(.+)$/);
-if (m) {
-	fetch(m[1]).then(r => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.statusText))))
-		.then(b => open([{bytes: new Uint8Array(b), name: decodeURIComponent(m[1].split('/').pop()!)}]))
-		.catch(e => showError(`Couldn't load ${m[1]}: ${e.message}`));
-}
+if (m) openPath(m[1]);
+if (import.meta.env.DEV) (window as unknown as {openFixture: typeof openPath}).openFixture = openPath;
