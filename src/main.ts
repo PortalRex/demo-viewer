@@ -352,6 +352,24 @@ $('fit').onclick = () => {
 	pathView.fit();
 	render();
 };
+// the path in the 3D view, remembered per browser
+let pathShown = true;
+try {
+	pathShown = localStorage.getItem('pathLine') !== 'off';
+} catch {}
+const showPath = () => {
+	$('path-line').classList.toggle('on', pathShown);
+	view3d.setPathShown(pathShown);
+};
+showPath();
+$('path-line').onclick = () => {
+	pathShown = !pathShown;
+	try {
+		localStorage.setItem('pathLine', pathShown ? 'on' : 'off');
+	} catch {}
+	showPath();
+	render();
+};
 $('follow').onclick = () => {
 	pathView.follow = !pathView.follow;
 	render();
@@ -372,6 +390,7 @@ $('view-mode').onclick = e => {
 	if (!is3d) $('view-as').hidden = true;
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
+	$('path-line').hidden = !is3d;
 	if (is3d) load3dMap();
 	else pathView.setMode(viewMode as 'top' | 'side');
 	render();

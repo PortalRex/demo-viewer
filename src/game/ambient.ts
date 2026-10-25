@@ -78,7 +78,8 @@ export class AmbientLighting {
 	// distance) and the nearby world lights that reach it
 	// (`visible`: whether a light can reach the point, as the engine's light
 	// cache traces it; all lights count without it)
-	at(p: number[], visible?: (from: number[], to: [number, number, number]) => boolean): ModelLight {
+	// (`style`: how bright each switchable light style is now, 0 = off)
+	at(p: number[], visible?: (from: number[], to: [number, number, number]) => boolean, style?: (s: number) => number): ModelLight {
 		// a leaf without samples (or a point just inside a wall): the
 		// nearest point around it that has some
 		let cube = this.cubeAt(p);
@@ -89,7 +90,7 @@ export class AmbientLighting {
 			}
 		}
 		const out = cube ?? new Array(18).fill(0);
-		return {cube: out, lights: this.lightsAt(p, out, visible)};
+		return {cube: out, lights: this.lightsAt(p, out, visible, style)};
 	}
 
 	private cubeAt(p: number[]): number[] | null {
@@ -132,14 +133,15 @@ export class AmbientLighting {
 	// The direct lights not already in the cubes that reach the point: the
 	// strongest two as local lights, the rest added into the cube by
 	// direction (as the light cache's AddWorldLightToAmbientCube)
-	private lightsAt(p: number[], cube?: number[], visible?: (from: number[], to: [number, number, number]) => boolean): ModelLight['lights'] {
+	private lightsAt(p: number[], cube?: number[], visible?: (from: number[], to: [number, number, number]) => boolean, style?: (s: number) => number): ModelLight['lights'] {
 		const lit: {pos: [number, number, number]; color: [number, number, number]; s: number}[] = [];
 		for (const l of this.lights) {
 			if (l.inAmbient || (l.type !== 1 && l.type !== 2)) continue;
 			const d = [l.origin[0] - p[0], l.origin[1] - p[1], l.origin[2] - p[2]];
 			const dist = Math.hypot(d[0], d[1], d[2]);
 			if (l.radius > 0 && dist > l.radius) continue;
-			let k = 1 / Math.max(1e-3, l.attn[0] + l.attn[1] * dist + l.attn[2] * dist * dist);
+			let k = (l.style && style ? style(l.style) : 1) / Math.max(1e-3, l.attn[0] + l.attn[1] * dist + l.attn[2] * dist * dist);
+			if (k <= 0) continue;
 			if (l.type === 2) {
 				const dot = -(d[0] * l.normal[0] + d[1] * l.normal[1] + d[2] * l.normal[2]) / Math.max(dist, 1e-3);
 				if (dot <= l.stopdot2) continue;

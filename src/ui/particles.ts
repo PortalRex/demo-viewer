@@ -146,6 +146,10 @@ export class ParticleInstance {
 	particles: Particle[] = [];
 	emitting = true;
 	cps: ControlPoints;
+	// the control points the caller keeps setting (live effects): put back
+	// before each step, as the game sets them each frame before operators
+	// move any; others stay where operators leave them
+	private given: ControlPoints | null = null;
 	// moves control point 0 over time (a blast in flight); called each step
 	cpAt: ((t: number) => THREE.Matrix4) | null = null;
 	private rand: () => number;
@@ -217,8 +221,15 @@ export class ParticleInstance {
 	// new control points (ends that move: a beam to a held object), for its
 	// children too
 	setControlPoints(cps: ControlPoints) {
-		this.cps = cps;
-		for (const c of this.children) c.inst.setControlPoints(cps);
+		this.given = cps;
+		this.putBack(cps);
+	}
+
+	// the caller's points back over what operators moved, here and in the
+	// children (which take them from their parent, not each step themselves)
+	private putBack(cps: ControlPoints) {
+		this.cps = new Map([...this.cps, ...cps]);
+		for (const c of this.children) c.inst.putBack(cps);
 	}
 
 	stopEmitting() {
@@ -248,6 +259,15 @@ export class ParticleInstance {
 		return lo + (hi - lo) * Math.pow(this.rand(), exp);
 	}
 
+	// a control point an operator moves: the engine's SetControlPoint passes
+	// it on to the child systems too (portal edges aim their children's
+	// ribbons by points the parent places)
+	private changeCp(n: number, change: (m: THREE.Matrix4) => THREE.Matrix4) {
+		this.cps = new Map(this.cps);
+		this.cps.set(n, change(this.cp(n)));
+		for (const c of this.children) c.inst.changeCp(n, change);
+	}
+
 	// "set control point positions": up to four points placed relative to another
 	private placeControlPoints(dt: number) {
 		for (const o of this.def.operators) {
@@ -260,22 +280,23 @@ export class ParticleInstance {
 					const idx = num(o, `${n} Control Point Number`, i + 1);
 					if (idx === 0) return;
 					const loc = vec(o, `${n} Control Point Location`, defaults[i]);
-					const m = world ? new THREE.Matrix4().makeTranslation(loc[0], loc[1], loc[2]) : from.clone().multiply(new THREE.Matrix4().makeTranslation(loc[0], loc[1], loc[2]));
-					this.cps = new Map(this.cps);
-					this.cps.set(idx, m);
+					const p = new THREE.Vector3(loc[0], loc[1], loc[2]);
+					if (!world) p.applyMatrix4(from);
+					// (just the position: the point keeps its turn)
+					this.changeCp(idx, m => m.clone().setPosition(p));
 				});
 			} else if (o.fn === 'set control point rotation' && dt > 0) {
 				const idx = num(o, 'Control Point', 0);
 				if (idx === 0) continue;
 				const axis = vec(o, 'Rotation Axis', [0, 0, 1]);
 				const rot = new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(axis[0], axis[1], axis[2]).normalize(), num(o, 'Rotation Rate', 180) * Math.PI / 180 * dt);
-				this.cps = new Map(this.cps);
-				this.cps.set(idx, this.cp(idx).clone().multiply(rot));
+				this.changeCp(idx, m => m.clone().multiply(rot));
 			}
 		}
 	}
 
 	private step(dt: number) {
+		if (this.given) this.putBack(this.given);
 		const t0 = this.time;
 		this.time += dt;
 		const t = this.time;
@@ -840,9 +861,8 @@ export class ParticleRenderer {
 	// A rope through the particles in spawn order, smoothed (Catmull-Rom),
 	// facing the camera (or, for $orientation 3 materials, widened across
 	// the particles' normals: those that "remap direction to cp to vector"
-	// points at a control point, so the rope stands edge-on to it), as wide
-	// as each particle's radius; the texture runs along it by distance and
-	// scrolls
+	// points at a control point, so the rope faces it), its whole width each
+	// particle's radius; the texture runs along it by distance and scrolls
 	private rope(b: {pos: number[]; uv: number[]; col: number[]}, inst: ParticleInstance, r: ParticleOperator, camPos: THREE.Vector3,
 		quad: (b: {pos: number[]; uv: number[]; col: number[]}, c: THREE.Vector3[], uv: number[][], col: number[][]) => void, orientation = 0) {
 		const aim = orientation === 3 ? inst.def.operators.find(o => o.fn === 'remap direction to cp to vector') : undefined;
@@ -862,11 +882,13 @@ export class ParticleRenderer {
 					0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
 					0.5 * (2 * p1.z + (-p0.z + p2.z) * t + (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 + (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3));
 				const a = ps[i], z = ps[i + 1];
-				pts.push({p, w: a.drawRadius + (z.drawRadius - a.drawRadius) * t, c: [0, 1, 2].map(k => a.color[k] + (z.color[k] - a.color[k]) * t).concat(a.drawAlpha + (z.drawAlpha - a.drawAlpha) * t)});
+				// (a particle's radius is the rope's whole width: the spline
+				// shader offsets each side by radius * (v - 0.5))
+				pts.push({p, w: (a.drawRadius + (z.drawRadius - a.drawRadius) * t) / 2, c: [0, 1, 2].map(k => a.color[k] + (z.color[k] - a.color[k]) * t).concat(a.drawAlpha + (z.drawAlpha - a.drawAlpha) * t)});
 			}
 		}
 		const last = ps[ps.length - 1];
-		pts.push({p: last.pos.clone(), w: last.drawRadius, c: [...last.color, last.drawAlpha]});
+		pts.push({p: last.pos.clone(), w: last.drawRadius / 2, c: [...last.color, last.drawAlpha]});
 		let dist = 0;
 		for (let i = 0; i + 1 < pts.length; i++) {
 			const a = pts[i], z = pts[i + 1];

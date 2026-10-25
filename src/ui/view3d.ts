@@ -33,8 +33,8 @@ export type CameraMode = 'eyes' | 'orbit' | 'free';
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
-// viewmodel_fov 50 (horizontal, at 4:3), as a vertical angle
-const VIEWMODEL_FOV = 2 * Math.atan(Math.tan(25 * Math.PI / 180) * 3 / 4) * 180 / Math.PI;
+// viewmodel_fov 54 (Portal 2's default, read from client.dll; horizontal at 4:3), as a vertical angle
+const VIEWMODEL_FOV = 2 * Math.atan(Math.tan(27 * Math.PI / 180) * 3 / 4) * 180 / Math.PI;
 
 // entity classes that aren't worth a box
 const HIDDEN_CLASSES = new Set([
@@ -443,6 +443,7 @@ export class View3D {
 	private mapGroup = new THREE.Group();
 	private entityGroup = new THREE.Group();
 	private pathLine: THREE.LineSegments | null = null;
+	private pathShown = true;
 	private player: THREE.Mesh;
 	private bsp: BspMap | null = null;
 	private entities: EntityTimeline | null = null;
@@ -471,6 +472,9 @@ export class View3D {
 	private lightTex: THREE.DataTexture | null = null;
 	private bumpTex: THREE.DataTexture[] = [];  // the bump directions' lightmaps
 	private styleValues = new Map<number, number>();  // what the lightmap texture was composed with
+	// bumped when a style changes, for models to be re-lit
+	private styleGen = 0;
+	private styleNow = (style: number) => this.styleValues.get(style) ?? 1;
 	// fog (colour 0..255, gamma) and auto exposure: the map's defaults until
 	// the player's controllers say otherwise
 	private fogBase: FogSettings | null = null;
@@ -488,6 +492,8 @@ export class View3D {
 	private particleRenderer: ParticleRenderer | null = null;
 	private particleRuns = new Map<string, {start: number; inst: ParticleInstance}>();
 	private particlesShown: ParticleInstance[] = [];
+	// portal edge effects, by portal (not drawn in the view through it)
+	private edgeParticles = new Map<ParticleInstance, number>();
 	private vmParticlesShown: ParticleInstance[] = [];  // first-person effects, drawn with the view model
 	private vmParticleRenderer: ParticleRenderer | null = null;
 	// first-person view model (the portal gun), drawn over the world in
@@ -740,6 +746,7 @@ export class View3D {
 		bumpLightUniforms.bumpLight1.value = this.bumpTex[1] ?? null;
 		bumpLightUniforms.bumpLight2.value = this.bumpTex[2] ?? null;
 		this.styleValues.clear();
+		this.styleGen++;
 		this.tracksByIndex.clear();
 		this.library = new MaterialLibrary(files, materials, lightTex);
 		this.library.setBackFaces(this.mode !== 'eyes');
@@ -935,7 +942,7 @@ export class View3D {
 				if (part.raw.boundingBox) box.union(part.raw.boundingBox);
 			}
 			const centre = box.isEmpty() ? new THREE.Vector3(...k.origin) : box.getCenter(new THREE.Vector3()).applyMatrix4(world);
-			const light = amb.at([centre.x, centre.y, centre.z], this.lightReaches);
+			const light = amb.at([centre.x, centre.y, centre.z], this.lightReaches, this.styleNow);
 			const normalMat = new THREE.Matrix3().getNormalMatrix(world);
 			const p = new THREE.Vector3(), n = new THREE.Vector3(), l = new THREE.Vector3();
 			const k2 = AMBIENT_SCALE / LIGHTMAP_EXPOSURE;
@@ -1210,6 +1217,12 @@ export class View3D {
 		return this.followed ?? this.entities?.player;
 	}
 
+	// the run's path drawn through the map (on by default)
+	setPathShown(on: boolean) {
+		this.pathShown = on;
+		if (this.pathLine) this.pathLine.visible = on;
+	}
+
 	setSegment(track: SegmentTrack, entities: EntityTimeline | null) {
 		this.entities = entities;
 		this.followed = null;
@@ -1242,6 +1255,7 @@ export class View3D {
 		const g = new THREE.BufferGeometry();
 		g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
 		this.pathLine = new THREE.LineSegments(g, new THREE.LineBasicMaterial({color: 0x47c17b, transparent: true, opacity: 0.7}));
+		this.pathLine.visible = this.pathShown;
 		this.scene.add(this.pathLine);
 		this.lastTarget = null;
 	}
@@ -1524,6 +1538,7 @@ export class View3D {
 		const dither = ditherUniforms.ditherOn.value;
 		ditherUniforms.ditherOn.value = 0;
 		const seen = new Set<THREE.Object3D>();
+		let redrawn = false;
 		// (only portals the camera can see get their view drawn: each is
 		// another whole scene)
 		this.camera.updateMatrixWorld();
@@ -1585,6 +1600,13 @@ export class View3D {
 			const linkedSurface = linked.obj.userData.portalSurface as THREE.Mesh;
 			surface.visible = linkedSurface.visible = false;
 			this.sky.position.setFromMatrixPosition(cam.matrixWorld);
+			// (the exit portal's own edge isn't in its view: it would wrap the
+			// camera, which sits in its plane)
+			const shown = this.particlesShown.filter(i => this.edgeParticles.get(i) !== p.link);
+			if (shown.length !== this.particlesShown.length) {
+				this.particleRenderer?.draw(shown, cam);
+				redrawn = true;
+			}
 			r.setRenderTarget(rt);
 			r.render(this.scene, cam);
 			r.setRenderTarget(frameTarget);
@@ -1596,6 +1618,7 @@ export class View3D {
 			material.uniforms.resolution.value.copy(size);
 		}
 		ditherUniforms.ditherOn.value = dither;
+		if (redrawn) this.particleRenderer?.draw(this.particlesShown, this.camera);
 		// targets of portals that are gone
 		for (const [obj, rt] of this.portalTargets) {
 			if (!seen.has(obj)) {
@@ -1686,6 +1709,7 @@ export class View3D {
 	private updateParticles(tick: number) {
 		const ents = this.entities, lib = this.particleLib;
 		this.particlesShown = [];
+		this.edgeParticles.clear();
 		this.vmParticlesShown = [];
 		if (!ents || !lib) return;
 		const LINGER = 5 / this.interval;
@@ -1732,6 +1756,7 @@ export class View3D {
 				}
 			}
 			(opts.fp ? this.vmParticlesShown : this.particlesShown).push(...r.inst.all);
+			if (key.startsWith('edge:')) for (const i of r.inst.all) this.edgeParticles.set(i, Number(key.split(':')[1]));
 		};
 
 		for (const t of ents.tracks) {
@@ -1804,7 +1829,9 @@ export class View3D {
 					const ex = new THREE.Vector3(), ey = new THREE.Vector3(), ez = new THREE.Vector3();
 					m.extractBasis(ex, ey, ez);
 					const cp0 = new THREE.Matrix4().makeBasis(ey, ez, ex).setPosition(pkey.origin[0], pkey.origin[1], pkey.origin[2]);
-					return new Map([[0, cp0], [1, cp0.clone()], [7, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]);
+					// (not 1: the effect keeps it 25 out from the portal, turning,
+					// and points its ribbons by it)
+					return new Map([[0, cp0], [7, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]);
 				});
 			}
 		}
@@ -1835,11 +1862,12 @@ export class View3D {
 				const cps: ControlPoints = new Map(pts.map((m, n) => [n, m!]));
 				const pk = this.entityPose(p, tick);
 				cps.set(4, new THREE.Matrix4().setPosition(pk.origin));
-				if (held) cps.set(5, new THREE.Matrix4().setPosition(new THREE.Vector3().setFromMatrixPosition(held.matrixWorld)));
+				// (on this side of a portal it's held through)
+				if (held) cps.set(5, new THREE.Matrix4().setPosition(held.userData.heldApparent ?? new THREE.Vector3().setFromMatrixPosition(held.matrixWorld)));
 				return cps;
 			// (first person: the client shrinks these arcs (cl_portalgun_beam_size);
 			// the scale here is matched to its frames, not taken from its code)
-			}, {fp, live: true, size: fp ? 0.2 : 1});
+			}, {fp, live: true, size: fp ? 0.4 : 1});
 		}
 
 		// dispatched effects
@@ -2112,10 +2140,11 @@ export class View3D {
 		};
 		const p = new THREE.Vector3();
 		const light = (o: THREE.Object3D, at: THREE.Vector3) => {
-			const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)}`;
+			// (again when a switchable light changes)
+			const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)},${this.styleGen}`;
 			if (o.userData.lightingKey === key) return;
 			o.userData.lightingKey = key;
-			o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches);
+			o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches, this.styleNow);
 		};
 		const apply = (o: THREE.Object3D) => {
 			hookMeshes(o);
@@ -2196,13 +2225,34 @@ export class View3D {
 				new THREE.Vector3(hk.origin[0], hk.origin[1], hk.origin[2] + (hk.eyeZ ?? DEFAULT_EYE)),
 				new THREE.Quaternion().setFromEuler(toEuler([hk.angles[0], hk.angles[1], 0])), new THREE.Vector3(1, 1, 1));
 			const objThen = new THREE.Matrix4().compose(new THREE.Vector3(...ok.origin), new THREE.Quaternion().setFromEuler(toEuler(ok.angles)), new THREE.Vector3(1, 1, 1));
-			const local = holderThen.invert().multiply(objThen);
-			const offset = new THREE.Vector3().setFromMatrixPosition(local);
+			let local = holderThen.clone().invert().multiply(objThen);
+			let offset = new THREE.Vector3().setFromMatrixPosition(local);
+			// held through a portal: the object stays on the far side (seen
+			// through the portal), where the holder seen through that portal
+			// pair has it within reach
+			let through: THREE.Matrix4 | null = null;
+			if (offset.length() > HOLD_MAX) {
+				for (const pp of this.portals.values()) {
+					const linked = this.portals.get(pp.link);
+					if (!linked) continue;
+					const m = this.portalTransform(pp.obj, linked.obj);
+					const l = m.clone().multiply(holderThen).invert().multiply(objThen);
+					const off = new THREE.Vector3().setFromMatrixPosition(l);
+					if (off.length() <= HOLD_MAX) {
+						local = l;
+						offset = off;
+						through = m;
+						break;
+					}
+				}
+			}
 			if (offset.length() <= HOLD_MAX) o.userData.heldOffset = offset.clone();
 			else local.setPosition(o.userData.heldOffset ?? HOLD_OFFSET);
-			const now = this.eyeMatrix(p, tick, this.mode === 'eyes' && p === this.followTrack).multiply(local);
+			const apparent = this.eyeMatrix(p, tick, this.mode === 'eyes' && p === this.followTrack).multiply(local);
+			// (where the holder sees it, for the gun's arcs)
+			o.userData.heldApparent = new THREE.Vector3().setFromMatrixPosition(apparent);
 			o.matrixAutoUpdate = false;
-			o.matrix.copy(now);
+			o.matrix.copy(through ? through.multiply(apparent) : apparent);
 			o.matrixWorldNeedsUpdate = true;
 		}
 	}
@@ -2434,6 +2484,7 @@ export class View3D {
 		}
 		if (!changed.size) return;
 		for (const st of changed) this.styleValues.set(st, value(st));
+		this.styleGen++;
 		const half = tex.image.data as unknown as Uint16Array;
 		for (const b of composeLightmap(lm, st => (st ? this.styleValues.get(st) ?? 1 : value(0)), changed)) {
 			for (let y = 0; y < b.h; y++) {
