@@ -20,9 +20,9 @@ OUT = os.path.join(FIXTURES, "shots", "ref")
 
 # demo file (in fixtures) -> ticks to capture
 SHOTS = [
-    ("cm_duallasers.dem", [200, 300]),
-    ("cm_triplelaser.dem", [300, 600]),
-    ("cm_bombflings.dem", [300, 600]),
+    # (demofixup'd: the original was recorded before build 8873 and fails
+    # on DT_PointSurvey in today's game)
+    ("cm_laserovergoo_fixed.dem", [300, 500, 800]),
 ]
 
 

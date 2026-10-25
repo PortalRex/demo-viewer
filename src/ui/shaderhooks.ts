@@ -116,7 +116,7 @@ export interface ModelLighting {
 	lights: {pos: number[]; color: number[]}[];
 }
 
-export const AMBIENT_SCALE = 2;  // the lightmap scale (see view3d)
+export const AMBIENT_SCALE = 1.5;  // the lightmap scale (see view3d)
 
 const AMBIENT_FRAGMENT_HEAD = `
 uniform vec3 ambCube[6];

@@ -64,10 +64,10 @@ function geometry(m: MeshData) {
 
 // How bright the baked lighting is drawn. three's basic material divides
 // light maps by pi.
-// The stored linear light times 2 (matched against frames the game renders,
-// in a map whose tonemap range pins the exposure); the frame is then scaled
-// by the auto exposure and clamped, with no filmic curve.
-const LIGHTMAP_EXPOSURE = 2;
+// The stored linear light times 1.5 (matched against frames the game
+// renders, in a map whose tonemap range pins the exposure); the frame is then
+// scaled by the auto exposure and clamped, with no filmic curve.
+const LIGHTMAP_EXPOSURE = 1.5;
 
 // a static prop's stored vertex light (a byte) as linear light, in the
 // lightmaps' units
@@ -1645,8 +1645,10 @@ export class View3D {
 				lum.sort((a, b) => a - b);
 				const at = (p: number) => Math.max(1e-4, lum[Math.floor(lum.length * p)]);
 				// (the engine's histogram reads the sRGB-encoded frame: 0.6 and
-				// 0.03 there are 0.319 and 0.0023 linear)
-				const target = Math.max(0.319 / at(0.98), 0.0023 / at(0.5));
+				// 0.03 there are 0.319 and 0.0023 linear; and its coarse bins
+				// settle about 0.8x lower than this exact percentile, measured
+				// against its renders)
+				const target = 0.8 * Math.max(0.319 / at(0.98), 0.0023 / at(0.5));
 				this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
 			}).catch(() => {}).finally(() => { this.meterPending = false; });
 		}
