@@ -1111,10 +1111,12 @@ export class View3D {
 			m.decompose(cam.position, cam.quaternion, cam.scale);
 			cam.updateMatrixWorld(true);
 
-			// clip away what's behind the exit portal's wall
+			// clip away what's behind the exit portal: at its plane, which sits
+			// 0.03 units off its wall (so the wall goes too, even where it's
+			// drawn two-sided: brush entities, models, the back faces option)
 			const normal = new THREE.Vector3(1, 0, 0).transformDirection(linked.obj.matrixWorld);
 			const at = new THREE.Vector3().setFromMatrixPosition(linked.obj.matrixWorld);
-			r.clippingPlanes = [new THREE.Plane(normal, -normal.dot(at) + 0.5)];
+			r.clippingPlanes = [new THREE.Plane(normal, -normal.dot(at))];
 			const linkedSurface = linked.obj.userData.portalSurface as THREE.Mesh;
 			surface.visible = linkedSurface.visible = false;
 			this.sky.position.setFromMatrixPosition(cam.matrixWorld);
