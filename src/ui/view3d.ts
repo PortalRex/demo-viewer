@@ -928,10 +928,6 @@ export class View3D {
 					group.userData.staticBones = boneMatrices(asset.skeleton, pose);
 				}
 			}
-			// lit afresh now the placeholder box is gone (see lightModels)
-			delete group.userData.ambAllHooked;
-			delete group.userData.ambSomeHooked;
-			delete group.userData.lightCentre;
 			this.onLoaded();
 		});
 		return group;
@@ -1391,6 +1387,14 @@ export class View3D {
 		const amb = this.bsp?.ambient;
 		if (!amb) return;
 		const hookMeshes = (o: THREE.Object3D) => {
+			// (looked at again whenever its parts change: a model replacing its
+			// placeholder box)
+			const parts = o.children.map(c => c.id).join(',');
+			if (o.userData.ambParts !== parts) {
+				o.userData.ambParts = parts;
+				delete o.userData.ambAllHooked;
+				delete o.userData.lightCentre;
+			}
 			if (o.userData.ambAllHooked) return;
 			let pending = false, hooked = 0, meshes = 0;
 			o.traverse(c => {
