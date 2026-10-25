@@ -33,7 +33,7 @@ function cstr(b: Uint8Array, at: number) {
 	return String.fromCharCode(...b.subarray(at, end));
 }
 
-export async function loadModel(files: GameFiles, name: string, color: [number, number, number], skin = 0): Promise<StudioModel | null> {
+export async function loadModel(files: GameFiles, name: string, color: [number, number, number], skin = 0, body = 0): Promise<StudioModel | null> {
 	const base = name.toLowerCase().replace(/\\/g, '/').replace(/\.mdl$/, '');
 	const [mdl, vvd, vtx] = await Promise.all([files.read(`${base}.mdl`), files.read(`${base}.vvd`), files.read(`${base}.dx90.vtx`)]);
 	if (!mdl || !vvd || !vtx) return null;
@@ -87,21 +87,28 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 	const stripGroupSize = guessStripGroupSize(x, vtxBodyPartOffset);
 
 	// vertex lighting files number meshes across every model of every body
-	// part, so count them all even though only the default model is drawn
+	// part, so count them all even though only the chosen model is drawn
 	let meshNumber = 0;
 	for (let b = 0; b < Math.min(bodyParts, vtxBodyParts); b++) {
 		const bp = bodyPartOffset + b * 16;
 		const models = m.getInt32(bp + 4, true);
 		if (!models) continue;
-		const firstMesh = meshNumber;
-		for (let k = 0; k < models; k++) meshNumber += m.getInt32(bp + m.getInt32(bp + 12, true) + k * 148 + 72, true);
-		const model = bp + m.getInt32(bp + 12, true);  // the first (default) model
+		// the body part's model in the body value (m_nBody): its digit in
+		// the part's base
+		const choice = Math.floor(body / Math.max(1, m.getInt32(bp + 8, true))) % models;
+		let firstMesh = meshNumber;
+		for (let k = 0; k < models; k++) {
+			const n = m.getInt32(bp + m.getInt32(bp + 12, true) + k * 148 + 72, true);
+			if (k < choice) firstMesh += n;
+			meshNumber += n;
+		}
+		const model = bp + m.getInt32(bp + 12, true) + choice * 148;
 		const meshes = m.getInt32(model + 72, true);
 		const meshOffset = model + m.getInt32(model + 76, true);
 		const modelVertexBase = m.getInt32(model + 84, true) / VVD_VERTEX;
 
 		const vbp = vtxBodyPartOffset + b * 8;
-		const vModel = vbp + x.getInt32(vbp + 4, true);
+		const vModel = vbp + x.getInt32(vbp + 4, true) + choice * 8;
 		const vLod = vModel + x.getInt32(vModel + 4, true);  // LOD 0
 		const vMeshes = x.getInt32(vLod, true);
 		const vMeshOffset = vLod + x.getInt32(vLod + 4, true);

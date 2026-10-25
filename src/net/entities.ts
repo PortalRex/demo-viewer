@@ -55,8 +55,10 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
 	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
 	// whose view model it is (co-op recordings have one per player)
-	CPredictedViewModel: ['m_hOwner', 'm_nViewModelIndex'],
-	CBaseViewModel: ['m_hOwner', 'm_nViewModelIndex'],
+	CPredictedViewModel: ['m_hOwner', 'm_nViewModelIndex', 'm_nBody'],
+	CBaseViewModel: ['m_hOwner', 'm_nViewModelIndex', 'm_nBody'],
+	// body groups (PotatOS)
+	CWeaponPortalgun: ['m_nBody'],
 	// a doorway's fade brush, drawn by distance (see View3D)
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax'],

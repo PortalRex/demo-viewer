@@ -550,14 +550,14 @@ export class View3D {
 	// a model, loaded once per map and skin (maps can carry their own models):
 	// its groups with materials, skeleton, and geometry posed as the game
 	// draws it unanimated (sequence 0)
-	private model(name: string, skin = 0): Promise<ModelAsset | null> {
-		const key = `${name.toLowerCase()}#${skin}`;
+	private model(name: string, skin = 0, body = 0): Promise<ModelAsset | null> {
+		const key = `${name.toLowerCase()}#${skin}#${body}`;
 		let p = this.models.get(key);
 		if (!p) {
 			const files = this.files, library = this.library;
 			const color: [number, number, number] = /cube|box/.test(key) ? [0.66, 0.73, 0.8] : [0.52, 0.52, 0.5];
 			p = files && library
-				? loadModel(files, name, color, skin).then(async (m: StudioModel | null) => {
+				? loadModel(files, name, color, skin, body).then(async (m: StudioModel | null) => {
 					if (!m) return null;
 					const skeleton = await loadSkeleton(files, m.bytes).catch(() => null);
 					const rest = skeleton ? referencePose(skeleton) : null;
@@ -857,23 +857,25 @@ export class View3D {
 		this.vmShown = null;
 	}
 
-	private objectFor(t: EntityTrack, skin = 0): THREE.Object3D | null {
+	private objectFor(t: EntityTrack, skin = 0, body = 0): THREE.Object3D | null {
 		let o = this.objects.get(t);
 		if (o !== undefined) {
-			if ((o.userData.skin ?? 0) === skin || !t.model.endsWith('.mdl')) return o;
-			// a new skin (a cube lighting up on a button): rebuild
+			if (((o.userData.skin ?? 0) === skin && (o.userData.body ?? 0) === body) || !t.model.endsWith('.mdl')) return o;
+			// a new skin (a cube lighting up on a button) or body groups
+			// (PotatOS on the gun): rebuild
 			this.entityGroup.remove(o);
 			this.objects.delete(t);
 		}
-		o = this.makeObject(t, skin) ?? new THREE.Group();
+		o = this.makeObject(t, skin, body) ?? new THREE.Group();
 		o.userData.skin = skin;
+		o.userData.body = body;
 		o.visible = false;
 		this.objects.set(t, o);
 		this.entityGroup.add(o);
 		return o;
 	}
 
-	private makeObject(t: EntityTrack, skin = 0): THREE.Object3D | null {
+	private makeObject(t: EntityTrack, skin = 0, body = 0): THREE.Object3D | null {
 		if (t.className === 'CPortal_Player') {
 			// the player's own model (Chell, ATLAS, P-body); a capsule until it loads
 			const group = new THREE.Group();
@@ -900,7 +902,7 @@ export class View3D {
 			// Bone-merged as the game does: the gun's weapon_bone takes the
 			// hand's weapon_bone transform, so the mesh is drawn unposed and
 			// brought into that bone's space with its bind (pose-to-bone) matrix
-			this.model('models/weapons/w_portalgun.mdl', skin).then(asset => {
+			this.model('models/weapons/w_portalgun.mdl', skin, body).then(asset => {
 				if (!asset) return;
 				const inner = new THREE.Group();
 				for (const part of asset.parts) inner.add(new THREE.Mesh(part.raw, part.material));
@@ -1443,12 +1445,20 @@ export class View3D {
 		const k = t && keyAt(t, tick);
 		if (!t || !k) return;
 		let g = this.vmObjects.get(t);
+		const body = Number(k.extra?.m_nBody ?? 0);
+		if (g && (g.userData.body ?? 0) !== body) {
+			// body groups changed (PotatOS on the gun): rebuild
+			this.vmScene.remove(g);
+			this.vmObjects.delete(t);
+			g = undefined;
+		}
 		if (!g) {
 			const group = new THREE.Group();
 			g = group;
+			group.userData.body = body;
 			this.vmObjects.set(t, group);
 			this.vmScene.add(group);
-			this.model(t.model, k.skin ?? 0).then(asset => {
+			this.model(t.model, k.skin ?? 0, body).then(asset => {
 				if (!asset?.skeleton) return;
 				const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material: p.material})));
 				group.add(anim.group);
@@ -1896,7 +1906,7 @@ export class View3D {
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
 				const show = !!k && (this.shows(t, k) || (held.has(t.index) && t.model.endsWith('.mdl')));
-				const o = show ? this.objectFor(t, k?.skin ?? 0) : this.objects.get(t);
+				const o = show ? this.objectFor(t, k?.skin ?? 0, Number(k?.extra?.m_nBody ?? 0)) : this.objects.get(t);
 				if (!o) continue;
 				o.visible = show;
 				// a doorway's fade brush: drawn by the camera's distance (a closed
