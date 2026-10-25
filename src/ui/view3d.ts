@@ -513,6 +513,17 @@ interface ModelAsset {
 	parts: {group: ModelGroup; raw: THREE.BufferGeometry; baked: THREE.BufferGeometry; material: THREE.Material; name: string}[];
 }
 
+// a model's parsed data, kept from map to map (the materials are the map's)
+type ModelData = Omit<ModelAsset, 'parts'> & {parts: Omit<ModelAsset['parts'][number], 'material'>[]};
+// (maps a model can go unused for and stay loaded)
+const KEEP_MODEL_MAPS = 2;
+interface ModelEntry {
+	data: Promise<ModelData | null>;
+	fromMap: boolean;          // from the map's own files
+	lastUsed: number;          // map generation
+	loaded?: ModelData | null; // once settled
+}
+
 export class View3D {
 	readonly container: HTMLElement;
 	mode: CameraMode = 'eyes';
@@ -539,6 +550,8 @@ export class View3D {
 	private worldFog: THREE.Fog | null = null;
 	private files: GameFiles | null = null;
 	private models = new Map<string, Promise<ModelAsset | null>>();
+	private modelData = new Map<string, ModelEntry>();
+	private modelGeneration = 0;
 	private interval = 1 / 60;
 	// the recording player's track, and the view model bob clock (seconds of
 	// full-speed movement) at each recorded view
@@ -720,27 +733,62 @@ export class View3D {
 		const key = `${name.toLowerCase()}#${skin}#${body}`;
 		let p = this.models.get(key);
 		if (!p) {
-			const files = this.files, library = this.library;
-			const color: [number, number, number] = /cube|box/.test(key) ? [0.66, 0.73, 0.8] : [0.52, 0.52, 0.5];
-			p = files && library
-				? loadModel(files, name, color, skin, body).then(async (m: StudioModel | null) => {
-					if (!m) return null;
-					const skeleton = await loadSkeleton(files, m.bytes).catch(() => null);
-					const rest = skeleton ? referencePose(skeleton) : null;
-					const mats = skeleton && rest ? (samplePose(skeleton, 0, 0, rest), skinMatrices(skeleton, rest)) : null;
-					const parts = m.groups.map(g => {
-						const raw = geometry(g);
-						const posed = mats ? bakePose(g, mats) : null;
-						const baked = posed ? geometry({...g, positions: posed.positions, normals: posed.normals}) : raw;
-						raw.userData.shared = baked.userData.shared = true;  // (the model cache's: not freed with objects)
-						return {group: g, raw, baked, material: library.forModel(g.materialCandidates), name: `${name} ${g.materialCandidates[0]}`};
-					});
-					return {name, model: m, skeleton, parts};
-				}).catch(() => null)
+			const library = this.library;
+			const data = this.modelDataFor(key, name, skin, body);
+			p = data && library
+				? data.then(d => d && {...d, parts: d.parts.map(part => ({...part, material: library.forModel(part.group.materialCandidates)}))})
 				: Promise.resolve(null);
 			this.models.set(key, p);
 		}
 		return p;
+	}
+
+	// the parsed model (loaded once, kept across maps unless the map's own
+	// files supplied it)
+	private modelDataFor(key: string, name: string, skin: number, body: number): Promise<ModelData | null> | null {
+		const files = this.files;
+		if (!files) return null;
+		let entry = this.modelData.get(key);
+		if (!entry) {
+			const color: [number, number, number] = /cube|box/.test(key) ? [0.66, 0.73, 0.8] : [0.52, 0.52, 0.5];
+			const data = loadModel(files, name, color, skin, body).then(async (m: StudioModel | null): Promise<ModelData | null> => {
+				if (!m) return null;
+				const skeleton = await loadSkeleton(files, m.bytes).catch(() => null);
+				const rest = skeleton ? referencePose(skeleton) : null;
+				const mats = skeleton && rest ? (samplePose(skeleton, 0, 0, rest), skinMatrices(skeleton, rest)) : null;
+				const parts = m.groups.map(g => {
+					const raw = geometry(g);
+					const posed = mats ? bakePose(g, mats) : null;
+					const baked = posed ? geometry({...g, positions: posed.positions, normals: posed.normals}) : raw;
+					raw.userData.shared = baked.userData.shared = true;  // (the model cache's: not freed with objects)
+					return {group: g, raw, baked, name: `${name} ${g.materialCandidates[0]}`};
+				});
+				return {name, model: m, skeleton, parts};
+			}).catch(() => null);
+			const e: ModelEntry = {data, fromMap: !!files.mapPak?.has(name.toLowerCase()), lastUsed: this.modelGeneration};
+			data.then(d => (e.loaded = d));
+			entry = e;
+			this.modelData.set(key, entry);
+		}
+		entry.lastUsed = this.modelGeneration;
+		return entry.data;
+	}
+
+	// a new map: drop the models the last map's files supplied, those that
+	// didn't load (its files may have them) and those gone unused
+	private evictModels(all = false) {
+		this.modelGeneration++;
+		for (const [key, e] of this.modelData) {
+			if (e.loaded === undefined && !all) continue;  // (still loading)
+			if (!all && e.loaded && !e.fromMap && this.modelGeneration - e.lastUsed <= KEEP_MODEL_MAPS) continue;
+			const free = (d: ModelData | null) => d?.parts.forEach(part => {
+				part.raw.dispose();
+				if (part.baked !== part.raw) part.baked.dispose();
+			});
+			if (e.loaded !== undefined) free(e.loaded);
+			else e.data.then(free);
+			this.modelData.delete(key);
+		}
 	}
 
 	// the model posed for drawing as is (static props)
@@ -787,11 +835,8 @@ export class View3D {
 		}
 		this.effects?.dispose();
 		this.paint?.texture.dispose();
-		this.models.forEach(p => p.then(a => a?.parts.forEach(part => {
-			part.raw.dispose();
-			if (part.baked !== part.raw) part.baked.dispose();
-		})));
 		this.models.clear();
+		this.evictModels(!bsp);
 		this.readyModels.clear();
 		this.windowed = [];
 		this.library?.dispose();
