@@ -18,7 +18,7 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints} from './particles.ts';
-import {AMBIENT_SCALE, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
+import {AMBIENT_SCALE, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, setModelEnvCube, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
 import {TextureCache, compressedSupport} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -190,8 +190,22 @@ class MaterialLibrary {
 			mat.userData.textureless = true;
 			return;
 		}
-		this.textures.get(info.baseTexture).then(tex => {
+		// a lit model's reflection (the cube is per object, see lightModels;
+		// a mask in the bump map's alpha needs the bump map, which models don't draw)
+		const envMask = !mat.userData.vertexLit && mat.userData.ambientLit && info.envMap && info.envMask !== 'bump'
+			? (info.envMask === 'texture' && info.envMaskTexture ? this.textures.get(info.envMaskTexture, true) : Promise.resolve(null))
+			: null;
+		const glowMask = mat.userData.ambientLit && info.selfIllum && info.selfIllumMask ? this.textures.get(info.selfIllumMask, true) : Promise.resolve(null);
+		Promise.all([this.textures.get(info.baseTexture), envMask, glowMask]).then(([tex, maskMap, glow]) => {
 			if (!tex) return;
+			// (with neither a mask nor alpha in the base texture, the engine drops it)
+			if (mat.userData.ambientLit && info.selfIllum && (glow || tex.userData.hasAlpha)) mat.userData.selfIllum = {tint: info.selfIllumTint, mask: glow};
+			if (envMask) {
+				mat.userData.modelEnv = {
+					tint: info.envTint, contrast: info.envContrast, saturation: info.envSaturation, lightScale: info.envLightScale,
+					mask: info.envMask === 'texture' && !maskMap ? 'none' : info.envMask, maskMap, cube: info.envMap,
+				};
+			}
 			mat.map = tex;
 			// lit props keep their vertex colours: those are the baked light
 			if (!mat.userData.vertexLit) mat.vertexColors = false;
@@ -352,9 +366,10 @@ class MaterialLibrary {
 
 	private cubes = new Map<string, Promise<{texture: THREE.CubeTexture; scale: number} | null>>();
 
+
 	// a cubemap: the HDR version where there is one, else the plain one;
 	// both drawn as stored (linear)
-	private cube(path: string): Promise<{texture: THREE.CubeTexture; scale: number} | null> {
+	cube(path: string): Promise<{texture: THREE.CubeTexture; scale: number} | null> {
 		let p = this.cubes.get(path);
 		if (!p) {
 			p = (async () => {
@@ -2098,6 +2113,39 @@ export class View3D {
 		return {vertical: wave(CYCLE, 1), lateral: wave(CYCLE, 2)};
 	}
 
+	// Lit models with an $envmap reflect the map's cubemap nearest to them
+	// (env_cubemap: the engine picks it by the model's lighting point), set
+	// again when they move to another's
+	private reflectAt(o: THREE.Object3D, at: THREE.Vector3) {
+		const cubes = this.bsp?.cubemaps;
+		const mats: THREE.Material[] = [];
+		o.traverse(c => {
+			const m = (c as THREE.Mesh).material as THREE.Material | undefined;
+			if ((c as THREE.Mesh).isMesh && m?.userData.modelEnv && m.userData.envUniforms) mats.push(m);
+		});
+		if (!mats.length) return;
+		let near = '';
+		if (cubes?.length) {
+			let best = Infinity;
+			for (const c of cubes) {
+				const d = (c[0] - at.x) ** 2 + (c[1] - at.y) ** 2 + (c[2] - at.z) ** 2;
+				if (d < best) {
+					best = d;
+					near = `maps/${this.bsp!.name}/c${c[0]}_${c[1]}_${c[2]}`;
+				}
+			}
+		}
+		const named = (mats[0].userData.modelEnv as {cube: string}).cube;
+		const path = named.toLowerCase() === 'env_cubemap' ? near : named;
+		if (!path || o.userData.envPath === path) return;
+		o.userData.envPath = path;
+		this.library!.cube(path).then(c => {
+			if (o.userData.envPath !== path) return;
+			for (const m of mats) setModelEnvCube(m, c?.texture ?? null, c?.scale ?? 1);
+			this.loaded();
+		});
+	}
+
 	// Moving models' lighting: the ambient cube and local lights at each
 	// object's centre (recomputed when it moves), for the shader to use
 	private lightModels() {
@@ -2136,7 +2184,12 @@ export class View3D {
 			// done once its model has loaded and every part is hooked
 			// (or it has nothing lit this way: brush models, beams)
 			if (!pending && (hooked || o.userData.ambSomeHooked || meshes)) o.userData.ambAllHooked = true;
-			if (hooked) o.userData.ambSomeHooked = true;
+			if (hooked) {
+				o.userData.ambSomeHooked = true;
+				// (lit again: the new copies take its reflection)
+				delete o.userData.lightingKey;
+				delete o.userData.envPath;
+			}
 		};
 		const p = new THREE.Vector3();
 		const light = (o: THREE.Object3D, at: THREE.Vector3) => {
@@ -2145,6 +2198,7 @@ export class View3D {
 			if (o.userData.lightingKey === key) return;
 			o.userData.lightingKey = key;
 			o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches, this.styleNow);
+			this.reflectAt(o, at);
 		};
 		const apply = (o: THREE.Object3D) => {
 			hookMeshes(o);

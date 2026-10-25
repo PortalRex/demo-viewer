@@ -7,7 +7,7 @@ import {AmbientLighting} from './ambient.ts';
 
 const LUMP = {
 	ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7, LIGHTING: 8, EDGES: 12, SURFEDGES: 13,
-	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
+	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, CUBEMAPS: 42, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
 	LIGHTING_HDR: 53, FACES_HDR: 58,
 	NODES: 5, LEAFS: 10, WORLDLIGHTS: 15, LEAF_AMBIENT_INDEX_HDR: 51, LEAF_AMBIENT_INDEX: 52, WORLDLIGHTS_HDR: 54,
 	LEAF_AMBIENT_LIGHTING_HDR: 55, LEAF_AMBIENT_LIGHTING: 56,
@@ -141,6 +141,7 @@ export interface BspMap {
 	lightmap: Lightmap | null;
 	skyFaces: Float32Array;  // the world's sky faces, triangles: the skybox is seen only through them
 	ambient: AmbientLighting | null;  // lighting for moving models
+	cubemaps: [number, number, number][];  // where the map's built cubemaps were taken (materials/maps/<map>/c<x>_<y>_<z>)
 	entities: Record<string, string>[];
 	materials: Map<string, MaterialInfo>;
 	pak: Uint8Array | null;
@@ -613,9 +614,12 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 	const ambLight = ambLightHdr.byteLength ? ambLightHdr : await read(LUMP.LEAF_AMBIENT_LIGHTING);
 	const worldLights = lightsHdr.byteLength ? lightsHdr : await read(LUMP.WORLDLIGHTS);
 	const ambient = new AmbientLighting(planes, nodes, leaves, models, ambIndex, ambLight, worldLights);
+	const cubeLump = await read(LUMP.CUBEMAPS);
+	const cubemaps: [number, number, number][] = [];
+	for (let o = 0; o + 16 <= cubeLump.byteLength; o += 16) cubemaps.push([cubeLump.getInt32(o, true), cubeLump.getInt32(o + 4, true), cubeLump.getInt32(o + 8, true)]);
 
 	return {
-		name, models: meshes, staticProps, lightmap, skyFaces: new Float32Array(skyTris), ambient: ambient.available ? ambient : null, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
+		name, models: meshes, staticProps, lightmap, skyFaces: new Float32Array(skyTris), ambient: ambient.available ? ambient : null, cubemaps, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }

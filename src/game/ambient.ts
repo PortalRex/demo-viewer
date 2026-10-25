@@ -136,11 +136,19 @@ export class AmbientLighting {
 	private lightsAt(p: number[], cube?: number[], visible?: (from: number[], to: [number, number, number]) => boolean, style?: (s: number) => number): ModelLight['lights'] {
 		const lit: {pos: [number, number, number]; color: [number, number, number]; s: number}[] = [];
 		for (const l of this.lights) {
-			if (l.inAmbient || (l.type !== 1 && l.type !== 2)) continue;
+			// (point and spot lights, and texture lights bright enough that vrad
+			// left them out of the cubes: emit_surface, 1/r^2 off the face)
+			if (l.inAmbient || (l.type !== 0 && l.type !== 1 && l.type !== 2)) continue;
 			const d = [l.origin[0] - p[0], l.origin[1] - p[1], l.origin[2] - p[2]];
 			const dist = Math.hypot(d[0], d[1], d[2]);
 			if (l.radius > 0 && dist > l.radius) continue;
-			let k = (l.style && style ? style(l.style) : 1) / Math.max(1e-3, l.attn[0] + l.attn[1] * dist + l.attn[2] * dist * dist);
+			const on = l.style && style ? style(l.style) : 1;
+			let k: number;
+			if (l.type === 0) {
+				const facing = -(d[0] * l.normal[0] + d[1] * l.normal[1] + d[2] * l.normal[2]) / Math.max(dist, 1e-3);
+				if (facing <= 1e-4) continue;
+				k = on * facing / Math.max(1, dist * dist);
+			} else k = on / Math.max(1e-3, l.attn[0] + l.attn[1] * dist + l.attn[2] * dist * dist);
 			if (k <= 0) continue;
 			if (l.type === 2) {
 				const dot = -(d[0] * l.normal[0] + d[1] * l.normal[1] + d[2] * l.normal[2]) / Math.max(dist, 1e-3);

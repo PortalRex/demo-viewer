@@ -75,6 +75,9 @@ export interface MaterialInfo {
 	detailBlendFactor: number;
 	detailBlendMode: number; // how it combines (LightmappedGeneric's TCOMBINE_ modes)
 	envLightScale: number;   // $envmaplightscale: reflections darkened where the light is
+	selfIllum: boolean;      // $selfillum (VertexLitGeneric): unlit where the mask (or base alpha) says
+	selfIllumMask: string;
+	selfIllumTint: [number, number, number];
 }
 
 const MISSING: MaterialInfo = {
@@ -83,6 +86,7 @@ const MISSING: MaterialInfo = {
 	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envContrast: 0, envSaturation: 1,
 	refractTint: [1, 1, 1], refractTintTexture: '',
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
+	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -184,6 +188,10 @@ export class Materials {
 			detailBlendFactor: p.has('$detailblendfactor') ? Number(p.get('$detailblendfactor')) || 0 : 1,
 			detailBlendMode: Number(p.get('$detailblendmode') ?? 0) || 0,
 			envLightScale: Number(p.get('$envmaplightscale') ?? 0) || 0,
+			selfIllum: truthy(p.get('$selfillum')),
+			// (some name the mask with a .tga extension; the engine finds the .vtf)
+			selfIllumMask: (p.get('$selfillummask') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.(vtf|tga)$/, ''),
+			selfIllumTint: parseTint(p.get('$selfillumtint')) ?? [1, 1, 1],
 		};
 	}
 }
