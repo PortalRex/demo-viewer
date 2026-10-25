@@ -84,4 +84,31 @@ export class Vpk {
 		out.set(data, e.preload.length);
 		return out;
 	}
+
+	// part of a file (bytes [start, start + length), cut to its end)
+	async readRange(path: string, start: number, length: number): Promise<Uint8Array | null> {
+		const e = this.entries.get(path.toLowerCase());
+		if (!e) return null;
+		const total = e.preload.length + e.length;
+		start = Math.max(0, Math.min(start, total));
+		const end = Math.min(total, start + length);
+		const parts: Uint8Array[] = [];
+		if (start < e.preload.length) parts.push(e.preload.subarray(start, Math.min(end, e.preload.length)));
+		const from = Math.max(start, e.preload.length) - e.preload.length, to = end - e.preload.length;
+		if (to > from) {
+			const data = e.archive === 0x7fff
+				? await this.fs.read(this.dirPath, this.dataStart + e.offset + from, to - from)
+				: await this.fs.read(this.dirPath.replace(/_dir\.vpk$/, `_${String(e.archive).padStart(3, '0')}.vpk`), e.offset + from, to - from);
+			if (!data) return null;
+			parts.push(data);
+		}
+		if (parts.length === 1) return parts[0];
+		const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+		let o = 0;
+		for (const p of parts) {
+			out.set(p, o);
+			o += p.length;
+		}
+		return out;
+	}
 }

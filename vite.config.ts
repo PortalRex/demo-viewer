@@ -1,6 +1,6 @@
 import {defineConfig} from 'vite';
 import type {Plugin} from 'vite';
-import {createReadStream, mkdirSync, statSync, writeFileSync} from 'node:fs';
+import {createReadStream, mkdirSync, readdirSync, statSync, writeFileSync} from 'node:fs';
 import {join, normalize} from 'node:path';
 
 // Dev only: serves the local Portal 2 install at /__game/ (with Range
@@ -26,6 +26,26 @@ function devGameFiles(): Plugin {
 					writeFileSync(`fixtures/shots/${name}.${ext}`, Buffer.from(data, 'base64'));
 					res.end('ok');
 				});
+			});
+			// a game folder's loose asset files (so the viewer doesn't probe for each)
+			server.middlewares.use('/__game/__list', (req, res) => {
+				const dir = normalize(decodeURIComponent(/dir=([^&]*)/.exec(req.url ?? '')?.[1] ?? '')).replace(/^([/\\])+/, '');
+				if (!dir || dir.startsWith('..')) {
+					res.statusCode = 403;
+					return res.end();
+				}
+				const out: string[] = [];
+				for (const sub of ['materials', 'models', 'particles', 'scripts', 'maps']) {
+					try {
+						for (const e of readdirSync(join(P2_DIR, dir, sub), {recursive: true, withFileTypes: true})) {
+							if (e.isFile()) out.push(join(e.parentPath, e.name).slice(join(P2_DIR, dir).length + 1).replace(/\\/g, '/'));
+						}
+					} catch {
+						// no such folder
+					}
+				}
+				res.setHeader('Content-Type', 'application/json');
+				res.end(JSON.stringify(out));
 			});
 			server.middlewares.use('/__game/', (req, res) => {
 				const rel = normalize(decodeURIComponent((req.url ?? '/').split('?')[0])).replace(/^([/\\])+/, '');

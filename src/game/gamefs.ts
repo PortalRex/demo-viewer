@@ -7,7 +7,13 @@ export interface GameFS {
 	// a byte range of a file relative to the install folder, or null if missing
 	read(path: string, offset?: number, length?: number): Promise<Uint8Array | null>;
 	size(path: string): Promise<number | null>;
+	// the loose files under a game folder's asset folders (LOOSE_DIRS),
+	// lower-case and relative to it, when the source can list them
+	list?(dir: string): Promise<Set<string> | null>;
 }
+
+// the folders loose asset files are looked for in (anything else is probed)
+export const LOOSE_DIRS = ['materials', 'models', 'particles', 'scripts', 'maps'];
 
 export class DirectoryFS implements GameFS {
 	readonly root: FileSystemDirectoryHandle;
@@ -39,6 +45,27 @@ export class DirectoryFS implements GameFS {
 	async size(path: string) {
 		return (await this.file(path))?.size ?? null;
 	}
+
+	async list(dir: string) {
+		const out = new Set<string>();
+		const walk = async (h: FileSystemDirectoryHandle, prefix: string) => {
+			for await (const [name, e] of (h as unknown as {entries(): AsyncIterable<[string, FileSystemHandle]>}).entries()) {
+				const p = prefix + name.toLowerCase();
+				if (e.kind === 'directory') await walk(e as FileSystemDirectoryHandle, p + '/');
+				else out.add(p);
+			}
+		};
+		try {
+			const d = await this.root.getDirectoryHandle(dir);
+			for (const sub of LOOSE_DIRS) {
+				const s = await d.getDirectoryHandle(sub).catch(() => null);
+				if (s) await walk(s, sub + '/');
+			}
+		} catch {
+			return null;
+		}
+		return out;
+	}
 }
 
 export class HttpFS implements GameFS {
@@ -59,6 +86,12 @@ export class HttpFS implements GameFS {
 	async size(path: string) {
 		const r = await fetch(this.base + path.split('/').map(encodeURIComponent).join('/'), {method: 'HEAD'});
 		return r.ok && r.status !== 204 ? Number(r.headers.get('Content-Length')) : null;
+	}
+
+	async list(dir: string) {
+		const r = await fetch(`${this.base}__list?dir=${encodeURIComponent(dir)}`);
+		if (!r.ok || r.status === 204) return null;
+		return new Set((await r.json() as string[]).map(p => p.toLowerCase()));
 	}
 }
 

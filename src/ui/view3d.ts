@@ -928,6 +928,10 @@ export class View3D {
 					group.userData.staticBones = boneMatrices(asset.skeleton, pose);
 				}
 			}
+			// lit afresh now the placeholder box is gone (see lightModels)
+			delete group.userData.ambAllHooked;
+			delete group.userData.ambSomeHooked;
+			delete group.userData.lightCentre;
 			this.onLoaded();
 		});
 		return group;
@@ -1388,9 +1392,10 @@ export class View3D {
 		if (!amb) return;
 		const hookMeshes = (o: THREE.Object3D) => {
 			if (o.userData.ambAllHooked) return;
-			let pending = false, hooked = 0;
+			let pending = false, hooked = 0, meshes = 0;
 			o.traverse(c => {
 				const mesh = c as THREE.Mesh;
+				if (mesh.isMesh) meshes++;
 				if (!mesh.isMesh || mesh.userData.ambHooked) return;
 				const shared = mesh.material as THREE.Material;
 				if (!shared.userData?.ambientLit) return;
@@ -1405,26 +1410,37 @@ export class View3D {
 				hooked++;
 			});
 			// done once its model has loaded and every part is hooked
-			if (!pending && (hooked || o.userData.ambSomeHooked)) o.userData.ambAllHooked = true;
+			// (or it has nothing lit this way: brush models, beams)
+			if (!pending && (hooked || o.userData.ambSomeHooked || meshes)) o.userData.ambAllHooked = true;
 			if (hooked) o.userData.ambSomeHooked = true;
+		};
+		const p = new THREE.Vector3();
+		const light = (o: THREE.Object3D, at: THREE.Vector3) => {
+			const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)}`;
+			if (o.userData.lightingKey === key) return;
+			o.userData.lightingKey = key;
+			o.userData.lighting = amb.at([at.x, at.y, at.z]);
 		};
 		const apply = (o: THREE.Object3D) => {
 			hookMeshes(o);
-			// (fresh world matrices: held objects are placed by hand each frame)
-			o.updateMatrixWorld(true);
-			const box = new THREE.Box3().setFromObject(o);
-			const p = box.isEmpty() ? new THREE.Vector3().setFromMatrixPosition(o.matrixWorld) : box.getCenter(new THREE.Vector3());
-			const key = `${Math.round(p.x / 4)},${Math.round(p.y / 4)},${Math.round(p.z / 4)}`;
-			if (o.userData.lightingKey === key) return;
-			o.userData.lightingKey = key;
-			o.userData.lighting = amb.at([p.x, p.y, p.z]);
+			// (fresh world matrix: held objects are placed by hand each frame)
+			o.updateWorldMatrix(true, false);
+			// the model's centre in its own space, once it has loaded (models
+			// with their origin at their feet are lit at their middle)
+			let local = o.userData.lightCentre as THREE.Vector3 | undefined;
+			if (!local) {
+				o.updateMatrixWorld(true);
+				const box = new THREE.Box3().setFromObject(o);
+				local = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld.clone().invert());
+				if (o.userData.ambAllHooked) o.userData.lightCentre = local;
+			}
+			light(o, p.copy(local).applyMatrix4(o.matrixWorld));
 		};
 		for (const o of this.objects.values()) if (o.visible) apply(o);
 		for (const o of this.propGroup.children) if (!o.userData.ambAllHooked) apply(o);
 		if (this.vmShown) {
 			// the view model is lit where the eye is
-			const lighting = amb.at(this.camera.position.toArray());
-			this.vmShown.userData.lighting = lighting;
+			light(this.vmShown, this.camera.position);
 			hookMeshes(this.vmShown);
 		}
 	}
@@ -1580,7 +1596,7 @@ export class View3D {
 		const now = performance.now();
 		const dt = Math.min(0.5, (now - this.lastRender) / 1000);
 		this.lastRender = now;
-		if (this.meterCount++ % 8 === 0) {
+		if (this.meterCount++ % 8 === 0 && !this.meterPending) {
 			const w = 64, h = 36;
 			// (with a stencil buffer: the sky is masked to the sky faces by it)
 			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType, stencilBuffer: true});
@@ -1613,25 +1629,29 @@ export class View3D {
 			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
 			this.scene.fog = fog;
+			// read back without waiting for the GPU (it lands a frame or two later)
 			const px = new Uint16Array(w * h * 4);
-			r.readRenderTargetPixels(this.meter, 0, 0, w, h, px);
-			const lum: number[] = [];
-			for (let i = 0; i < px.length; i += 4) {
-				const f = THREE.DataUtils.fromHalfFloat;
-				lum.push(0.2126 * f(px[i]) + 0.7152 * f(px[i + 1]) + 0.0722 * f(px[i + 2]));
-			}
-			lum.sort((a, b) => a - b);
-			const at = (p: number) => Math.max(1e-4, lum[Math.floor(lum.length * p)]);
-			// (the engine's histogram reads the sRGB-encoded frame: 0.6 and
-			// 0.03 there are 0.319 and 0.0023 linear)
-			const target = Math.max(0.319 / at(0.98), 0.0023 / at(0.5));
-			this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
+			this.meterPending = true;
+			r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px).then(() => {
+				const lum: number[] = [];
+				for (let i = 0; i < px.length; i += 4) {
+					const f = THREE.DataUtils.fromHalfFloat;
+					lum.push(0.2126 * f(px[i]) + 0.7152 * f(px[i + 1]) + 0.0722 * f(px[i + 2]));
+				}
+				lum.sort((a, b) => a - b);
+				const at = (p: number) => Math.max(1e-4, lum[Math.floor(lum.length * p)]);
+				// (the engine's histogram reads the sRGB-encoded frame: 0.6 and
+				// 0.03 there are 0.319 and 0.0023 linear)
+				const target = Math.max(0.319 / at(0.98), 0.0023 / at(0.5));
+				this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
+			}).catch(() => {}).finally(() => { this.meterPending = false; });
 		}
 		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
 		this.exposure += (t - this.exposure) * Math.min(1, dt * 1.5);
 		r.toneMappingExposure = this.exposure;
 	}
 	private meterTarget: number | null = null;
+	private meterPending = false;
 
 	// the fog colour as drawn: three mixes fog in after exposure and output
 	// encoding, so it's given already exposed and encoded

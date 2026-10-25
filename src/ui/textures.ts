@@ -1,7 +1,7 @@
 // Materials' base textures as three.js textures, loaded once per map.
 import * as THREE from 'three';
 import type {GameFiles} from '../game/files.ts';
-import {readVtf, decodeVtf} from '../game/vtf.ts';
+import {vtfLevel, decodeVtf} from '../game/vtf.ts';
 
 export class TextureCache {
 	private files: GameFiles;
@@ -25,10 +25,17 @@ export class TextureCache {
 	}
 
 	private async load(path: string, linear: boolean): Promise<THREE.Texture | null> {
-		const bytes = await this.files.read(`materials/${path}.vtf`);
-		if (!bytes) return null;
-		const img = readVtf(bytes, this.maxSize);
-		if (!img) return null;
+		// the header, then only the level drawn (not the whole file)
+		const file = `materials/${path}.vtf`;
+		const head = await this.files.readRange(file, 0, 1024);
+		if (!head) return null;
+		const level = vtfLevel(head, this.maxSize);
+		if (!level) return null;
+		const data = level.offset + level.size <= head.length
+			? head.subarray(level.offset, level.offset + level.size)
+			: await this.files.readRange(file, level.offset, level.size);
+		if (!data || data.length < level.size) return null;
+		const img = {...level, data};
 		const rgba = decodeVtf(img);
 		const tex = new THREE.DataTexture(rgba, img.width, img.height, THREE.RGBAFormat, THREE.UnsignedByteType);
 		tex.wrapS = tex.wrapT = THREE.RepeatWrapping;

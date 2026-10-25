@@ -31,6 +31,14 @@ function bytesFor(format: number, w: number, h: number): number {
 
 // `maxSize`: the largest level to take (smaller levels load and draw faster)
 export function readVtf(bytes: Uint8Array, maxSize = 1024): VtfImage | null {
+	const l = vtfLevel(bytes, maxSize);
+	if (!l || l.offset + l.size > bytes.length) return null;
+	return {width: l.width, height: l.height, format: l.format, data: bytes.subarray(l.offset, l.offset + l.size), hasAlpha: l.hasAlpha};
+}
+
+// where the level readVtf takes is in the file, from its header alone
+// (enough bytes to cover the header and its resource list)
+export function vtfLevel(bytes: Uint8Array, maxSize = 1024): (Omit<VtfImage, 'data'> & {offset: number; size: number}) | null {
 	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	if (v.getUint32(0, true) !== 0x00465456) return null;  // "VTF\0"
 	const minor = v.getUint32(8, true);
@@ -69,11 +77,10 @@ export function readVtf(bytes: Uint8Array, maxSize = 1024): VtfImage | null {
 	}
 	const w = Math.max(1, width >> level), h = Math.max(1, height >> level);
 	const size = bytesFor(format, w, h);
-	if (offset + size > bytes.length) return null;
 	const F = VtfFormat;
 	const hasAlpha = [F.DXT3, F.DXT5, F.DXT1_ONEBITALPHA, F.RGBA8888, F.ABGR8888, F.ARGB8888, F.BGRA8888, F.IA88, F.A8, F.BGRA4444, F.BGRA5551].includes(format as never)
 		&& (flags & (0x1000 | 0x2000)) !== 0;  // ONEBITALPHA | EIGHTBITALPHA
-	return {width: w, height: h, format, data: bytes.subarray(offset, offset + size), hasAlpha};
+	return {width: w, height: h, format, offset, size, hasAlpha};
 }
 
 // an environment map's six faces (right, left, back, front, up, down: +x
