@@ -24,7 +24,7 @@ import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt} from '../net/entities.ts';
-import type {SegmentTrack, ViewState} from '../player/playback.ts';
+import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
 
 export type CameraMode = 'eyes' | 'orbit' | 'free';
@@ -457,6 +457,10 @@ export class View3D {
 	private files: GameFiles | null = null;
 	private models = new Map<string, Promise<ModelAsset | null>>();
 	private interval = 1 / 60;
+	// the recording player's track, and the view model bob clock (seconds of
+	// full-speed movement) at each recorded view
+	private track: SegmentTrack | null = null;
+	private bobClock: {time: Float64Array, speed: Float32Array} | null = null;
 	// portals seen this frame, by entity index, for views and laser hops
 	private portals = new Map<number, {obj: THREE.Object3D; link: number; halfW: number; halfH: number}>();
 	private portalCam = new THREE.PerspectiveCamera();
@@ -1216,6 +1220,8 @@ export class View3D {
 			else this.tracksByIndex.set(t.index, [t]);
 		}
 		this.interval = track.seg.intervalPerTick;
+		this.track = track;
+		this.bobClock = null;
 		this.paint?.texture.dispose();
 		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint) : null;
 		paintUniforms.paintMap.value = this.paint?.texture ?? null;
@@ -1969,11 +1975,99 @@ export class View3D {
 			const [seq, cycle] = this.animAt(t, tick, g.userData.skeleton);
 			anim.setPose(seq, cycle);
 		}
-		// at the eye, turned with the view
-		g.position.copy(this.camera.position);
-		g.rotation.copy(toEuler([this.eyeAngles[0], this.eyeAngles[1], 0]));
+		// at the eye, turned with the view, swaying
+		this.swayViewModel(g, tick);
 		g.visible = true;
 		this.vmShown = g;
+	}
+
+	// The view model's sway, as the client does it: Portal's AddViewmodelBob
+	// moves and tips it with movement speed, and CalcViewModelLag lets it
+	// trail the view when turning (a facing that catches up at 5/s, faster
+	// once more than 1.5 off, turned with the player through portals). The
+	// trailing facing is replayed over the last second, so seeking or pausing
+	// gives the same pose
+	private swayViewModel(g: THREE.Group, tick: number) {
+		const eyeQuat = (a: number[]) => new THREE.Quaternion().setFromEuler(toEuler(a as Vec3));
+		const q = eyeQuat(this.eyeAngles);
+		const pos = this.camera.position.clone();
+		const track = this.track;
+		if (!track?.seg.views.length) {
+			g.position.copy(pos);
+			g.quaternion.copy(q);
+			return;
+		}
+		const forward = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+		const right = new THREE.Vector3(0, -1, 0).applyQuaternion(q);
+		const up = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+		const {vertical, lateral} = this.viewModelBob(tick);
+		pos.addScaledVector(forward, vertical * 0.1).addScaledVector(up, vertical * 0.1).addScaledVector(right, lateral * 0.8);
+		// roll, then pitch about the rolled right, then yaw about the result's up
+		const deg = Math.PI / 180;
+		const roll = new THREE.Quaternion().setFromAxisAngle(right.clone().cross(up).normalize(), vertical * 0.5 * deg);
+		right.applyQuaternion(roll);
+		up.applyQuaternion(roll);
+		const pitch = new THREE.Quaternion().setFromAxisAngle(right, -vertical * 0.4 * deg);
+		up.applyQuaternion(pitch);
+		const yaw = new THREE.Quaternion().setFromAxisAngle(up, -lateral * 0.3 * deg);
+		g.quaternion.copy(yaw.multiply(pitch).multiply(roll).multiply(q));
+
+		const STEPS = 60;
+		let ang = viewAt(track, tick - STEPS);
+		if (!ang) return;
+		const facing = new THREE.Vector3(1, 0, 0).applyQuaternion(eyeQuat(ang.angles));
+		const diff = new THREE.Vector3(), f = new THREE.Vector3();
+		for (let s = STEPS - 1; s >= 0; s--) {
+			const v = viewAt(track, tick - s);
+			if (!v) break;
+			if (v.viewIndex !== ang.viewIndex && track.teleports.subarray(ang.viewIndex + 1, v.viewIndex + 1).some(Boolean)) {
+				// through a portal (or teleported): the facing turns with the view
+				facing.applyQuaternion(eyeQuat(v.angles).multiply(eyeQuat(ang.angles).invert()));
+			}
+			f.set(1, 0, 0).applyQuaternion(eyeQuat(v.angles));
+			diff.subVectors(f, facing);
+			const len = diff.length();
+			const speed = len > 1.5 ? 5 * len / 1.5 : 5;
+			facing.addScaledVector(diff, speed * this.interval).normalize();
+			ang = v;
+		}
+		pos.addScaledVector(diff, -5);
+		g.position.copy(pos);
+	}
+
+	// Portal's view model bob (CBasePortalCombatWeapon::CalcViewmodelBob):
+	// a clock that runs with speed over the walking speed, a vertical cycle
+	// every 0.45 s of it (up in the first half) and a sideways one every 0.9 s
+	private viewModelBob(tick: number): {vertical: number, lateral: number} {
+		const track = this.track!, views = track.seg.views;
+		const MAX_SPEED = 175, CYCLE = 0.45, UP = 0.5;
+		if (!this.bobClock) {
+			const time = new Float64Array(views.length), speed = new Float32Array(views.length);
+			for (let i = 1; i < views.length; i++) {
+				const dt = (views[i].tick - views[i - 1].tick) * this.interval;
+				const a = views[i - 1].origin, b = views[i].origin;
+				speed[i] = dt > 0 && !track.teleports[i] ? Math.min(MAX_SPEED, Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / dt) : speed[i - 1];
+				time[i] = time[i - 1] + dt * speed[i] / MAX_SPEED;
+			}
+			if (views.length > 1) speed[0] = speed[1];
+			this.bobClock = {time, speed};
+		}
+		const {time, speed} = this.bobClock;
+		const v = viewAt(track, tick);
+		const i = v?.viewIndex ?? 0, j = Math.min(i + 1, views.length - 1);
+		const span = views[j].tick - views[i].tick;
+		const frac = span > 0 ? Math.min(1, Math.max(0, (tick - views[i].tick) / span)) : 0;
+		const bobtime = time[i] + (time[j] - time[i]) * frac;
+		const sp = speed[i] + (speed[j] - speed[i]) * frac;
+		// (the sideways cycle as written, (int)(bobtime/CYCLE*2)*CYCLE*2, which
+		// takes off whole quarter-periods: a plain sine every 0.9 s)
+		const wave = (period: number, wraps: number) => {
+			let c = (bobtime - Math.trunc(bobtime / period * wraps) * period * wraps) / (period * wraps);
+			c = c < UP ? Math.PI * c / UP : Math.PI + Math.PI * (c - UP) / (1 - UP);
+			const b = sp * 0.005;
+			return Math.min(4, Math.max(-7, b * 0.3 + b * 0.7 * Math.sin(c)));
+		};
+		return {vertical: wave(CYCLE, 1), lateral: wave(CYCLE, 2)};
 	}
 
 	// Moving models' lighting: the ambient cube and local lights at each
@@ -2071,7 +2165,7 @@ export class View3D {
 	// what they hold stays put in front of the view
 	private eyeMatrix(t: EntityTrack, tick: number, useCamera: boolean): THREE.Matrix4 {
 		if (useCamera) {
-			return new THREE.Matrix4().compose(this.camera.position, new THREE.Quaternion().setFromEuler(toEuler([this.eyeAngles[0], this.eyeAngles[1], 0])), new THREE.Vector3(1, 1, 1));
+			return new THREE.Matrix4().compose(this.camera.position, new THREE.Quaternion().setFromEuler(toEuler(this.eyeAngles as Vec3)), new THREE.Vector3(1, 1, 1));
 		}
 		const pose = this.entityPose(t, tick);
 		const k = keyAt(t, Math.floor(tick))!;
@@ -2490,9 +2584,11 @@ export class View3D {
 				const ang = otherPose ? otherPose.angles : view?.angles ?? pk?.angles ?? [0, 0, 0];
 				this.eyeAngles = ang;
 				this.camera.position.copy(eye);
-				const pitch = ang[0] * Math.PI / 180, yaw = ang[1] * Math.PI / 180;
-				const fwd = new THREE.Vector3(Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), -Math.sin(pitch));
-				this.camera.lookAt(eye.clone().add(fwd));
+				// with roll: the view comes out of a portal tilted and rights itself
+				const q = new THREE.Quaternion().setFromEuler(toEuler(ang as Vec3));
+				const fwd = new THREE.Vector3(1, 0, 0).applyQuaternion(q), up = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+				const right = fwd.clone().cross(up);
+				this.camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, fwd.negate()));
 			} else if (this.mode === 'free') {
 				// the free camera goes where the user takes it
 			} else if (this.controls) {
