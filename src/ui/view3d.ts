@@ -14,7 +14,7 @@ import type {Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
-import {paintUniforms, ditherUniforms, fogUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
+import {paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial} from './shaderhooks.ts';
 import {TextureCache} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -29,10 +29,12 @@ export type CameraMode = 'eyes' | 'orbit' | 'free';
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
+// viewmodel_fov 50 (horizontal, at 4:3), as a vertical angle
+const VIEWMODEL_FOV = 2 * Math.atan(Math.tan(25 * Math.PI / 180) * 3 / 4) * 180 / Math.PI;
 
 // entity classes that aren't worth a box
 const HIDDEN_CLASSES = new Set([
-	'CWeaponPortalgun', 'CPredictedViewModel', 'CBaseViewModel', 'CFuncPortalBumper', 'CFuncNoPortalVolume',
+	'CPredictedViewModel', 'CBaseViewModel', 'CFuncPortalBumper', 'CFuncNoPortalVolume',
 	'CVGuiScreen', 'CMovieDisplay', 'CBoneFollower', 'CInfoPlacementHelper', 'CEnvProjectedTexture', 'CFogController',
 	'CParticleSystem', 'CRopeKeyframe', 'CSprite', 'CSpriteOriented', 'CBeam', 'CPortalGameRulesProxy', 'CPortalGameRules',
 	'CTeam', 'CPlayerResource', 'CPortal_PlayerResource', 'CWorld', 'CSun', 'CEnvTonemapController', 'CFunc_LiquidPortal',
@@ -83,7 +85,13 @@ class MaterialLibrary {
 	}
 
 	private apply(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
-		if (info.translucent || info.liquid) {
+		if (info.shader === 'water' && info.baseTexture) {
+			// goo: opaque (its fog ends within inches), flowing, lit
+			mat.transparent = false;
+			mat.depthWrite = true;
+			mat.opacity = 1;
+			mat.defines = {...mat.defines, GOO: ''};
+		} else if (info.translucent || info.liquid) {
 			mat.transparent = true;
 			mat.depthWrite = false;
 			mat.opacity = info.liquid && !info.baseTexture ? 0.6 : info.alpha;
@@ -264,6 +272,13 @@ export class View3D {
 	private tracksByIndex = new Map<number, EntityTrack[]>();
 	// the world's solid faces, for keeping the orbit camera inside the map
 	private collision: MeshBVH | null = null;
+	// first-person view model (the portal gun), drawn over the world in
+	// Eyes view with its own field of view, as the game does
+	private vmScene = new THREE.Scene();
+	private vmCam = new THREE.PerspectiveCamera(VIEWMODEL_FOV, 1, 1, 2000);
+	private vmObjects = new Map<EntityTrack, THREE.Group>();
+	private vmShown: THREE.Group | null = null;
+	private eyeAngles: number[] = [0, 0, 0];
 	// free camera: held movement keys, view angles (degrees), drag state
 	private freeKeys = new Set<string>();
 	private freeAngles = [0, 0];  // pitch, yaw
@@ -291,6 +306,12 @@ export class View3D {
 		body.translate(0, 0, 36);
 		this.player = new THREE.Mesh(body, new THREE.MeshLambertMaterial({color: 0x5aa9ff, transparent: true, opacity: 0.85}));
 		this.scene.add(this.player);
+		const vmHemi = new THREE.HemisphereLight(0xffffff, 0x3a3f48, 0.55);
+		vmHemi.position.set(0, 0, 1);
+		const vmSun = new THREE.DirectionalLight(0xffffff, 0.4);
+		vmSun.position.set(0.35, 0.25, 1);
+		this.vmScene.add(vmHemi, vmSun);
+		this.vmCam.up.set(0, 0, 1);
 	}
 
 	private ensureRenderer() {
@@ -582,34 +603,64 @@ export class View3D {
 	private clearEntities() {
 		this.entityGroup.clear();
 		this.objects.clear();
+		for (const g of this.vmObjects.values()) this.vmScene.remove(g);
+		this.vmObjects.clear();
+		this.vmShown = null;
 	}
 
-	private objectFor(t: EntityTrack): THREE.Object3D | null {
+	private objectFor(t: EntityTrack, skin = 0): THREE.Object3D | null {
 		let o = this.objects.get(t);
-		if (o !== undefined) return o;
-		o = this.makeObject(t) ?? new THREE.Group();
+		if (o !== undefined) {
+			if ((o.userData.skin ?? 0) === skin || !t.model.endsWith('.mdl')) return o;
+			// a new skin (a cube lighting up on a button): rebuild
+			this.entityGroup.remove(o);
+			this.objects.delete(t);
+		}
+		o = this.makeObject(t, skin) ?? new THREE.Group();
+		o.userData.skin = skin;
 		o.visible = false;
 		this.objects.set(t, o);
 		this.entityGroup.add(o);
 		return o;
 	}
 
-	private makeObject(t: EntityTrack): THREE.Object3D | null {
+	private makeObject(t: EntityTrack, skin = 0): THREE.Object3D | null {
 		if (t.className === 'CPortal_Player') {
-			// the other player in co-op
-			if (t === this.entities?.player) return null;
+			// the player's own model (Chell, ATLAS, P-body); a capsule until it loads
+			const group = new THREE.Group();
 			const body = new THREE.CapsuleGeometry(16, 40, 4, 12);
 			body.rotateX(Math.PI / 2);
 			body.translate(0, 0, 36);
-			return new THREE.Mesh(body, new THREE.MeshLambertMaterial({color: 0xff8a1f}));
+			const capsule = new THREE.Mesh(body, new THREE.MeshLambertMaterial({color: /eggbot/.test(t.model) ? 0xff8a1f : 0x5aa9ff}));
+			group.add(capsule);
+			this.model(t.model || 'models/player/chell/player.mdl', skin).then(asset => {
+				if (!asset?.skeleton) return;
+				group.remove(capsule);
+				const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material: p.material})));
+				group.add(anim.group);
+				group.userData.anim = anim;
+				group.userData.skeleton = asset.skeleton;
+				this.onLoaded();
+			});
+			return group;
+		}
+		if (t.className === 'CWeaponPortalgun') {
+			// the gun in a player's hand (the third-person model; the
+			// network carries the view model's name)
+			const group = new THREE.Group();
+			this.model('models/weapons/w_portalgun.mdl', skin).then(asset => {
+				if (!asset) return;
+				group.add(this.staticObject(asset));
+				this.onLoaded();
+			});
+			return group;
 		}
 		if (t.className === 'CProp_Portal') {
 			const group = new THREE.Group();
-			const color = t.orange ? new THREE.Color(1.0, 0.45, 0.08) : new THREE.Color(0.15, 0.5, 1.0);
-			const material = portalMaterial(color);
+			const material = portalMaterial(this.effects, !!t.orange);
 			const surface = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
 			// plane in XY facing +Z -> facing the portal's forward (+X): its x
-			// runs up the portal, y across
+			// runs across the portal (+Y), y up (+Z)
 			surface.rotation.set(0, Math.PI / 2, 0);
 			surface.rotateZ(Math.PI / 2);
 			surface.scale.set(PORTAL_HALF_W, PORTAL_HALF_H, 1);
@@ -670,7 +721,7 @@ export class View3D {
 			group.add(box);
 		}
 		// the real model when it loads, animated when it can be
-		this.model(t.model).then(asset => {
+		this.model(t.model, skin).then(asset => {
 			if (box) group.remove(box);
 			if (!asset) return;
 			if (asset.skeleton && asset.skeleton.sequences.length && t.keys.some(k => k.anim)) {
@@ -776,7 +827,8 @@ export class View3D {
 			}
 			let rt = this.portalTargets.get(p.obj);
 			if (!rt) {
-				rt = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType});
+				// with a stencil, for the sky mask
+				rt = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, stencilBuffer: true});
 				this.portalTargets.set(p.obj, rt);
 			}
 			if (rt.width !== size.x || rt.height !== size.y) rt.setSize(size.x, size.y);
@@ -835,7 +887,11 @@ export class View3D {
 				continue;
 			}
 			const m = this.worldMatrix(t, k, tick, 0);
-			if (!m) continue;
+			if (!m) {
+				// not placeable yet (the parent's model is loading): not at the origin
+				o.visible = false;
+				continue;
+			}
 			o.matrixAutoUpdate = false;
 			o.matrix.copy(m);
 			o.matrixWorldNeedsUpdate = true;
@@ -843,6 +899,7 @@ export class View3D {
 	}
 
 	private worldMatrix(t: EntityTrack, k: EntityKey, tick: number, depth: number): THREE.Matrix4 | null {
+		if (t.className === 'CWeaponPortalgun' && k.parent !== undefined) return this.handMatrix(k.parent, tick);
 		const local = new THREE.Matrix4().compose(
 			new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]),
 			new THREE.Quaternion().setFromEuler(toEuler(t.className === 'CPortal_Player' ? [0, k.angles[1], 0] : k.angles)),
@@ -874,6 +931,103 @@ export class View3D {
 			if (att) parent.multiply(att);
 		}
 		return parent.multiply(local);
+	}
+
+	// the tick a portal was last placed (moved or activated) at or before `tick`
+	private portalPlacedAt(t: EntityTrack, tick: number): number {
+		let i = keyIndexAt(t, tick);
+		while (i > 0) {
+			const k = t.keys[i], prev = t.keys[i - 1];
+			if (prev.active !== k.active || prev.origin.some((v, j) => Math.abs(v - k.origin[j]) > 0.5)) return k.tick;
+			i--;
+		}
+		// first seen already open: placed then, unless that's the recording's start
+		return i >= 0 && t.keys[i].tick > 1 ? t.keys[i].tick : tick - 1000;
+	}
+
+	// the recording player's view model, posed by its networked animation
+	private updateViewModel(tick: number) {
+		if (this.vmShown) this.vmShown.visible = false;
+		this.vmShown = null;
+		const ents = this.entities;
+		if (!ents || this.mode !== 'eyes') return;
+		const t = ents.tracks.find(c => c.className === 'CPredictedViewModel' && keyAt(c, tick)?.visible && c.model.endsWith('.mdl'));
+		const k = t && keyAt(t, tick);
+		if (!t || !k) return;
+		let g = this.vmObjects.get(t);
+		if (!g) {
+			const group = new THREE.Group();
+			g = group;
+			this.vmObjects.set(t, group);
+			this.vmScene.add(group);
+			this.model(t.model, k.skin ?? 0).then(asset => {
+				if (!asset?.skeleton) return;
+				const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material: p.material})));
+				group.add(anim.group);
+				group.userData.anim = anim;
+				group.userData.skeleton = asset.skeleton;
+				this.onLoaded();
+			});
+		}
+		const anim = g.userData.anim as AnimatedModel | undefined;
+		if (anim && k.anim) {
+			const [seq, cycle] = this.animAt(t, tick, g.userData.skeleton);
+			anim.setPose(seq, cycle);
+		}
+		// at the eye, turned with the view
+		g.position.copy(this.camera.position);
+		g.rotation.copy(toEuler([this.eyeAngles[0], this.eyeAngles[1], 0]));
+		g.visible = true;
+		this.vmShown = g;
+	}
+
+	// a player's weapon_bone in the world (where a held gun is bone-merged)
+	private handMatrix(index: number, tick: number): THREE.Matrix4 | null {
+		const pt = (this.tracksByIndex.get(index) ?? []).find(c => c.className === 'CPortal_Player' && keyAt(c, tick));
+		const po = pt && this.objects.get(pt);
+		const sk = po?.userData.skeleton as Skeleton | undefined;
+		const anim = po?.userData.anim as AnimatedModel | undefined;
+		if (!po || !sk || !anim) return null;
+		const bone = sk.bones.findIndex(b => b.name.toLowerCase() === 'weapon_bone');
+		if (bone < 0) return null;
+		po.updateMatrixWorld();
+		return po.matrixWorld.clone().multiply(boneMatrices(sk, anim.pose)[bone]);
+	}
+
+	// A player's animation, picked from their movement as the game's
+	// animation state does: idle, run or crouch-walk (blended by direction
+	// relative to where they face), or floating in the air
+	private playerAnim(t: EntityTrack, tick: number, sk: Skeleton): [number, number, Record<string, number>] {
+		const seqs = (sk as Skeleton & {labels?: Map<string, number>}).labels ??= new Map(sk.sequences.map((s, i) => [s.label, i]));
+		const k = keyAt(t, tick)!;
+		const before = keyAt(t, tick - 6) ?? k;
+		const dt = Math.max(1, k.tick - before.tick) * this.interval;
+		const v = [0, 1, 2].map(i => (k.origin[i] - before.origin[i]) / Math.max(dt, 6 * this.interval));
+		const speed = Math.hypot(v[0], v[1]);
+		const crouched = k.eyeZ !== undefined && k.eyeZ < 50;
+		const air = Math.abs(v[2]) > 40;
+		const pick = (...labels: string[]) => {
+			for (const l of labels) {
+				const i = seqs.get(l);
+				if (i !== undefined) return i;
+			}
+			return 0;
+		};
+		let seq: number, rate = 1;
+		if (air) seq = pick('portalgun_jumpfloat', 'jump_float', 'jumpfloat');
+		else if (speed > 15) {
+			seq = crouched ? pick('portalgun_crouchwalk', 'crouchwalk') : pick('portalgun_run', 'run');
+			rate = Math.min(2, Math.max(0.4, speed / (crouched ? 63 : 175)));
+		} else seq = crouched ? pick('portalgun_crouch_idle', 'crouch_idle') : pick('portalgun_standing_idle', 'standing_idle', 'idle');
+		const yaw = k.angles[1] * Math.PI / 180;
+		const params: Record<string, number> = {move_x: 0, move_y: 0};
+		if (speed > 15) {
+			params.move_x = (v[0] * Math.cos(yaw) + v[1] * Math.sin(yaw)) / speed;
+			params.move_y = (-v[0] * Math.sin(yaw) + v[1] * Math.cos(yaw)) / speed;
+		}
+		const time = tick * this.interval;
+		const c = time * sequenceRate(sk, seq) * rate;
+		return [seq, c - Math.floor(c), params];
 	}
 
 	// the entity at a network index at a tick (indices get reused)
@@ -1044,23 +1198,29 @@ export class View3D {
 			this.portals.clear();
 			const time = performance.now() / 1000;
 			for (const m of this.fizzlers.values()) m.uniforms.time.value = time;
+			gooUniforms.gooTime.value = time;
 			this.paint?.seek(tick);
 			this.updateLightStyles(tick);
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
 				const show = !!k && this.shows(t, k);
-				const o = show ? this.objectFor(t) : this.objects.get(t);
+				const o = show ? this.objectFor(t, k?.skin ?? 0) : this.objects.get(t);
 				if (!o) continue;
 				o.visible = show;
 				if (show && k && WORLD_SPACE.has(t.className)) {
 					this.placeEffect(t, k, o, time);
 					continue;
 				}
+				// the recording player (and their gun) are the camera in Eyes view
+				if (show && this.mode === 'eyes' && (t === ents.player || (t.className === 'CWeaponPortalgun' && ents.player && k?.parent === ents.player.index))) o.visible = false;
 				if (show && k) {
 					const anim = o.userData.anim as AnimatedModel | undefined;
 					if (anim && k.anim) {
 						const [seq, cycle] = this.animAt(t, tick, o.userData.skeleton);
 						anim.setPose(seq, cycle);
+					} else if (anim && t.className === 'CPortal_Player') {
+						const [seq, cycle, params] = this.playerAnim(t, tick, o.userData.skeleton);
+						anim.setPose(seq, cycle, params);
 					}
 					o.position.set(k.origin[0], k.origin[1], k.origin[2]);
 					// players turn with their view but don't tilt
@@ -1069,8 +1229,13 @@ export class View3D {
 						const e = k.extra ?? {};
 						const surface = o.userData.portalSurface as THREE.Mesh;
 						const halfW = Number(e.m_fNetworkHalfWidth) || PORTAL_HALF_W, halfH = Number(e.m_fNetworkHalfHeight) || PORTAL_HALF_H;
-						surface.scale.set(halfW, halfH, 1);
-						(surface.material as THREE.ShaderMaterial).uniforms.time.value = time;
+						// the quad reaches 7.5% past the opening, for the flames
+						surface.scale.set(halfW * 1.075, halfH * 1.075, 1);
+						const u = (surface.material as THREE.ShaderMaterial).uniforms;
+						u.time.value = time;
+						u.exposure.value = this.exposure;
+						// opens over half a second from where it was placed
+						u.open.value = (tick - this.portalPlacedAt(t, tick)) * this.interval * 2;
 						this.portals.set(t.index, {obj: o, link: Number(e.m_hLinkedPortal ?? -1) & 2047, halfW, halfH});
 					}
 				}
@@ -1078,6 +1243,7 @@ export class View3D {
 		}
 
 		if (ents) this.placeAttached(tick);
+		this.updateViewModel(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		const pk = ents?.player ? keyAt(ents.player, tick) : undefined;
@@ -1088,11 +1254,12 @@ export class View3D {
 		if (feet) ditherUniforms.ditherTarget.value.copy(feet).add(new THREE.Vector3(0, 0, 36));
 		if (feet) {
 			this.player.position.copy(feet);
-			this.player.visible = this.mode !== 'eyes';
+			this.player.visible = this.mode !== 'eyes' && !ents?.player;
 			const eye = feet.clone();
 			eye.z += pk?.eyeZ ?? DEFAULT_EYE;
 			if (this.mode === 'eyes') {
 				const ang = view?.angles ?? pk?.angles ?? [0, 0, 0];
+				this.eyeAngles = ang;
 				this.camera.position.copy(eye);
 				const pitch = ang[0] * Math.PI / 180, yaw = ang[1] * Math.PI / 180;
 				const fwd = new THREE.Vector3(Math.cos(pitch) * Math.cos(yaw), Math.cos(pitch) * Math.sin(yaw), -Math.sin(pitch));
@@ -1124,6 +1291,20 @@ export class View3D {
 		// third-person camera does (the user's distance is kept for later)
 		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
 		this.renderScene(r);
+		if (this.mode === 'eyes' && this.vmShown) {
+			this.vmCam.position.copy(this.camera.position);
+			this.vmCam.quaternion.copy(this.camera.quaternion);
+			this.vmCam.aspect = this.camera.aspect;
+			this.vmCam.updateProjectionMatrix();
+			const auto = r.autoClear;
+			r.autoClear = false;
+			r.clearDepth();
+			const dither = ditherUniforms.ditherOn.value;
+			ditherUniforms.ditherOn.value = 0;
+			r.render(this.vmScene, this.vmCam);
+			ditherUniforms.ditherOn.value = dither;
+			r.autoClear = auto;
+		}
 		if (saved) {
 			this.camera.position.copy(saved);
 			this.camera.updateMatrixWorld();

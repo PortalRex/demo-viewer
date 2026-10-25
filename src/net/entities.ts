@@ -34,6 +34,7 @@ export interface EntityKey {
 	// parent (or to one of its model's attachments, 1-based)
 	parent?: number;
 	attachment?: number;
+	skin?: number;     // m_nSkin (cube types, lit cubes and buttons)
 }
 
 // Props kept for the classes the 3D view draws specially
@@ -87,7 +88,8 @@ export interface LightStyleChange {
 // per-class indices of the props the viewer uses
 interface ClassFields {
 	cls: ServerClass;
-	origin: number;         // m_vecOrigin (vec3, or vec2 with originZ)
+	origin: number;
+	origins: {origin: number; z: number}[];  // every origin copy the class has         // m_vecOrigin (vec3, or vec2 with originZ)
 	originZ: number;        // m_vecOrigin[2]
 	cell: [number, number, number, number];  // m_cellbits, m_cellX/Y/Z
 	cellOrigin: boolean;    // m_vecOrigin is cell-relative
@@ -109,6 +111,7 @@ interface ClassFields {
 	activated: number;      // portals
 	moveParent: number;     // moveparent (EHANDLE)
 	parentAttachment: number;
+	skin: number;
 	isPortal2: number;
 }
 
@@ -127,9 +130,12 @@ const ORIGIN_SOURCES = ['m_vecOrigin', 'portallocaldata.m_vecOrigin', 'localdata
 function fieldsFor(cls: ServerClass): ClassFields {
 	const src = ORIGIN_SOURCES.find(n => cls.index.has(n));
 	const origin = src ? cls.index.get(src)! : -1;
+	// players have two copies: the owner's (local) and everyone else's
+	const origins = ORIGIN_SOURCES.filter(n => cls.index.has(n)).map(n => ({origin: cls.index.get(n)!, z: find(cls, `${n}[2]`)}));
 	return {
 		cls,
 		origin,
+		origins,
 		originZ: src ? find(cls, `${src}[2]`) : -1,
 		eyePitch: find(cls, 'm_angEyeAngles[0]'),
 		eyeYaw: find(cls, 'm_angEyeAngles[1]'),
@@ -151,6 +157,7 @@ function fieldsFor(cls: ServerClass): ClassFields {
 		activated: find(cls, 'm_bActivated'),
 		moveParent: find(cls, 'moveparent', 'm_hMoveParent'),
 		parentAttachment: find(cls, 'm_iParentAttachment'),
+		skin: find(cls, 'm_nSkin'),
 		isPortal2: find(cls, 'm_bIsPortal2'),
 	};
 }
@@ -161,6 +168,7 @@ interface LiveEntity {
 	state: PropValue[];
 	track: EntityTrack;
 	inSnapshot: boolean;
+	originCopy?: number;  // which of the class's origin copies this entity gets sent (players)
 }
 
 const num = (v: PropValue | undefined, d = 0) => (typeof v === 'number' ? v : d);
@@ -217,17 +225,25 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	};
 
+	const noteOriginCopy = (e: LiveEntity, changed: number[]) => {
+		const copies = fields[e.classIndex].origins;
+		if (copies.length < 2) return;
+		const i = copies.findIndex(c => changed.includes(c.origin) || changed.includes(c.z));
+		if (i >= 0) e.originCopy = i;
+	};
+
 	const record = (e: LiveEntity, tick: number) => {
 		const f = fields[e.classIndex];
 		const s = e.state;
 		let origin: Vec3;
-		const o = vec(s[f.origin]);
+		const copy = f.origins[e.originCopy ?? 0];
+		const o = vec(s[copy ? copy.origin : f.origin]);
 		if (f.cellOrigin && f.cell[1] >= 0) {
 			const width = 2 ** num(s[f.cell[0]], 5);
 			const c = (i: number) => num(s[f.cell[i + 1]]) * width - MAX_COORD;
 			origin = [c(0) + (o?.[0] ?? 0), c(1) + (o?.[1] ?? 0), c(2) + (o?.[2] ?? 0)];
 		} else {
-			origin = [o?.[0] ?? 0, o?.[1] ?? 0, o && o.length > 2 ? o[2] : num(s[f.originZ])];
+			origin = [o?.[0] ?? 0, o?.[1] ?? 0, o && o.length > 2 ? o[2] : num(s[copy ? copy.z : f.originZ])];
 		}
 		const a = vec(s[f.angles]);
 		const angles: Vec3 = f.eyeYaw >= 0 ? [num(s[f.eyePitch]), num(s[f.eyeYaw]), 0] : [a?.[0] ?? 0, a?.[1] ?? 0, a?.[2] ?? 0];
@@ -250,6 +266,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		const ph = f.moveParent >= 0 ? num(s[f.moveParent], -1) : -1;
 		const parentIndex = ph >= 0 && (ph & 2047) !== 2047 ? ph & 2047 : undefined;
 		const attachment = parentIndex !== undefined && f.parentAttachment >= 0 ? num(s[f.parentAttachment]) || undefined : undefined;
+		const skin = f.skin >= 0 ? num(s[f.skin]) || undefined : undefined;
 		const t = e.track;
 		const mins = vec(s[f.mins]), maxs = vec(s[f.maxs]);
 		if (mins) t.mins = [mins[0], mins[1], mins[2]];
@@ -257,9 +274,9 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		if (f.model >= 0) t.model = modelName(num(s[f.model]));
 		if (f.isPortal2 >= 0) t.orange = num(s[f.isPortal2]) !== 0;
 		const last = t.keys[t.keys.length - 1];
-		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && last.parent === parentIndex && last.attachment === attachment && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
+		if (last && last.visible === visible && last.active === active && last.eyeZ === eyeZ && last.parent === parentIndex && last.attachment === attachment && last.skin === skin && sameVec(last.origin, origin) && sameVec(last.angles, angles) && sameAnim(last.anim, anim) && sameExtra(last.extra, extra)) return;
 		if (last && last.tick === tick) t.keys.pop();
-		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim, extra, parent: parentIndex, attachment});
+		t.keys.push({tick, origin, angles, visible, active, eyeZ, anim, extra, parent: parentIndex, attachment, skin});
 	};
 
 	const leave = (e: LiveEntity, tick: number, remove: boolean) => {
@@ -285,7 +302,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 			if (type === 0) {
 				const e = live.get(index);
 				if (!e) throw new Error(`update for entity ${index}, which doesn't exist`);
-				readEntityProps(br, dt.classes[e.classIndex].flat, e.state);
+				noteOriginCopy(e, readEntityProps(br, dt.classes[e.classIndex].flat, e.state));
 				record(e, tick);
 			} else if (type === 2) {
 				const classIndex = br.u(dt.classBits);
@@ -304,7 +321,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 					live.set(index, e);
 				}
 				e.inSnapshot = true;
-				readEntityProps(br, cls.flat, e.state);
+				noteOriginCopy(e, readEntityProps(br, cls.flat, e.state));
 				if (h.updateBaseline) baselines[1 - h.baseline].set(index, {classIndex, state: e.state.slice()});
 				record(e, tick);
 			} else {

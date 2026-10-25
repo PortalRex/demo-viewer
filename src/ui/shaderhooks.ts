@@ -31,6 +31,27 @@ const BACKFACE_FRAGMENT = `
 #endif
 `;
 
+// goo (Water shader with a colour texture): the colour texture at a
+// 400-unit world scale, flowing: two copies drifting and cross-fading on a
+// 6 second cycle, as the shader's colour flow does
+export const gooUniforms = {
+	gooTime: {value: 0},
+};
+
+const GOO_FRAGMENT = `
+#ifdef GOO
+	{
+		vec2 guv = vDitherWorld.xy / 400.0;
+		float phase = fract(gooTime / 6.0);
+		vec2 drift = vec2(0.8, 0.6) * 0.105;
+		vec4 g1 = texture2D(map, guv + drift * phase);
+		vec4 g2 = texture2D(map, guv + drift * fract(phase + 0.5) + 0.37);
+		float w = abs(1.0 - 2.0 * phase);
+		diffuseColor = vec4(mix(g2.rgb, g1.rgb, w), 1.0);
+	}
+#endif
+`;
+
 export const ditherUniforms = {
 	ditherOn: {value: 0},
 	ditherTarget: {value: new THREE.Vector3()},
@@ -86,18 +107,18 @@ const PAINT_FRAGMENT = `
 
 function hook(material: THREE.Material, paint: boolean) {
 	material.onBeforeCompile = shader => {
-		Object.assign(shader.uniforms, ditherUniforms, fogUniforms);
+		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms);
 		if (paint) Object.assign(shader.uniforms, paintUniforms);
 		shader.vertexShader = 'varying vec3 vDitherWorld;\n' + shader.vertexShader.replace(
 			'#include <project_vertex>',
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;',
 		);
-		shader.fragmentShader = DITHER_FRAGMENT_HEAD + 'uniform float fogMaxDensity;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
+		shader.fragmentShader = DITHER_FRAGMENT_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
-			.replace('#include <map_fragment>', '#include <map_fragment>\n' + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
+			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

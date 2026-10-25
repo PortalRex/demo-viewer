@@ -141,8 +141,9 @@ export class Laser {
 		assets?.texture('effects/redlaser1').then(t => {
 			if (t === assets.white) return;
 			const tex = t.clone();
-			tex.wrapS = THREE.RepeatWrapping;
-			tex.wrapT = THREE.ClampToEdgeWrapping;
+			// the texture's u runs across the beam (hot core, red edges), v along it
+			tex.wrapS = THREE.ClampToEdgeWrapping;
+			tex.wrapT = THREE.RepeatWrapping;
 			tex.needsUpdate = true;
 			this.material.map = tex;
 			this.material.color.setRGB(1, 1, 1);
@@ -176,7 +177,7 @@ export class Laser {
 			const q = [a.clone().sub(side), a.clone().add(side), b.clone().add(side), b.clone().sub(side)];
 			const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
 			const uv = mesh.geometry.getAttribute('uv') as THREE.BufferAttribute;
-			const uvs = [[0, 0], [0, 1], [len / 64, 1], [len / 64, 0]];
+			const uvs = [[0, 0], [1, 0], [1, len / 128], [0, len / 128]];
 			[0, 1, 2, 0, 2, 3].forEach((k, j) => {
 				pos.setXYZ(j, q[k].x, q[k].y, q[k].z);
 				uv.setXY(j, uvs[k][0], uvs[k][1]);
@@ -336,46 +337,83 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 // The view through a portal, rendered from the linked portal into a target
 // the size of the screen, and drawn where the portal is by screen position.
 // Without a view (no linked portal) it shows the portal's colour.
-export function portalMaterial(color: THREE.Color): THREE.ShaderMaterial {
-	return new THREE.ShaderMaterial({
+// ---- portals (as the PortalRefract shader) ----
+// The portal quad is 7.5% larger than the opening. Inside the opening
+// (an ellipse in the portal's own proportions, growing as it opens): the
+// view through the linked portal. Around its edge: flames from two layers
+// of scrolling noise, coloured by a 1D gradient texture, brighter towards
+// the bottom; an unlinked portal fills with them.
+
+export function portalMaterial(assets: EffectAssets | null, orange: boolean): THREE.ShaderMaterial {
+	const m = new THREE.ShaderMaterial({
 		uniforms: {
-			view: {value: null},
-			hasView: {value: 0},
-			resolution: {value: new THREE.Vector2(1, 1)},
-			color: {value: color},
-			time: {value: 0},
+			view: {value: null}, hasView: {value: 0}, resolution: {value: new THREE.Vector2(1, 1)},
+			noise: {value: assets?.white ?? null}, gradient: {value: assets?.white ?? null},
+			open: {value: 1}, time: {value: 0}, exposure: {value: 1}, colorScale: {value: 4},
 		},
+		transparent: true,
+		depthWrite: false,
 		side: THREE.FrontSide,
 		vertexShader: `
-			varying vec2 vUv;
+			varying vec2 vBase;
 			void main() {
-				vUv = uv;
+				// plane: x across the portal, y up; Source's v runs downwards
+				vBase = vec2(0.5 - position.x * 0.5, 0.5 - position.y * 0.5);
 				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 			}`,
 		fragmentShader: `
-			uniform sampler2D view;
-			uniform float hasView;
+			uniform sampler2D view, noise, gradient;
+			uniform float hasView, open, time, exposure, colorScale;
 			uniform vec2 resolution;
-			uniform vec3 color;
-			uniform float time;
-			varying vec2 vUv;
+			varying vec2 vBase;
+			float linearstep(float a, float b, float x) { return clamp((x - a) / (b - a), 0.0, 1.0); }
 			void main() {
-				vec2 c = vUv * 2.0 - 1.0;
-				float r = length(c);
-				if (r > 1.0) discard;
-				vec3 inside;
-				if (hasView > 0.5) {
-					inside = texture2D(view, gl_FragCoord.xy / resolution).rgb;
-				} else {
-					// closed portal: the colour, swirling
-					float swirl = 0.5 + 0.5 * sin(atan(c.y, c.x) * 3.0 + r * 8.0 - time * 3.0);
-					inside = color * (0.35 + 0.35 * swirl);
-				}
-				// the rim glows in the portal's colour
-				float rim = smoothstep(0.82, 0.98, r);
-				gl_FragColor = vec4(mix(inside, color * 1.6, rim), 1.0);
-				#include <tonemapping_fragment>
-				#include <colorspace_fragment>
+				const float OUTER = 0.075, INNER = OUTER * 4.0;
+				vec2 uv = vBase * (1.0 + OUTER) - OUTER * 0.5;
+				float openAmount = smoothstep(0.0, 1.0, clamp(open, 0.0, 1.0));
+				float open2 = openAmount * openAmount;
+				float dist = length(uv * 2.0 - 1.0);
+				float hole = step(dist, open2);
+
+				// flames
+				vec2 noiseUv = (vBase - 0.5) / max(openAmount, 0.01) + 0.5;
+				float scroll = time * 0.0275;
+				vec4 n1 = texture2D(noise, noiseUv * 0.3 + vec2(scroll, 0.0));
+				vec4 n2 = texture2D(noise, (noiseUv * 0.3 - vec2(scroll, 0.0)).yx - n1.rg * 0.02);
+				n1 = texture2D(noise, noiseUv * 0.3 + vec2(scroll, 0.0) - n2.rg * 0.02);
+				float outerMask = (1.0 - linearstep(open2, open2 + OUTER, dist)) * (1.0 - hole);
+				float innerMask = linearstep(open2 - INNER, open2, dist) * hole;
+				float portalActive = hasView;
+				float fadeIn = max(clamp(openAmount * 2.5, 0.0, 1.0), 1.0 - portalActive);
+				float mask = (innerMask + outerMask) * fadeIn;
+				float flame = (n1.g + n2.g) * 0.5;
+				float activeNoise = smoothstep(0.0, flame, portalActive);
+				float border = 1.0 - smoothstep(mask - 0.875, mask + 0.875, flame);
+				mask *= border;
+				float alpha = clamp(mask + hole * (1.0 - activeNoise), 0.0, 1.0) * 1.5;
+				float shift = pow(abs(uv.y), 1.5) * 0.8 + 0.2;
+				vec3 flameColor = texture2D(gradient, vec2(pow(border, 0.5) * shift * alpha, 0.5)).rgb * colorScale;
+				alpha = clamp(alpha, 0.0, 1.0);
+
+				vec3 inside = hasView > 0.5 ? texture2D(view, gl_FragCoord.xy / resolution).rgb * exposure : vec3(0.0);
+				vec4 outColor = hole > 0.5 ? vec4(mix(inside, flameColor, alpha), 1.0) : vec4(flameColor, alpha);
+				if (outColor.a <= 0.003) discard;
+				gl_FragColor = linearToOutputTexel(outColor);
 			}`,
 	});
+	if (assets) {
+		const clamp = (t: THREE.Texture, repeat: boolean) => {
+			const c = t.clone();
+			c.wrapS = c.wrapT = repeat ? THREE.RepeatWrapping : THREE.ClampToEdgeWrapping;
+			c.needsUpdate = true;
+			return c;
+		};
+		assets.texture('models/portals/noise-blur-256x256').then(t => {
+			const c = clamp(t, true);
+			c.colorSpace = THREE.NoColorSpace;
+			m.uniforms.noise.value = c;
+		});
+		assets.texture(`models/portals/portal-${orange ? 'orange' : 'blue'}-color`).then(t => (m.uniforms.gradient.value = clamp(t, false)));
+	}
+	return m;
 }

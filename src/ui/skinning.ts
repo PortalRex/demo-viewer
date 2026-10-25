@@ -96,11 +96,11 @@ export class AnimatedModel {
 		this.setPose(0, 0);
 	}
 
-	setPose(sequence: number, cycle: number) {
-		const key = `${sequence}:${cycle.toFixed(4)}`;
+	setPose(sequence: number, cycle: number, params?: Record<string, number>) {
+		const key = `${sequence}:${cycle.toFixed(4)}:${params ? Object.values(params).map(v => v.toFixed(1)).join(',') : ''}`;
 		if (key === this.last) return;
 		this.last = key;
-		samplePose(this.sk, sequence, cycle, this.pose);
+		samplePose(this.sk, sequence, cycle, this.pose, params);
 		this.bones.forEach((bone, i) => {
 			bone.position.fromArray(this.pose.pos, i * 3);
 			bone.quaternion.fromArray(this.pose.quat, i * 4);

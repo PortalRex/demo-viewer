@@ -30,6 +30,12 @@ export interface Sequence {
 	label: string;
 	looping: boolean;
 	anim: AnimDesc | null;  // the first blend
+	// blend grid over up to two pose parameters (e.g. a run's move_x/move_y):
+	// blends[j * groupSize[0] + i]
+	blends: (AnimDesc | null)[];
+	groupSize: [number, number];
+	params: [string, string];          // pose parameter names ('' = none)
+	paramRange: [[number, number], [number, number]];
 }
 
 interface SourceModel {
@@ -59,6 +65,10 @@ export interface Skeleton {
 const STUDIO_LOOPING = 0x1;
 const STUDIO_DELTA = 0x4;
 const STUDIO_ALLZEROS = 0x20;
+const STUDIO_FRAMEANIM = 0x40;  // stored frame by frame (per-bone flags) instead of RLE per bone
+// frame-anim per-bone flags
+const FRAME_CONST_POS = 0x01, FRAME_CONST_ROT = 0x02, FRAME_ANIM_POS = 0x04, FRAME_ANIM_ROT = 0x08;
+const FRAME_ANIM_POS2 = 0x10, FRAME_CONST_POS2 = 0x20, FRAME_CONST_ROT2 = 0x40, FRAME_ANIM_ROT2 = 0x80;
 const ANIM_RAWPOS = 0x1, ANIM_RAWROT = 0x2, ANIM_ANIMPOS = 0x4, ANIM_ANIMROT = 0x8, ANIM_RAWROT2 = 0x20;
 
 const cstr = (b: Uint8Array, at: number) => {
@@ -121,14 +131,23 @@ function readSequences(src: SourceModel): Sequence[] {
 			sectionFrames: v.getInt32(o + 84, true),
 		};
 	};
+	// pose parameters (mstudioposeparamdesc_t, 20 bytes)
+	const nPose = v.getInt32(300, true), poseOffset = v.getInt32(304, true);
+	const poseName = (i: number) => (i >= 0 && i < nPose ? cstr(src.bytes, poseOffset + i * 20 + v.getInt32(poseOffset + i * 20, true)).toLowerCase() : '');
 	const out: Sequence[] = [];
 	for (let i = 0; i < nSeq; i++) {
 		const o = seqOffset + i * 212;
 		const animIndexIndex = v.getInt32(o + 60, true);
+		const groupSize: [number, number] = [Math.max(1, v.getInt32(o + 68, true)), Math.max(1, v.getInt32(o + 72, true))];
+		const blends: (AnimDesc | null)[] = [];
+		for (let k = 0; k < groupSize[0] * groupSize[1] && k < 64; k++) blends.push(desc(v.getInt16(o + animIndexIndex + k * 2, true)));
 		out.push({
 			label: cstr(src.bytes, o + v.getInt32(o + 4, true)).toLowerCase(),
 			looping: (v.getInt32(o + 12, true) & STUDIO_LOOPING) !== 0,
-			anim: desc(v.getInt16(o + animIndexIndex, true)),
+			anim: blends[0] ?? null,
+			blends, groupSize,
+			params: [poseName(v.getInt32(o + 76, true)), poseName(v.getInt32(o + 80, true))],
+			paramRange: [[v.getFloat32(o + 84, true), v.getFloat32(o + 92, true)], [v.getFloat32(o + 88, true), v.getFloat32(o + 96, true)]],
 		});
 	}
 	return out;
@@ -200,6 +219,79 @@ function animValue(v: DataView, p: number, frame: number): number {
 
 // one frame of an animation into pos/quat (main model bone order); bones
 // without data keep what's there (the reference pose)
+// Quaternion48: x, y in 16 bits, z in 15, w's sign in the top bit
+function quat48(v: DataView, d: number, out: Float32Array, o: number) {
+	const x = v.getUint16(d, true), y = v.getUint16(d + 2, true), zw = v.getUint16(d + 4, true);
+	const qx = (x - 32768) / 32768, qy = (y - 32768) / 32768, qz = ((zw & 0x7fff) - 16384) / 16384;
+	out[o] = qx;
+	out[o + 1] = qy;
+	out[o + 2] = qz;
+	out[o + 3] = Math.sqrt(Math.max(0, 1 - qx * qx - qy * qy - qz * qz)) * (zw & 0x8000 ? -1 : 1);
+}
+
+// Quaternion48S: the three smallest components in 15 bits each, which one
+// was dropped in two spare bits, the dropped one's sign in the third
+function quat48s(v: DataView, d: number, out: Float32Array, o: number) {
+	const w0 = v.getUint16(d, true), w1 = v.getUint16(d + 2, true), w2 = v.getUint16(d + 4, true);
+	const a = w0 & 0x7fff, b = w1 & 0x7fff, c = w2 & 0x7fff;
+	const ia = ((w1 >> 15) & 1) + ((w0 >> 15) & 1) * 2;
+	const q = [0, 0, 0, 0];
+	q[ia] = (a - 16384) / 23168;
+	q[(ia + 1) % 4] = (b - 16384) / 23168;
+	q[(ia + 2) % 4] = (c - 16384) / 23168;
+	const id = (ia + 3) % 4;
+	q[id] = Math.sqrt(Math.max(0, 1 - q[ia] * q[ia] - q[(ia + 1) % 4] ** 2 - q[(ia + 2) % 4] ** 2)) * (w2 & 0x8000 ? -1 : 1);
+	out[o] = q[0];
+	out[o + 1] = q[1];
+	out[o + 2] = q[2];
+	out[o + 3] = q[3];
+}
+
+// a frame of a frame-anim: a 24-byte header (constants offset, frame data
+// offset, frame length), a flags byte per bone, then per bone the rotation
+// and the position, each either in the shared constants or in the frame
+function sampleFrameAnim(src: SourceModel, v: DataView, p: number, frame: number, pos: Float32Array, quat: Float32Array) {
+	if (p + 24 > v.byteLength) return;
+	let c = p + v.getInt32(p, true);
+	let d = p + v.getInt32(p + 4, true) + frame * v.getInt32(p + 8, true);
+	for (let srcBone = 0; srcBone < src.bones.length; srcBone++) {
+		const flags = v.getUint8(p + 24 + srcBone);
+		const bone = src.toMain[srcBone] ?? -1;
+		const q = new Float32Array(4);
+		let hasQ = true;
+		if (flags & FRAME_ANIM_ROT) {
+			quat48(v, d, q, 0);
+			d += 6;
+		} else if (flags & FRAME_ANIM_ROT2) {
+			quat48s(v, d, q, 0);
+			d += 6;
+		} else if (flags & FRAME_CONST_ROT) {
+			quat48(v, c, q, 0);
+			c += 6;
+		} else if (flags & FRAME_CONST_ROT2) {
+			quat48s(v, c, q, 0);
+			c += 6;
+		} else hasQ = false;
+		let pp: number[] | null = null;
+		if (flags & FRAME_ANIM_POS) {
+			pp = [half(v.getUint16(d, true)), half(v.getUint16(d + 2, true)), half(v.getUint16(d + 4, true))];
+			d += 6;
+		} else if (flags & FRAME_CONST_POS) {
+			pp = [half(v.getUint16(c, true)), half(v.getUint16(c + 2, true)), half(v.getUint16(c + 4, true))];
+			c += 6;
+		} else if (flags & FRAME_ANIM_POS2) {
+			pp = [v.getFloat32(d, true), v.getFloat32(d + 4, true), v.getFloat32(d + 8, true)];
+			d += 12;
+		} else if (flags & FRAME_CONST_POS2) {
+			pp = [v.getFloat32(c, true), v.getFloat32(c + 4, true), v.getFloat32(c + 8, true)];
+			c += 12;
+		}
+		if (bone < 0) continue;
+		if (hasQ) quat.set(q, bone * 4);
+		if (pp) pos.set(pp, bone * 3);
+	}
+}
+
 function sampleFrame(desc: AnimDesc, frame: number, pos: Float32Array, quat: Float32Array) {
 	const src = desc.src;
 	let block = desc.animBlock, index = desc.animIndex, local = frame;
@@ -222,6 +314,10 @@ function sampleFrame(desc: AnimDesc, frame: number, pos: Float32Array, quat: Flo
 	}
 	if (desc.flags & STUDIO_ALLZEROS) return;
 	const delta = (desc.flags & STUDIO_DELTA) !== 0;
+	if (desc.flags & STUDIO_FRAMEANIM) {
+		if (!delta) sampleFrameAnim(src, v, p, local, pos, quat);
+		return;
+	}
 	for (let guard = 0; guard < 512 && p + 4 <= v.byteLength; guard++) {
 		const srcBone = v.getUint8(p), flags = v.getUint8(p + 1), next = v.getInt16(p + 2, true);
 		const bone = src.toMain[srcBone] ?? -1;
@@ -285,11 +381,24 @@ export function sequenceRate(sk: Skeleton, seq: number): number {
 	return a && a.frames > 1 ? a.fps / (a.frames - 1) : 0;
 }
 
-export function samplePose(sk: Skeleton, seq: number, cycle: number, out: Pose) {
+// the blend of a sequence nearest the given pose parameter values
+export function blendFor(s: Sequence, values: Record<string, number>): AnimDesc | null {
+	const index = (k: 0 | 1) => {
+		const n = s.groupSize[k], name = s.params[k];
+		if (n < 2 || !name || values[name] === undefined) return 0;
+		const [lo, hi] = s.paramRange[k];
+		const t = hi === lo ? 0 : (values[name] - lo) / (hi - lo);
+		return Math.min(n - 1, Math.max(0, Math.round(t * (n - 1))));
+	};
+	return s.blends[index(1) * s.groupSize[0] + index(0)] ?? s.anim;
+}
+
+export function samplePose(sk: Skeleton, seq: number, cycle: number, out: Pose, params?: Record<string, number>) {
 	const ref = (sk.ref ??= referencePose(sk));
 	out.pos.set(ref.pos);
 	out.quat.set(ref.quat);
-	const a = sk.sequences[seq]?.anim;
+	const s = sk.sequences[seq];
+	const a = s && params ? blendFor(s, params) : s?.anim;
 	if (!a || a.frames < 1) return;
 	const f = Math.min(1, Math.max(0, cycle)) * (a.frames - 1);
 	const f0 = Math.floor(f), f1 = Math.min(a.frames - 1, f0 + 1), t = f - f0;
