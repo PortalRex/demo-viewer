@@ -148,6 +148,7 @@ class MaterialLibrary {
 	readonly materials: Materials;
 	readonly textures: TextureCache;
 	private lightmap: THREE.Texture | null;
+	cameraTexture: THREE.Texture | null = null;  // what point_cameras draw into (see View3D.renderMonitorCamera)
 	private world = new Map<string, THREE.Material>();
 	private model = new Map<string, THREE.Material>();
 	private litModel = new Map<string, THREE.Material>();
@@ -175,6 +176,18 @@ class MaterialLibrary {
 	}
 
 	private apply(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
+		// a monitor screen ($basetexture _rt_Camera): what the active
+		// point_camera sees, unlit, tinted as dev_tvmonitor's proxies hold it
+		if (info.baseTexture === '_rt_camera' && this.cameraTexture) {
+			mat.userData.textureless = true;
+			mat.userData.cameraScreen = true;
+			mat.vertexColors = false;
+			mat.lightMap = null;
+			mat.map = this.cameraTexture;
+			mat.color.setRGB(0.9, 0.95, 1);
+			mat.needsUpdate = true;
+			return;
+		}
 		if (info.shader === 'refract') {
 			this.applyRefract(mat, info);
 			return;
@@ -913,6 +926,7 @@ export class View3D {
 			this.textures = new TextureCache(files);
 		} else this.textures.newMap();
 		this.library = new MaterialLibrary(this.textures, materials, lightTex);
+		this.library.cameraTexture = this.cameraTarget.texture;
 		this.library.setBackFaces(this.mode !== 'eyes');
 		this.library.onChange = () => this.loaded();
 		this.effects = new EffectAssets(materials, this.library.textures);
@@ -1737,6 +1751,53 @@ export class View3D {
 			const end = start.clone().lerp(vec3(e.m_vEnd)!, Math.max(grown, 0.001));
 			(o.userData.funnel as Funnel).set(start, end, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time, Number(e.m_bFromPortal) === 1, Number(e.m_bToPortal) === 1 && grown >= 1);
 		}
+	}
+
+	// Monitor screens (func_monitor, _rt_Camera): the scene as the active
+	// point_camera sees it, drawn into a texture when a screen is in view
+	// (unexposed, as the frame is, so the screen takes the view's exposure)
+	private cameraTarget = new THREE.WebGLRenderTarget(512, 512, {type: THREE.HalfFloatType});
+	private monitorCam = new THREE.PerspectiveCamera(90, 1, 4, 40000);
+	private renderMonitorCamera(r: THREE.WebGLRenderer) {
+		const ents = this.entities;
+		if (!ents) return;
+		const tick = this.meterTick;
+		const screens: THREE.Mesh[] = [];
+		const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse));
+		this.entityGroup.traverseVisible(o => {
+			const mesh = o as THREE.Mesh;
+			if (mesh.isMesh && (mesh.material as THREE.Material)?.userData?.cameraScreen) screens.push(mesh);
+		});
+		if (!screens.some(m => frustum.intersectsObject(m))) return;
+		const cam = ents.tracks.find(t => t.className === 'CPointCamera' && Number(keyAt(t, tick)?.extra?.m_bActive) === 1);
+		const k = cam && keyAt(cam, tick);
+		if (!cam || !k) return;
+		const pose = this.entityPose(cam, tick);
+		const mc = this.monitorCam;
+		// (m_FOV across, at the screen texture's square aspect: the same up and down)
+		mc.fov = Number(k.extra?.m_FOV) || 90;
+		mc.position.copy(pose.origin);
+		// (Source's x forward, y left, z up as a camera looking down -z)
+		const basis = new THREE.Matrix4().makeRotationFromEuler(toEuler(pose.angles));
+		const fwd = new THREE.Vector3(), left = new THREE.Vector3(), up = new THREE.Vector3();
+		basis.extractBasis(fwd, left, up);
+		mc.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(left.negate(), up, fwd.negate()));
+		mc.updateProjectionMatrix();
+		mc.updateMatrixWorld();
+		for (const m of screens) m.visible = false;
+		// (its own fog: none unless it turns it on, not the player's)
+		const fog = this.scene.fog, density = fogUniforms.fogMaxDensity.value;
+		if (Number(k.extra?.m_bFogEnable) !== 1) {
+			this.scene.fog = null;
+			fogUniforms.fogMaxDensity.value = 0;
+		}
+		const target = r.getRenderTarget();
+		r.setRenderTarget(this.cameraTarget);
+		r.render(this.scene, mc);
+		r.setRenderTarget(target);
+		this.scene.fog = fog;
+		fogUniforms.fogMaxDensity.value = density;
+		for (const m of screens) m.visible = true;
 	}
 
 	// Whether a point shows from the eye (for particles' visibility proxies):
@@ -3653,6 +3714,7 @@ export class View3D {
 			this.meterExposure(r, waiting.length === 0);
 			this.updateFog();
 		}
+		this.renderMonitorCamera(r);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
 		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
 		// Everything is drawn linear and unexposed into one HDR frame (as the

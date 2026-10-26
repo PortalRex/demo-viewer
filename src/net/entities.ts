@@ -72,6 +72,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)
 	CEnvProjectedTexture: ['m_hTargetEntity', 'm_bCameraSpace', 'm_bState', 'm_flLightFOV', 'm_LightColor', 'm_flBrightnessScale', 'm_SpotlightTextureName', 'm_flNearZ', 'm_flFarZ', 'm_bEnableShadows', 'm_bLightWorld'],
+	// monitor cameras (point_camera): what _rt_Camera screens show
+	CPointCamera: ['m_FOV', 'm_bActive', 'm_bUseScreenAspectRatio', 'm_bFogEnable', 'm_FogColor', 'm_flFogStart', 'm_flFogEnd', 'm_flFogMaxDensity'],
 	// funnel projectors: their emitters' particles (direction and on)
 	CPropTractorBeamProjector: ['m_flLinearForce', 'm_bEnabled', 'm_bNoEmitterParticles'],
 	// fire on something (C_EntityFlame's burning_character): what it's on
