@@ -2873,12 +2873,25 @@ export class View3D {
 	}
 
 	// the recording player's view model, posed by its networked animation
+	// the camera entity the recording player's view is handed to
+	// (m_hViewEntity: point_viewcontrol), as a world matrix, while it is
+	private viewEntity: THREE.Matrix4 | null = null;
+	private viewEntityMatrix(pk: EntityKey | undefined, tick: number): THREE.Matrix4 | null {
+		const h = Number(pk?.extra?.m_hViewEntity ?? -1);
+		const index = h & 2047;
+		if (h < 0 || index === 2047 || index === this.followTrack?.index) return null;
+		const t = (this.tracksByIndex.get(index) ?? []).find(c => keyAt(c, tick));
+		const k = t && keyAt(t, tick);
+		return t && k ? this.worldMatrix(t, k, tick, 0) : null;
+	}
+
 	private updateViewModel(tick: number) {
 		if (this.vmShown) this.vmShown.visible = false;
 		this.vmShown = null;
 		const ents = this.entities;
-		// the view model belongs to the recording player
-		if (!ents || this.mode !== 'eyes' || this.followed) return;
+		// the view model belongs to the recording player (and isn't drawn
+		// through a view entity's camera)
+		if (!ents || this.mode !== 'eyes' || this.followed || this.viewEntity) return;
 		// co-op recordings carry both players' view models: the one the
 		// recording player owns
 		const me = ents.player?.index;
@@ -3764,7 +3777,15 @@ export class View3D {
 			this.player.visible = this.mode !== 'eyes' && !ents?.player;
 			const eye = feet.clone();
 			eye.z += pk?.eyeZ ?? DEFAULT_EYE;
-			if (this.mode === 'eyes') {
+			this.viewEntity = this.mode === 'eyes' && !other ? this.viewEntityMatrix(pk, tick) : null;
+			if (this.viewEntity) {
+				// a camera the view's been handed to (point_viewcontrol):
+				// Source's forward is its x axis, up its z
+				const m = this.viewEntity;
+				const fwd = new THREE.Vector3().setFromMatrixColumn(m, 0).normalize(), up = new THREE.Vector3().setFromMatrixColumn(m, 2).normalize();
+				this.camera.position.setFromMatrixPosition(m);
+				this.camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(fwd.clone().cross(up), up, fwd.negate()));
+			} else if (this.mode === 'eyes') {
 				const ang = otherPose ? otherPose.angles : view?.angles ?? pk?.angles ?? [0, 0, 0];
 				this.eyeAngles = ang;
 				this.camera.position.copy(eye);

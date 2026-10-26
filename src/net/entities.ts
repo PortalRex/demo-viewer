@@ -52,7 +52,7 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CTrigger_TractorBeam: ['m_vStart', 'm_vEnd', 'm_flRadius', 'm_bReversed', 'm_bDisabled', 'm_linearForce', 'm_bFromPortal', 'm_bToPortal'],
 	CTriggerPortalCleanser: ['m_bDisabled', 'm_bVisible'],
 	// which fog and tonemap controllers apply to the player
-	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController', 'm_hAttachedObject', 'm_bUseVMGrab', 'm_bUsingVMGrabState', 'm_fFlags',
+	CPortal_Player: ['m_PlayerFog.m_hCtrl', 'localdata.m_hTonemapController', 'm_hAttachedObject', 'm_bUseVMGrab', 'm_bUsingVMGrabState', 'm_fFlags', 'm_hViewEntity',
 		// challenge mode: its type, and the stats its HUD shows
 		'localdata.m_iBonusChallenge', 'm_iBonusChallenge', 'm_StatsThisLevel.iNumPortalsPlaced', 'm_StatsThisLevel.fNumSecondsTaken',
 		// the funnel they're in (the recording player's only)
