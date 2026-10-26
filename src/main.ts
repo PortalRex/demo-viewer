@@ -432,6 +432,33 @@ function showHudText(tick: number) {
 	hudText?.draw(hud && titlesShown ? hud.messages : null, tick * (hud?.interval ?? 0), hud?.interval ?? 0);
 }
 
+// brightening for dark maps, as autorender renders them (its maps'
+// auto_fullbright flag: mat_ambient_light 0.05), on by default where it
+// does; the choice is remembered per map
+const AUTO_BRIGHT = new Set(['sp_a2_bts3']);
+const BRIGHT_AMBIENT = 0.05;
+let brightMaps: Record<string, boolean> = {};
+try {
+	brightMaps = JSON.parse(localStorage.getItem('brightMaps') ?? '{}');
+} catch {}
+const brightOn = (map: string) => brightMaps[map] ?? AUTO_BRIGHT.has(map);
+function showBright(map: string | null) {
+	$('bright-toggle').hidden = !map;
+	if (!map) return;
+	const on = brightOn(map);
+	$('bright-toggle').classList.toggle('on', on);
+	view3d.extraAmbient = on ? BRIGHT_AMBIENT : 0;
+}
+$('bright-toggle').onclick = () => {
+	const map = pb?.locate(t).track.seg.map;
+	if (!map) return;
+	brightMaps[map] = !brightOn(map);
+	try {
+		localStorage.setItem('brightMaps', JSON.stringify(brightMaps));
+	} catch {}
+	render();
+};
+
 function showCmHud(stats: {portals: number; seconds: number} | null) {
 	$('cm-toggle').hidden = !stats;
 	$('cm-hud').hidden = !stats || !cmShown;
@@ -487,6 +514,7 @@ function render() {
 	}
 	const view = viewAt(loc.track, loc.tick);
 	const cmd = cmdAt(loc.track, loc.tick);
+	showBright(viewMode === '3d' ? seg.map : null);
 	if (viewMode === '3d') view3d.update(view, loc.tick);
 	else pathView.draw(view, loc.tick, seg.sar);
 	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null);

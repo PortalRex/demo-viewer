@@ -723,6 +723,9 @@ export class View3D {
 	// bumped when a style changes, for models to be re-lit
 	private styleGen = 0;
 	private ambientLight: {tick: number; rgb: [number, number, number]}[] = [];
+	// mat_ambient_light set before playback (the Bright toggle: autorender
+	// sets 0.05 for maps it brightens); the recording's own commands win
+	extraAmbient = 0;
 	private styleNow = (style: number) => this.styleValues.get(style) ?? 1;
 	// fog (colour 0..255, gamma) and auto exposure: the map's defaults until
 	// the player's controllers say otherwise
@@ -3998,7 +4001,7 @@ export class View3D {
 			}
 		}
 
-		let ambient: [number, number, number] = [0, 0, 0];
+		let ambient: [number, number, number] = [this.extraAmbient, this.extraAmbient, this.extraAmbient];
 		for (const a of this.ambientLight) if (a.tick <= tick) ambient = a.rgb;
 		modelAmbientUniforms.modelAmbient.value.set(...ambient);
 		if (ents) this.placeAttached(tick);
