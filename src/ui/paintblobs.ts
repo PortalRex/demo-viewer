@@ -22,6 +22,10 @@ const CUTOFF_RATIO = 5.5 / 1.3;
 const GRID = 8;
 const CAPACITY = 4096;
 const CELL = 160;           // the patches of space a surface is built in
+// each cell's grid reaches a blob's field (and a step) past it, in whole
+// steps so neighbouring cells' grids share their points and the surfaces
+// they both build meet exactly
+const PAD = (Math.ceil(RADIUS * CUTOFF_RATIO / GRID) + 1) * GRID;
 const MAX_CELLS = 32;
 
 export interface Sprayer {
@@ -138,46 +142,81 @@ export class PaintBlobs {
 	private draw(blobs: Blob[]) {
 		const byCell = new Map<string, {key: number[]; list: Blob[]}>();
 		const reach = RADIUS * CUTOFF_RATIO;
-		for (const b of blobs) {
-			const lo = [0, 1, 2].map(a => Math.floor((b.pos.getComponent(a) - reach) / CELL));
-			const hi = [0, 1, 2].map(a => Math.floor((b.pos.getComponent(a) + reach) / CELL));
-			for (let x = lo[0]; x <= hi[0]; x++) for (let y = lo[1]; y <= hi[1]; y++) for (let z = lo[2]; z <= hi[2]; z++) {
-				const id = `${x},${y},${z}`;
-				let c = byCell.get(id);
-				if (!c) byCell.set(id, c = {key: [x, y, z], list: []});
-				c.list.push(b);
-			}
-		}
+		// the cells blobs reach into, each with every blob whose field reaches
+		// its padded grid (so cells build the same surface where they overlap)
+		const cells = (b: Blob, r: number, each: (id: string, key: number[]) => void) => {
+			const lo = [0, 1, 2].map(a => Math.floor((b.pos.getComponent(a) - r) / CELL));
+			const hi = [0, 1, 2].map(a => Math.floor((b.pos.getComponent(a) + r) / CELL));
+			for (let x = lo[0]; x <= hi[0]; x++) for (let y = lo[1]; y <= hi[1]; y++) for (let z = lo[2]; z <= hi[2]; z++) each(`${x},${y},${z}`, [x, y, z]);
+		};
+		for (const b of blobs) cells(b, reach, (id, key) => byCell.has(id) || byCell.set(id, {key, list: []}));
+		for (const b of blobs) cells(b, reach + PAD, id => byCell.get(id)?.list.push(b));
 		let used = 0;
 		for (const {key, list} of byCell.values()) {
 			if (used >= MAX_CELLS) break;
 			let cube = this.cells[used];
 			if (!cube) {
-				// (the grid covers the cell and a blob's reach either side)
-				cube = new MarchingCubes(Math.ceil((CELL + RADIUS * CUTOFF_RATIO * 2) / GRID), this.material, false, true, 30000);
+				cube = new MarchingCubes((CELL + PAD * 2) / GRID, this.material, false, true, 30000);
 				cube.frustumCulled = false;
 				this.cells.push(cube);
 				this.group.add(cube);
 			}
 			used++;
-			// (padded by a blob's reach either side: the grid's outer layer isn't drawn)
-			const size = CELL + reach * 2;
-			const min = new THREE.Vector3(key[0] * CELL - reach, key[1] * CELL - reach, key[2] * CELL - reach);
+			const size = CELL + PAD * 2;
+			const min = new THREE.Vector3(key[0] * CELL - PAD, key[1] * CELL - PAD, key[2] * CELL - PAD);
 			cube.position.copy(min).addScalar(size / 2);
 			cube.scale.setScalar(size / 2);
 			cube.reset();
-			// (a ball's field: strength / d^2 - subtract, gone at sqrt(strength /
-			// subtract), its surface where it reaches the isolation level: at
-			// its radius for this strength, with the reach the game's has)
-			const subtract = cube.isolation / (CUTOFF_RATIO * CUTOFF_RATIO - 1);
-			for (const b of list) {
-				const r = b.radius / size;
-				cube.addBall((b.pos.x - min.x) / size, (b.pos.y - min.y) / size, (b.pos.z - min.z) / size, r * r * (cube.isolation + subtract), subtract, b.color);
-			}
+			this.fill(cube, list, min, size);
 			cube.update();
 			cube.visible = true;
 		}
 		for (let i = used; i < this.cells.length; i++) this.cells[i].visible = false;
+	}
+
+	// The blobs' field on a cell's grid: each a soft ball (1 - d^2/R^2)^3
+	// reaching its cutoff radius R, the surface where a lone one's field is at
+	// its render radius, so neighbours within about R of each other run
+	// together into one stream; the colour is the blobs' own, weighted by
+	// their field
+	private weight = new Float32Array(0);
+	private fill(cube: MarchingCubes, blobs: Blob[], min: THREE.Vector3, size: number) {
+		const n = cube.size, n2 = n * n;
+		const field = cube.field, palette = cube.palette;
+		if (this.weight.length !== field.length) this.weight = new Float32Array(field.length);
+		const weight = this.weight;
+		weight.fill(0);
+		const cell = size / n;  // world units per grid step
+		cube.isolation = (1 - 1 / (CUTOFF_RATIO * CUTOFF_RATIO)) ** 3;
+		for (const b of blobs) {
+			const reach = b.radius * CUTOFF_RATIO / cell;  // in grid steps
+			const cx = (b.pos.x - min.x) / cell, cy = (b.pos.y - min.y) / cell, cz = (b.pos.z - min.z) / cell;
+			// (not the grid's outer layer: its normals aren't defined)
+			const lo = (c: number) => Math.max(1, Math.ceil(c - reach)), hi = (c: number) => Math.min(n - 2, Math.floor(c + reach));
+			const inv = 1 / (reach * reach);
+			for (let z = lo(cz); z <= hi(cz); z++) {
+				const dz2 = (z - cz) ** 2;
+				for (let y = lo(cy); y <= hi(cy); y++) {
+					const dyz2 = dz2 + (y - cy) ** 2;
+					for (let x = lo(cx); x <= hi(cx); x++) {
+						const t = 1 - (dyz2 + (x - cx) ** 2) * inv;
+						if (t <= 0) continue;
+						const v = t * t * t, i = z * n2 + y * n + x;
+						field[i] += v;
+						weight[i] += v;
+						palette[i * 3] += b.color.r * v;
+						palette[i * 3 + 1] += b.color.g * v;
+						palette[i * 3 + 2] += b.color.b * v;
+					}
+				}
+			}
+		}
+		for (let i = 0; i < weight.length; i++) {
+			if (weight[i] <= 0) continue;
+			palette[i * 3] /= weight[i];
+			palette[i * 3 + 1] /= weight[i];
+			palette[i * 3 + 2] /= weight[i];
+		}
 	}
 
 	// a blob as FirePaintBlob fires it: from a random point of the spray
