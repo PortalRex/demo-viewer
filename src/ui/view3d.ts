@@ -3052,11 +3052,13 @@ export class View3D {
 			if (!fp && eyes && owner === me && owner !== undefined) return;
 			// runs until the server stops that entity's effects
 			const stop = ents.effects.find(s => s.name === 'ParticleEffectStop' && s.entity === fx.entity && s.tick > fx.tick)?.tick ?? Infinity;
-			// where it's attached (m_nDamageType holds the attach type): at an
-			// attachment, or following the entity's origin (a lasered cube's
-			// glow), these taken afresh each frame; else where it was sent from
+			// where it's attached (m_nDamageType holds the attach type,
+			// ParticleAttachment_t): following the entity's origin (a lasered
+			// cube's glow), an attachment (the gun's muzzle, a laser relay's
+			// emitter), its eyes, top or root bone, these taken afresh each
+			// frame; else where it was sent from
 			const attach = fx.damageType;
-			const follow = attach === 1 || attach === 4;
+			const follow = [1, 3, 5, 6, 7, 9].includes(attach);
 			run(`fx:${n}`, name, fx.tick, stop, () => {
 				let cp = this.attachmentAt(fx.entity, fx.attachment, tick, fp);
 				if (!cp && attach === 1) {
