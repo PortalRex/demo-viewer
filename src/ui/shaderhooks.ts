@@ -59,23 +59,118 @@ const BACKFACE_FRAGMENT = `
 #endif
 `;
 
-// goo (Water shader with a colour texture): the colour texture at a
-// 400-unit world scale, flowing: two copies drifting and cross-fading on a
-// 6 second cycle, as the shader's colour flow does
-export const gooUniforms = {
-	gooTime: {value: 0},
+// the Water shader (its flowing, expensive version): a normal map flowing
+// along the map's flow map in two layers that cross-fade, a sludge layer
+// (with a base texture) flowing the same way over the fog colour, and the
+// reflection blended in by fresnel. The time and the camera's right and
+// forward along the surface (what bends the reflection) are shared
+export const waterUniforms = {
+	waterTime: {value: 0},
+	waterRight: {value: new THREE.Vector3(1, 0, 0)},
+	waterForward: {value: new THREE.Vector3(0, 1, 0)},
 };
 
-const GOO_FRAGMENT = `
-#if defined(GOO) && defined(USE_MAP)
+// a Water material's own (filled by View3D's material library)
+export function waterMaterialUniforms() {
+	return {
+		waterNormal: {value: null as THREE.Texture | null},
+		waterBase: {value: null as THREE.Texture | null},
+		waterNoise: {value: null as THREE.Texture | null},
+		waterReflect: {value: null as THREE.Texture | null},
+		waterCube: {value: null as THREE.CubeTexture | null},
+		waterCubeScale: {value: 1},
+		waterReflectMatrix: {value: new THREE.Matrix4()},
+		waterFlowA: {value: new THREE.Vector4()},  // 1 / flow map scale, 1 / normal map scale, bump strength, sludge parallax
+		waterFlowB: {value: new THREE.Vector4()},  // flow interval, scroll distance, noise scale, reflection bend
+		waterColor: {value: new THREE.Vector4()},  // sludge: 1 / scale, interval, scroll distance, cross-fade exponent
+		waterReflectTint: {value: new THREE.Vector3()},
+		waterFogColor: {value: new THREE.Vector3()},
+	};
+}
+
+const WATER_HEAD = `
+#ifdef WATER
+uniform float waterTime;
+uniform vec3 waterRight;
+uniform vec3 waterForward;
+uniform sampler2D waterNormal;
+uniform sampler2D waterBase;
+uniform sampler2D waterNoise;
+uniform sampler2D waterReflect;
+uniform samplerCube waterCube;
+uniform float waterCubeScale;
+uniform mat4 waterReflectMatrix;
+uniform vec4 waterFlowA;
+uniform vec4 waterFlowB;
+uniform vec4 waterColor;
+uniform vec3 waterReflectTint;
+uniform vec3 waterFogColor;
+#endif
+`;
+
+// (lit with a white albedo: what the lighting leaves is the light)
+const WATER_ALBEDO = `
+#ifdef WATER
+	diffuseColor = vec4(1.0, 1.0, 1.0, opacity);
+#endif
+`;
+
+const WATER_FRAGMENT = `
+#if defined(WATER) && defined(USE_MAP)
 	{
-		vec2 guv = vDitherWorld.xy / 400.0;
-		float phase = fract(gooTime / 6.0);
-		vec2 drift = vec2(0.8, 0.6) * 0.105;
-		vec4 g1 = texture2D(map, guv + drift * phase);
-		vec4 g2 = texture2D(map, guv + drift * fract(phase + 0.5) + 0.37);
-		float w = abs(1.0 - 2.0 * phase);
-		diffuseColor = vec4(mix(g2.rgb, g1.rgb, w), 1.0);
+		vec3 light = outgoingLight;
+		vec3 toCam = normalize(cameraPosition - vDitherWorld);
+		vec2 wxy = vec2(vDitherWorld.x, -vDitherWorld.y);
+		vec3 n = vec3(0.0, 0.0, 1.0);
+		vec4 flowColor = vec4(0.0);
+	#ifdef WATER_FLOW
+		// (the material's map is the flow map)
+		float noise = texture2D(waterNoise, wxy * waterFlowB.z).g;
+		vec4 flow = texture2D(map, vMapUv * waterFlowA.x);
+		vec2 dir = flow.rg * 2.0 - 1.0;
+		float t = waterTime / (waterFlowB.x * 2.0) + noise;
+		vec2 uv = wxy * waterFlowA.y;
+		vec4 n1 = texture2D(waterNormal, uv + floor(t) * 0.311 + fract(t) * waterFlowB.y * dir);
+		vec4 n2 = texture2D(waterNormal, uv + floor(t + 0.5) * 0.311 + 0.5 + fract(t + 0.5) * waterFlowB.y * dir);
+		float w2 = abs(2.0 * fract(t) - 1.0);
+		vec2 nxy = (mix(n1.xy, n2.xy, w2) * 2.0 - 1.0) * (dot(dir, dir) + 0.1) * waterFlowA.z;
+		n = vec3(nxy, sqrt(clamp(1.0 - dot(nxy, nxy), 0.0, 1.0)));
+	#ifdef WATER_BASE
+		// the sludge: two copies of the colour texture flowing and
+		// cross-fading, shifted by parallax, masked by the flow map's alpha
+		vec2 cuv = wxy * waterColor.x + (toCam.xy - n.xy) * mix(n1.a, n2.a, w2) * waterFlowA.w;
+		float ct = waterTime / (waterColor.y * 2.0) + noise;
+		vec4 c1 = texture2D(waterBase, cuv + floor(ct) * 0.311 + (fract(ct) - 0.5) * waterColor.z * dir);
+		vec4 c2 = texture2D(waterBase, cuv + floor(ct + 0.5) * 0.311 + 0.5 + (fract(ct + 0.5) - 0.5) * waterColor.z * dir);
+		flowColor = (c1 * pow(abs(2.0 * fract(ct + 0.5) - 1.0), waterColor.w) + c2 * pow(abs(2.0 * fract(ct) - 1.0), waterColor.w)) * flow.a;
+	#endif
+	#else
+		n = normalize(texture2D(map, vMapUv).xyz * 2.0 - 1.0);
+	#endif
+		float fresnel = 0.2 + 0.8 * pow(1.0 - clamp(dot(toCam, n), 0.0, 1.0), 5.0);
+		vec3 reflection = vec3(0.0);
+	#if defined(WATER_PLANAR)
+		vec4 rp = waterReflectMatrix * vec4(vDitherWorld, 1.0);
+		reflection = texture2D(waterReflect, rp.xy / rp.w + vec2(dot(waterRight, n), dot(waterForward, n)) * waterFlowB.w).rgb;
+	#elif defined(WATER_CUBE)
+		reflection = waterCubeScale * textureCube(waterCube, reflect(-toCam, n)).rgb;
+	#endif
+		reflection *= waterReflectTint;
+		// (what's below the surface is taken as fogged over: they're deep)
+		vec3 fog = waterFogColor;
+		vec3 sludgeLight = vec3(1.0);
+	#ifdef WATER_LMFOG
+		fog *= light;
+		sludgeLight = light;
+	#endif
+	#if defined(WATER_BASE) && defined(WATER_FLOW)
+		vec3 under = mix(fog, flowColor.rgb * sludgeLight, clamp(flowColor.a * 2.0, 0.0, 1.0));
+		outgoingLight = mix(under, reflection, clamp(fresnel * (1.0 - smoothstep(0.5, 0.7, flowColor.a)), 0.0, 1.0));
+	#elif defined(WATER_REFRACT)
+		outgoingLight = fog + fresnel * reflection;
+	#else
+		outgoingLight = mix(fog, reflection, fresnel);
+	#endif
 	}
 #endif
 `;
@@ -579,7 +674,8 @@ function hook(material: THREE.Material, paint: boolean) {
 		}
 	}
 	material.onBeforeCompile = shader => {
-		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms, exposureUniforms, flashUniforms, modelAmbientUniforms);
+		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, exposureUniforms, flashUniforms, modelAmbientUniforms);
+		if (material.userData.waterUniforms) Object.assign(shader.uniforms, waterUniforms, material.userData.waterUniforms);
 		if (paint) {
 			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
@@ -627,13 +723,13 @@ function hook(material: THREE.Material, paint: boolean) {
 			'#include <project_vertex>',
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n\tvDitherUp = normalize(mat3(modelMatrix) * normal).z;',
 		);
-		shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', REFRACT_FRAGMENT + '#include <opaque_fragment>');
-		shader.fragmentShader = DITHER_FRAGMENT_HEAD + FOG_HEAD + FLASH_HEAD + 'uniform float fogMaxDensity;\nuniform float gooTime;\n' + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
+		shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', REFRACT_FRAGMENT + WATER_FRAGMENT + '#include <opaque_fragment>');
+		shader.fragmentShader = DITHER_FRAGMENT_HEAD + FOG_HEAD + FLASH_HEAD + 'uniform float fogMaxDensity;\n' + WATER_HEAD + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
-			.replace('#include <map_fragment>', '#include <map_fragment>\n' + GOO_FRAGMENT + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
+			.replace('#include <map_fragment>', '#include <map_fragment>\n' + WATER_ALBEDO + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.GOO !== undefined ? '+goo' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

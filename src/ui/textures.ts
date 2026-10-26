@@ -81,9 +81,14 @@ export class TextureCache {
 		if (!data || data.length < level.size) return null;
 		const dxt = level.format === VtfFormat.DXT1 || level.format === VtfFormat.DXT1_ONEBITALPHA || level.format === VtfFormat.DXT3 || level.format === VtfFormat.DXT5;
 		// (WebGL takes DXT base levels in whole 4x4 blocks only)
+		// (the full size, as the material's mapped by: the level drawn can be smaller)
+		const fullSize = [head[16] | head[17] << 8, head[18] | head[19] << 8];
 		if (dxt && compressedSupport.dxt && (linear || compressedSupport.srgb) && level.width % 4 === 0 && level.height % 4 === 0) {
 			const tex = await this.compressed(file, head, level, linear);
-			if (tex) return tex;
+			if (tex) {
+				tex.userData.fullSize = fullSize;
+				return tex;
+			}
 		}
 		const img = {...level, data};
 		const rgba = decodeVtf(img);
@@ -98,6 +103,7 @@ export class TextureCache {
 		tex.flipY = false;
 		tex.needsUpdate = true;
 		tex.userData.hasAlpha = img.hasAlpha;
+		tex.userData.fullSize = fullSize;
 		return tex;
 	}
 

@@ -7,7 +7,7 @@ import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {composeLightmap, styleValue} from '../game/bsp.ts';
 import type {BspMap, MeshData, MaterialGroup, ModelMesh} from '../game/bsp.ts';
 import type {GameFiles} from '../game/files.ts';
-import type {Materials, MaterialInfo} from '../game/materials.ts';
+import type {Materials, MaterialInfo, WaterParams} from '../game/materials.ts';
 import {readVtfCube, decodeVtf, VtfFormat} from '../game/vtf.ts';
 import {loadModel} from '../game/mdl.ts';
 import type {StudioModel, ModelGroup} from '../game/mdl.ts';
@@ -18,7 +18,7 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints, InstanceState} from './particles.ts';
-import {AMBIENT_SCALE, modelAmbientUniforms, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, setModelEnvCube, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
+import {AMBIENT_SCALE, modelAmbientUniforms, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, waterUniforms, waterMaterialUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, setModelEnvCube, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
 import {TextureCache, compressedSupport} from './textures.ts';
 import {anyVisible} from '../game/vis.ts';
 import {Zip} from '../game/zip.ts';
@@ -213,13 +213,11 @@ class MaterialLibrary {
 			mat.needsUpdate = true;
 			return;
 		}
-		if (info.shader === 'water' && info.baseTexture) {
-			// goo: opaque (its fog ends within inches), flowing, lit
-			mat.transparent = false;
-			mat.depthWrite = true;
-			mat.opacity = 1;
-			mat.defines = {...mat.defines, GOO: ''};
-		} else if (info.translucent || info.liquid) {
+		if (info.water) {
+			this.applyWater(mat, info);
+			return;
+		}
+		if (info.translucent || info.liquid) {
 			mat.transparent = true;
 			mat.depthWrite = false;
 			mat.opacity = info.liquid && !info.baseTexture ? 0.6 : info.alpha;
@@ -270,6 +268,62 @@ class MaterialLibrary {
 			mat.needsUpdate = true;
 			this.onChange();
 		});
+	}
+
+	// a Water surface: opaque (its fog ends within inches), drawn by the water
+	// shader over its flow map; a reflection of the scene is drawn for it
+	// each frame (View3D.renderWaterReflections), a cubemap's loaded here
+	private applyWater(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
+		const w = info.water!;
+		mat.transparent = false;
+		mat.depthWrite = true;
+		mat.opacity = 1;
+		mat.vertexColors = false;
+		mat.userData.textureless = true;
+		const u = waterMaterialUniforms();
+		u.waterFlowA.value.set(1 / w.worldUvScale, 1 / w.normalUvScale, w.bumpStrength, w.colorDisplace);
+		u.waterFlowB.value.set(w.timeInterval, w.scrollDistance, w.noiseScale, w.reflectAmount);
+		u.waterColor.value.set(1 / w.colorUvScale, w.colorInterval, w.colorScroll, w.colorLerpExp);
+		// (colours in gamma space, as the shader's set up with them)
+		const lin = (c: number[]) => c.map(v => Math.pow(v, 2.2)) as [number, number, number];
+		u.waterReflectTint.value.set(...(w.reflect === 'none' ? [0, 0, 0] as [number, number, number] : lin(w.reflectTint)));
+		u.waterFogColor.value.set(...lin(w.fogColor));
+		mat.userData.waterUniforms = u;
+		mat.userData.water = w;
+		const defines: Record<string, string> = {WATER: ''};
+		if (w.lightmapFog) defines.WATER_LMFOG = '';
+		if (w.refract) defines.WATER_REFRACT = '';
+		if (w.reflect === 'planar') defines.WATER_PLANAR = '';
+		mat.defines = {...mat.defines, ...defines};
+		const linear = (name: string) => name ? this.textures.get(name, true) : Promise.resolve(null);
+		Promise.all([linear(w.flowMap), linear(w.normalMap), linear(w.noiseTexture), info.baseTexture ? this.textures.get(info.baseTexture) : Promise.resolve(null)]).then(([flow, normal, noise, base]) => {
+			if (!normal) return;
+			for (const t of [flow, normal, noise, base]) if (t) t.wrapS = t.wrapT = THREE.RepeatWrapping;
+			mat.map = flow ?? normal;
+			// (the engine maps the faces by the base texture's size, not the
+			// compiler's: the flow map's coordinates are scaled to match)
+			const mapped = ((base ?? normal).userData.fullSize as number[] | undefined)?.[0];
+			const compiled = (mat.userData.texSize as number[] | undefined)?.[0];
+			if (mapped && compiled) u.waterFlowA.value.x = compiled / mapped / w.worldUvScale;
+			u.waterNormal.value = normal;
+			u.waterNoise.value = noise;
+			u.waterBase.value = base;
+			if (flow && noise) mat.defines!.WATER_FLOW = '';
+			if (flow && noise && base) mat.defines!.WATER_BASE = '';
+			mat.needsUpdate = true;
+			this.onChange();
+		});
+		if (w.reflect === 'cube' && info.envMap && info.envMap !== 'env_cubemap') {
+			this.cube(info.envMap).then(cube => {
+				if (!cube) return;
+				u.waterCube.value = cube.texture;
+				u.waterCubeScale.value = cube.scale;
+				mat.defines!.WATER_CUBE = '';
+				mat.needsUpdate = true;
+				this.onChange();
+			});
+		}
+		mat.needsUpdate = true;
 	}
 
 	// glass and other Refract surfaces: what's behind them multiplied by
@@ -424,11 +478,12 @@ class MaterialLibrary {
 					});
 				}
 			}
+			if (info.water) mat.userData.texSize = group.texSize;
 			this.apply(mat, info);
 			this.applyBackFaces(mat);
 			mat.needsUpdate = true;
 			this.onChange();
-			if (info.envMap && info.envMap !== 'env_cubemap' && !info.translucent) this.applyEnv(mat, info);
+			if (info.envMap && info.envMap !== 'env_cubemap' && !info.translucent && !info.water) this.applyEnv(mat, info);
 			// detail modes drawn: mod2x, additive, two-pattern mod2x, multiply, ssbump detail
 			if (info.detail && !info.unlit && [0, 1, 7, 8, 10].includes(info.detailBlendMode) && info.shader === 'lightmappedgeneric') {
 				// (linear: only the fade and over modes are sRGB)
@@ -899,6 +954,9 @@ export class View3D {
 		for (const t of this.bumpTex) t.dispose();
 		for (const rt of this.portalTargets.values()) rt.dispose();
 		this.portalTargets.clear();
+		for (const rt of this.waterTargets.values()) rt.dispose();
+		this.waterTargets.clear();
+		this.waterMeshes = [];
 		this.particleRenderer?.dispose();
 		this.vmParticleRenderer?.dispose();
 		const token = ++this.mapToken;
@@ -985,7 +1043,20 @@ export class View3D {
 		this.exposureRange = [0.5, 3];
 		this.exposure = 3;
 
-		this.mapGroup.add(this.brushModel(bsp.models[0]));
+		const world = this.brushModel(bsp.models[0]);
+		this.mapGroup.add(world);
+		// the water surfaces: their height (what their reflection's drawn
+		// about) and where they are, for the visibility sets
+		this.waterMeshes = [];
+		bsp.models[0].groups.forEach((g, i) => {
+			if (g.surface !== 'liquid') return;
+			const mesh = world.children[i] as THREE.Mesh;
+			mesh.geometry.computeBoundingBox();
+			const box = mesh.geometry.boundingBox!;
+			mesh.userData.waterHeight = box.max.z;
+			mesh.userData.clusters = bsp.vis?.clustersInBox(box.min.toArray(), box.max.toArray()) ?? [];
+			this.waterMeshes.push(mesh);
+		});
 		// info_overlays (signs, indicator lights, stains) on the world's faces
 		const overlays = new THREE.Group();
 		overlays.name = 'overlays';
@@ -3561,7 +3632,7 @@ export class View3D {
 			this.portals.clear();
 			const time = performance.now() / 1000;
 			for (const m of this.fizzlers.values()) m.uniforms.time.value = time;
-			gooUniforms.gooTime.value = time;
+			waterUniforms.waterTime.value = time;
 			this.paint?.seek(tick);
 			this.updateLightStyles(tick);
 			// what players hold: the server hides it from its holder (the game
@@ -4113,8 +4184,94 @@ export class View3D {
 		return saved;
 	}
 
+	private waterMeshes: THREE.Mesh[] = [];
+	private waterTargets = new Map<number, THREE.WebGLRenderTarget>();
+	private waterCam = new THREE.PerspectiveCamera();
+
+	// what the water surfaces in view reflect ($reflecttexture): the view
+	// mirrored in each one's plane, clipped to above it, at half size; the
+	// world and its props only, as $reflectonlymarkedentities has it (with
+	// $reflectskyboxonly too: the sky alone isn't drawn apart)
+	private renderWaterReflections(r: THREE.WebGLRenderer) {
+		if (!this.waterMeshes.length) return;
+		const cam = this.camera;
+		cam.updateMatrixWorld();
+		const at = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+		const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+		const vis = this.bsp?.vis;
+		const set = vis?.visibleFrom(vis.clusterAt([at.x, at.y, at.z]));
+		const planes = new Map<number, THREE.Mesh[]>();
+		for (const m of this.waterMeshes) {
+			const w = (m.material as THREE.Material).userData.water as WaterParams | undefined;
+			const h = m.userData.waterHeight as number;
+			if (w?.reflect !== 'planar' || !w.aboveWater || at.z <= h || !frustum.intersectsObject(m)) continue;
+			if (set && !anyVisible(set, m.userData.clusters as number[])) continue;
+			let list = planes.get(h);
+			if (!list) planes.set(h, list = []);
+			list.push(m);
+		}
+		// (the camera's right and forward along the surface bend the reflection)
+		const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0).setZ(0).normalize();
+		waterUniforms.waterRight.value.copy(right);
+		waterUniforms.waterForward.value.crossVectors(new THREE.Vector3(0, 0, 1), right);
+		for (const [h, rt] of this.waterTargets) {
+			if (planes.has(h)) continue;
+			rt.dispose();
+			this.waterTargets.delete(h);
+		}
+		if (!planes.size) return;
+
+		const frameTarget = r.getRenderTarget();
+		const size = r.getDrawingBufferSize(new THREE.Vector2()).multiplyScalar(0.5).floor();
+		const hidden = ([this.entityGroup, this.player, this.pathLine, this.particleRenderer?.group, this.paintBlobs?.group, this.ropes?.group, this.sprites?.group, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
+			.filter((o): o is THREE.Object3D => !!o && o.visible);
+		for (const o of hidden) o.visible = false;
+		const dither = ditherUniforms.ditherOn.value;
+		ditherUniforms.ditherOn.value = 0;
+		const forward = new THREE.Vector3(0, 0, -1).transformDirection(cam.matrixWorld);
+		const up = new THREE.Vector3(0, 1, 0).transformDirection(cam.matrixWorld);
+		const mirror = this.waterCam;
+		for (const [h, meshes] of planes) {
+			let rt = this.waterTargets.get(h);
+			if (!rt) {
+				rt = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, stencilBuffer: true});
+				this.waterTargets.set(h, rt);
+			}
+			if (rt.width !== size.x || rt.height !== size.y) rt.setSize(size.x, size.y);
+			// the camera mirrored in the plane
+			mirror.fov = cam.fov;
+			mirror.aspect = cam.aspect;
+			mirror.near = cam.near;
+			mirror.far = cam.far;
+			mirror.updateProjectionMatrix();
+			mirror.position.set(at.x, at.y, 2 * h - at.z);
+			mirror.up.set(up.x, up.y, -up.z);
+			mirror.lookAt(mirror.position.x + forward.x, mirror.position.y + forward.y, mirror.position.z - forward.z);
+			mirror.updateMatrixWorld();
+			this.sky.position.copy(mirror.position);
+			r.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), -h)];
+			r.setRenderTarget(rt);
+			this.cullFrom(at);
+			r.render(this.scene, mirror);
+			this.uncull();
+			r.clippingPlanes = [];
+			// (where a point lands in the reflection: its texture coordinates)
+			const project = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
+				.multiply(mirror.projectionMatrix).multiply(mirror.matrixWorldInverse);
+			for (const m of meshes) {
+				const u = (m.material as THREE.Material).userData.waterUniforms as ReturnType<typeof waterMaterialUniforms>;
+				u.waterReflect.value = rt.texture;
+				u.waterReflectMatrix.value.copy(project);
+			}
+		}
+		r.setRenderTarget(frameTarget);
+		ditherUniforms.ditherOn.value = dither;
+		for (const o of hidden) o.visible = true;
+	}
+
 	private renderScene(r: THREE.WebGLRenderer) {
 		if (this.portals.size) this.renderPortalViews(r);
+		this.renderWaterReflections(r);
 		// the sky stays centred on the camera, inside the far plane
 		this.sky.scale.setScalar(this.camera.far * 0.5);
 		const sc = this.skyCamera;

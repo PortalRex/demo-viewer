@@ -100,6 +100,7 @@ interface Particle {
 	alpha2: number;    // field 16 (a second multiplier)
 	drawAlpha: number;
 	seq: number;
+	seq2: number;      // field 13: the second sequence ($dualsequence materials)
 	trail: number;
 	fadeIn: number;    // per-particle random fade times (seconds or proportions)
 	fadeOut: number;
@@ -514,7 +515,7 @@ export class ParticleInstance {
 			index, pos: this.cpPos(0), vel: new THREE.Vector3(), born: this.time, life: 1,
 			radius: def.radius, drawRadius: def.radius, rot: def.rotation, rotSpeed: 0,
 			color: c.slice(0, 3), baseColor: c.slice(0, 3), alpha: c[3], alpha2: 1, drawAlpha: c[3],
-			seq: def.sequence, trail: 0.1, fadeIn: 0.25, fadeOut: 0.25, osc: [],
+			seq: def.sequence, seq2: 0, trail: 0.1, fadeIn: 0.25, fadeOut: 0.25, osc: [],
 		};
 		const randomDir = () => {
 			const z = this.r(-1, 1), a = this.r(0, Math.PI * 2), s = Math.sqrt(1 - z * z);
@@ -637,6 +638,9 @@ export class ParticleInstance {
 			}
 			case 'sequence random':
 				p.seq = Math.floor(this.r(num(o, 'sequence_min', 0), num(o, 'sequence_max', 0) + 0.999));
+				break;
+			case 'sequence two random':
+				p.seq2 = Math.floor(this.r(num(o, 'sequence_min', 0), num(o, 'sequence_max', 0) + 0.999));
 				break;
 			case 'velocity set from control point':
 				// a control point holding a velocity (a funnel's flow), scaled
@@ -878,34 +882,59 @@ interface SpriteMaterial {
 	material: THREE.ShaderMaterial;
 	sheet: SheetSequence[] | null;
 	orientation: number;  // SpriteCard $orientation (3: along the particles' normals)
+	dual: boolean;        // $dualsequence: a second sheet sequence combined with the first
 	// $minsize, $maxsize, $startfadesize, $endfadesize: limits on a sprite's
 	// radius as a fraction of its distance from the eye (fading out, then
 	// gone, between the last two: smoke at the camera)
 	size: [number, number, number, number];
 }
 
+// one material's quads, as they're written to its mesh
+interface Batch {
+	pos: number[];
+	uv: number[];
+	uv2: number[];  // the second sequence's frame
+	col: number[];
+}
+
 const VERTEX = `
 	attribute vec4 pcolor;
+	attribute vec2 uv2;
 	varying vec2 vUv;
+	varying vec2 vUv2;
 	varying vec4 vColor;
 	void main() {
 		vUv = uv;
+		vUv2 = uv2;
 		vColor = pcolor;
 		gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 	}`;
 
 // SpriteCard's: $addself sprites are drawn premultiplied, brightened by
 // that much of themselves; every sprite is at most white once exposed (the
-// shader saturates its output)
+// shader saturates its output). A $dualsequence one combines its second
+// sequence's frame by $sequence_blend_mode: averaged, its colour under the
+// first's alpha, or laid over the first by its own alpha
 const FRAGMENT = `
 	uniform sampler2D map;
 	uniform float overbright;
 	uniform float addSelf;
 	uniform float sceneExposure;
 	varying vec2 vUv;
+	varying vec2 vUv2;
 	varying vec4 vColor;
 	void main() {
 		vec4 t = texture2D(map, vUv);
+	#ifdef DUAL
+		vec4 t2 = texture2D(map, vUv2);
+	#if DUAL == 0
+		t = 0.5 * (t + t2);
+	#elif DUAL == 1
+		t.rgb = t2.rgb;
+	#else
+		t.rgb = mix(t.rgb, t2.rgb, t2.a);
+	#endif
+	#endif
 		vec3 rgb = t.rgb * overbright;
 		float a = t.a * vColor.a;
 	#ifdef ADDSELF
@@ -967,12 +996,16 @@ export class ParticleRenderer {
 			return v !== undefined && v !== '0';
 		};
 		const addSelf = Number(m.params.get('$addself') ?? 0) || 0;
+		const dual = on('$dualsequence');
+		const defines: Record<string, string> = {};
+		if (addSelf) defines.ADDSELF = '';
+		if (dual) defines.DUAL = String(Math.min(2, Math.max(0, Number(m.params.get('$sequence_blend_mode') ?? 0) || 0)));
 		const material = new THREE.ShaderMaterial({
 			uniforms: {
 				map: {value: t}, overbright: {value: Number(m.params.get('$overbrightfactor') ?? 1) || 1}, addSelf: {value: addSelf},
 				...exposureUniforms,
 			},
-			defines: addSelf ? {ADDSELF: ''} : {},
+			defines,
 			vertexShader: VERTEX,
 			fragmentShader: FRAGMENT,
 			transparent: true,
@@ -990,7 +1023,7 @@ export class ParticleRenderer {
 		const size: [number, number, number, number] = [param('$minsize', 0), param('$maxsize', 20), param('$startfadesize', 10), param('$endfadesize', 20)];
 		const sheet = bytes ? readVtfSheet(bytes) : null;
 		sheets.set(name, sheet);
-		return {material, sheet, orientation: Number(m.params.get('$orientation') ?? 0) || 0, size};
+		return {material, sheet, orientation: Number(m.params.get('$orientation') ?? 0) || 0, dual, size};
 	}
 
 	// rebuilds the quads of every live particle
@@ -998,11 +1031,12 @@ export class ParticleRenderer {
 		const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
 		const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
 		const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
-		const batches = new Map<string, {pos: number[]; uv: number[]; col: number[]}>();
-		const quad = (b: {pos: number[]; uv: number[]; col: number[]}, c: THREE.Vector3[], uv: number[][], col: number[][]) => {
+		const batches = new Map<string, Batch>();
+		const quad = (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][], uv2 = uv) => {
 			for (const k of [0, 1, 2, 0, 2, 3]) {
 				b.pos.push(c[k].x, c[k].y, c[k].z);
 				b.uv.push(uv[k][0], uv[k][1]);
+				b.uv2.push(uv2[k][0], uv2[k][1]);
 				b.col.push(...col[k]);
 			}
 		};
@@ -1011,80 +1045,84 @@ export class ParticleRenderer {
 			if (!def.material || !inst.particles.length) continue;
 			const sprite = this.sprite(def.material);
 			if (!sprite) continue;
-			const r = def.renderers.find(o => o.fn === 'render_animated_sprites' || o.fn === 'render_sprite_trail' || o.fn === 'render_rope');
-			if (!r) continue;
 			let b = batches.get(def.material);
-			if (!b) batches.set(def.material, b = {pos: [], uv: [], col: []});
-			if (r.fn === 'render_rope') {
-				this.rope(b, inst, r, camPos, quad, sprite.orientation);
-				continue;
-			}
-			const trail = r.fn === 'render_sprite_trail';
-			const rate = num(r, 'animation rate', 0.1);
-			const fit = num(r, 'animation_fit_lifetime', 0);
-			const orientation = num(r, 'orientation_type', 0);
-			const flat = orientation === 2;
-			// a visibility proxy (a light's flare): how much of a control point
-			// shows, remapped onto radius and alpha scales
-			let visRadius = 1, visAlpha = 1;
-			const proxy = num(r, 'Visibility Proxy Input Control Point Number', -1);
-			if (proxy >= 0 && this.visibility) {
-				const seen = this.visibility(inst.cpPos(proxy), camPos);
-				const i0 = num(r, 'Visibility input minimum', 0), i1 = num(r, 'Visibility input maximum', 1);
-				const t = Math.min(1, Math.max(0, (seen - i0) / ((i1 - i0) || 1)));
-				const lerp = (a: string, da: number, b: string, db: number) => num(r, a, da) + (num(r, b, db) - num(r, a, da)) * t;
-				visRadius = lerp('Visibility Radius Scale minimum', 1, 'Visibility Radius Scale maximum', 1);
-				visAlpha = lerp('Visibility Alpha Scale minimum', 0, 'Visibility Alpha Scale maximum', 1);
-				if (visAlpha <= 0) continue;
-			}
-			const [minSize, maxSize, startFade, endFade] = sprite.size;
-			for (const p of inst.particles) {
-				if (p.drawAlpha <= 0.002 || p.drawRadius <= 0) continue;
-				// (the sprite shader's size limits, by distance from the eye)
-				let radius = p.drawRadius * visRadius, alpha = p.drawAlpha * visAlpha;
-				const at = inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos;
-				if (!trail) {
-					const l = at.distanceTo(camPos);
-					radius = Math.max(radius, minSize * l);
-					if (radius > startFade * l) {
-						if (radius > endFade * l) continue;
-						alpha *= 1 - (radius - startFade * l) / Math.max(1e-6, (endFade - startFade) * l);
+			// (each of its renderers draws it: some draw the sprites twice)
+			for (const r of def.renderers) {
+				if (r.fn !== 'render_animated_sprites' && r.fn !== 'render_sprite_trail' && r.fn !== 'render_rope') continue;
+				if (!b) batches.set(def.material, b = {pos: [], uv: [], uv2: [], col: []});
+				if (r.fn === 'render_rope') {
+					this.rope(b, inst, r, camPos, quad, sprite.orientation);
+					continue;
+				}
+				const trail = r.fn === 'render_sprite_trail';
+				const rate = num(r, 'animation rate', 0.1), rate2 = num(r, 'second sequence animation rate', 0);
+				const fit = num(r, 'animation_fit_lifetime', 0);
+				const orientation = num(r, 'orientation_type', 0);
+				const flat = orientation === 2;
+				// a visibility proxy (a light's flare): how much of a control point
+				// shows, remapped onto radius and alpha scales
+				let visRadius = 1, visAlpha = 1;
+				const proxy = num(r, 'Visibility Proxy Input Control Point Number', -1);
+				if (proxy >= 0 && this.visibility) {
+					const seen = this.visibility(inst.cpPos(proxy), camPos);
+					const i0 = num(r, 'Visibility input minimum', 0), i1 = num(r, 'Visibility input maximum', 1);
+					const t = Math.min(1, Math.max(0, (seen - i0) / ((i1 - i0) || 1)));
+					const lerp = (a: string, da: number, b: string, db: number) => num(r, a, da) + (num(r, b, db) - num(r, a, da)) * t;
+					visRadius = lerp('Visibility Radius Scale minimum', 1, 'Visibility Radius Scale maximum', 1);
+					visAlpha = lerp('Visibility Alpha Scale minimum', 0, 'Visibility Alpha Scale maximum', 1);
+					if (visAlpha <= 0) continue;
+				}
+				const [minSize, maxSize, startFade, endFade] = sprite.size;
+				for (const p of inst.particles) {
+					if (p.drawAlpha <= 0.002 || p.drawRadius <= 0) continue;
+					// (the sprite shader's size limits, by distance from the eye)
+					let radius = p.drawRadius * visRadius, alpha = p.drawAlpha * visAlpha;
+					const at = inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos;
+					if (!trail) {
+						const l = at.distanceTo(camPos);
+						radius = Math.max(radius, minSize * l);
+						if (radius > startFade * l) {
+							if (radius > endFade * l) continue;
+							alpha *= 1 - (radius - startFade * l) / Math.max(1e-6, (endFade - startFade) * l);
+						}
+						radius = Math.min(radius, maxSize * l);
 					}
-					radius = Math.min(radius, maxSize * l);
+					const age = inst.time + inst.ahead - p.born;
+					const uv = frameUv(sprite.sheet, p.seq, fit ? age / Math.max(p.life, 1e-3) : age * rate, !!fit);
+					const uv2 = sprite.dual ? frameUv(sprite.sheet, p.seq2, age * rate2, false) : uv;
+					let ax: THREE.Vector3, ay: THREE.Vector3, center = at;
+					if (trail) {
+						// stretched back along the velocity, as wide as the radius
+						const speed = p.vel.length();
+						const len = Math.min(num(r, 'max length', 2000), Math.max(num(r, 'min length', 0), speed * p.trail));
+						if (speed < 1e-3) continue;
+						const dir = p.vel.clone().divideScalar(speed);
+						center = at.clone().addScaledVector(dir, -len / 2);
+						const toCam = camPos.clone().sub(center).normalize();
+						ax = dir.clone().cross(toCam).normalize().multiplyScalar(p.drawRadius);
+						ay = dir.multiplyScalar(len / 2);
+					} else if (flat) {
+						const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
+						ax = new THREE.Vector3(c, s, 0).multiplyScalar(radius);
+						ay = new THREE.Vector3(-s, c, 0).multiplyScalar(radius);
+					} else if (orientation === 3 && p.normal) {
+						// in the plane across its normal, turned by its rotation
+						const n = p.normal;
+						const u0 = new THREE.Vector3(...(Math.abs(n.z) < 0.99 ? [0, 0, 1] : [1, 0, 0]) as [number, number, number]).cross(n).normalize();
+						const v0 = n.clone().cross(u0);
+						const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
+						ax = u0.clone().multiplyScalar(c).addScaledVector(v0, s).multiplyScalar(radius);
+						ay = v0.clone().multiplyScalar(c).addScaledVector(u0, -s).multiplyScalar(radius);
+					} else {
+						const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
+						ax = right.clone().multiplyScalar(c).addScaledVector(up, s).multiplyScalar(radius);
+						ay = up.clone().multiplyScalar(c).addScaledVector(right, -s).multiplyScalar(radius);
+					}
+					const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([cx, cy]) => center.clone().addScaledVector(ax, cx).addScaledVector(ay, cy));
+					const col = [p.color[0], p.color[1], p.color[2], alpha];
+					quad(b, corners, [[uv[0], uv[3]], [uv[2], uv[3]], [uv[2], uv[1]], [uv[0], uv[1]]], [col, col, col, col],
+						[[uv2[0], uv2[3]], [uv2[2], uv2[3]], [uv2[2], uv2[1]], [uv2[0], uv2[1]]]);
 				}
-				const age = inst.time + inst.ahead - p.born;
-				const uv = frameUv(sprite.sheet, p.seq, fit ? age / Math.max(p.life, 1e-3) : age * rate, !!fit);
-				let ax: THREE.Vector3, ay: THREE.Vector3, center = at;
-				if (trail) {
-					// stretched back along the velocity, as wide as the radius
-					const speed = p.vel.length();
-					const len = Math.min(num(r, 'max length', 2000), Math.max(num(r, 'min length', 0), speed * p.trail));
-					if (speed < 1e-3) continue;
-					const dir = p.vel.clone().divideScalar(speed);
-					center = at.clone().addScaledVector(dir, -len / 2);
-					const toCam = camPos.clone().sub(center).normalize();
-					ax = dir.clone().cross(toCam).normalize().multiplyScalar(p.drawRadius);
-					ay = dir.multiplyScalar(len / 2);
-				} else if (flat) {
-					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-					ax = new THREE.Vector3(c, s, 0).multiplyScalar(radius);
-					ay = new THREE.Vector3(-s, c, 0).multiplyScalar(radius);
-				} else if (orientation === 3 && p.normal) {
-					// in the plane across its normal, turned by its rotation
-					const n = p.normal;
-					const u0 = new THREE.Vector3(...(Math.abs(n.z) < 0.99 ? [0, 0, 1] : [1, 0, 0]) as [number, number, number]).cross(n).normalize();
-					const v0 = n.clone().cross(u0);
-					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-					ax = u0.clone().multiplyScalar(c).addScaledVector(v0, s).multiplyScalar(radius);
-					ay = v0.clone().multiplyScalar(c).addScaledVector(u0, -s).multiplyScalar(radius);
-				} else {
-					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-					ax = right.clone().multiplyScalar(c).addScaledVector(up, s).multiplyScalar(radius);
-					ay = up.clone().multiplyScalar(c).addScaledVector(right, -s).multiplyScalar(radius);
-				}
-				const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([cx, cy]) => center.clone().addScaledVector(ax, cx).addScaledVector(ay, cy));
-				const col = [p.color[0], p.color[1], p.color[2], alpha];
-				quad(b, corners, [[uv[0], uv[3]], [uv[2], uv[3]], [uv[2], uv[1]], [uv[0], uv[1]]], [col, col, col, col]);
 			}
 		}
 		for (const [name, mesh] of this.meshes) if (!batches.has(name)) mesh.visible = false;
@@ -1102,6 +1140,7 @@ export class ParticleRenderer {
 			const g = mesh.geometry;
 			const count = writeAttribute(g, 'position', b.pos, 3);
 			writeAttribute(g, 'uv', b.uv, 2);
+			writeAttribute(g, 'uv2', b.uv2, 2);
 			writeAttribute(g, 'pcolor', b.col, 4);
 			g.setDrawRange(0, count);
 			mesh.visible = count > 0;
@@ -1113,8 +1152,8 @@ export class ParticleRenderer {
 	// the particles' normals: those that "remap direction to cp to vector"
 	// points at a control point, so the rope faces it), its whole width each
 	// particle's radius; the texture runs along it by distance and scrolls
-	private rope(b: {pos: number[]; uv: number[]; col: number[]}, inst: ParticleInstance, r: ParticleOperator, camPos: THREE.Vector3,
-		quad: (b: {pos: number[]; uv: number[]; col: number[]}, c: THREE.Vector3[], uv: number[][], col: number[][]) => void, orientation = 0) {
+	private rope(b: Batch, inst: ParticleInstance, r: ParticleOperator, camPos: THREE.Vector3,
+		quad: (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][]) => void, orientation = 0) {
 		const aim = orientation === 3 ? inst.def.operators.find(o => o.fn === 'remap direction to cp to vector') : undefined;
 		const aimAt = aim ? inst.cpPos(num(aim, 'control point', 0)) : null;
 		const ps = [...inst.particles].sort((x, y) => x.index - y.index);

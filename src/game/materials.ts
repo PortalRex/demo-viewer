@@ -86,6 +86,34 @@ export interface MaterialInfo {
 	phongBaseMask: boolean;  // $basemapalphaphongmask: the mask is in the base texture's alpha (else the bump map's)
 	phongExponentTexture: string;  // $phongexponenttexture: exponent 1 + 149 x its red
 	cloakFactor: number;     // $cloakfactor (VertexLitGeneric): how far it's drawn as the screen behind it
+	water: WaterParams | null;  // the Water shader's settings
+}
+
+// a Water material: a flowing normal map (and, with a base texture, a
+// sludge layer flowing over it) over fog, with a reflection by fresnel
+export interface WaterParams {
+	normalMap: string;
+	flowMap: string;         // per map: the flow direction in red/green, the sludge's mask in alpha
+	noiseTexture: string;    // offsets the flow's cycle per place
+	worldUvScale: number;    // the flow map across the face's texture coordinates
+	normalUvScale: number;   // world units per normal map repeat
+	timeInterval: number;    // seconds per flow cycle (half of it per layer)
+	scrollDistance: number;
+	bumpStrength: number;
+	noiseScale: number;
+	colorUvScale: number;    // world units per sludge texture repeat
+	colorInterval: number;
+	colorScroll: number;
+	colorLerpExp: number;
+	colorDisplace: number;   // parallax by the normal map's alpha
+	reflect: 'planar' | 'cube' | 'none';  // a reflection of the scene ($reflecttexture), or the cubemap
+	reflectSkyboxOnly: boolean;
+	reflectAmount: number;   // how far the normal bends the reflection
+	reflectTint: [number, number, number];
+	refract: boolean;        // what's below shows through ($refracttexture)
+	fogColor: [number, number, number];
+	lightmapFog: boolean;    // the fog colour lit by the light map
+	aboveWater: boolean;     // the top side (the other is the view from under the surface)
 }
 
 const MISSING: MaterialInfo = {
@@ -96,7 +124,7 @@ const MISSING: MaterialInfo = {
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
 	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
 	phong: false, phongExponent: 5, phongBoost: 1, phongFresnel: [0, 0.5, 1], phongTint: [1, 1, 1], phongBaseMask: false, phongExponentTexture: '',
-	cloakFactor: 0,
+	cloakFactor: 0, water: null,
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -118,6 +146,11 @@ function parseTint(v: string | undefined): [number, number, number] | null {
 
 // the conditional blocks Portal 2 applies on PC in HDR, at high GPU settings
 const CONDITIONS = new Set(['hdr', 'hdr_dx9', '>=dx90', '>=dx90_20b', 'dx90', 'dx90_20b', '>=dx80', '>=dx81', 'srgb', 'srgb_pc', '>=hdr_dx9', 'gpu>=1', 'gpu>=2']);
+
+// whether a condition on a parameter holds ("!" negates)
+function condition(c: string): boolean {
+	return c.startsWith('!') ? !condition(c.slice(1)) : CONDITIONS.has(c);
+}
 
 const truthy = (v: string | undefined) => v !== undefined && v !== '0' && v.toLowerCase() !== 'false';
 
@@ -154,8 +187,14 @@ export class Materials {
 		const params = new Map<string, string>();
 		// (blocks for the renderer's settings: those for an HDR, DX9-class,
 		// sRGB PC renderer override the plain values, in order)
+		// (and keys behind a condition: "gpu>=1?$key", "!gameconsole?$key")
 		const take = (list: KV) => {
-			for (const e of list) if (typeof e.value === 'string') params.set(e.key, e.value);
+			for (const e of list) {
+				if (typeof e.value !== 'string') continue;
+				const q = e.key.indexOf('?');
+				if (q < 0) params.set(e.key, e.value);
+				else if (condition(e.key.slice(0, q))) params.set(e.key.slice(q + 1), e.value);
+			}
 			for (const e of list) if (typeof e.value !== 'string' && CONDITIONS.has(e.key)) take(e.value);
 		};
 		if (shader === 'patch' && depth < 4) {
@@ -180,7 +219,8 @@ export class Materials {
 			shader,
 			noPortal: truthy(p.get('%noportal')),
 			translucent: truthy(p.get('$translucent')) || shader === 'refract' || truthy(p.get('$additive')),
-			liquid: shader === 'water' || /water|goo/.test(name) && shader !== 'lightmappedgeneric',
+			// (by the name's last part: a map's patch folder can say "goo" too)
+			liquid: shader === 'water' || /water|goo/.test(name.slice(name.lastIndexOf('/') + 1)) && shader !== 'lightmappedgeneric',
 			// (eyes: the iris texture, projected by the model loader)
 			baseTexture: (p.get('$basetexture') ?? (/^eye/.test(shader) ? p.get('$iris') : undefined) ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			alphaTest,
@@ -216,6 +256,39 @@ export class Materials {
 			phongBaseMask: truthy(p.get('$basemapalphaphongmask')),
 			phongExponentTexture: (p.get('$phongexponenttexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			cloakFactor: Number(p.get('$cloakfactor') ?? 0) || 0,
+			water: shader === 'water' ? waterParams(p) : null,
 		};
 	}
+}
+
+const texturePath = (v: string | undefined) => (v ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, '');
+
+function waterParams(p: Map<string, string>): WaterParams {
+	const num = (k: string, d: number) => p.has(k) && isFinite(Number(p.get(k))) ? Number(p.get(k)) : d;
+	const envMap = p.has('$envmap');
+	return {
+		normalMap: texturePath(p.get('$normalmap') ?? 'dev/water_normal'),
+		flowMap: texturePath(p.get('$flowmap')),
+		noiseTexture: texturePath(p.get('$flow_noise_texture')),
+		worldUvScale: num('$flow_worlduvscale', 1),
+		normalUvScale: num('$flow_normaluvscale', 1),
+		timeInterval: num('$flow_timeintervalinseconds', 1),
+		scrollDistance: num('$flow_uvscrolldistance', 0),
+		bumpStrength: num('$flow_bumpstrength', 1),
+		noiseScale: num('$flow_noise_scale', 0),
+		colorUvScale: num('$color_flow_uvscale', 1),
+		colorInterval: num('$color_flow_timeintervalinseconds', 1),
+		colorScroll: num('$color_flow_uvscrolldistance', 0),
+		colorLerpExp: num('$color_flow_lerpexp', 1),
+		colorDisplace: num('$color_flow_displacebynormalstrength', 0),
+		// (with neither, no reflection: its tint is zeroed)
+		reflect: p.has('$reflecttexture') ? 'planar' : envMap ? 'cube' : 'none',
+		reflectSkyboxOnly: truthy(p.get('$reflectskyboxonly')),
+		reflectAmount: num('$reflectamount', 0.8),
+		reflectTint: parseColor(p.get('$reflecttint')) ?? [1, 1, 1],
+		refract: p.has('$refracttexture'),
+		fogColor: parseColor(p.get('$fogcolor')) ?? [1, 0, 0],
+		lightmapFog: truthy(p.get('$lightmapwaterfog')),
+		aboveWater: truthy(p.get('$abovewater')),
+	};
 }

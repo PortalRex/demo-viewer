@@ -33,6 +33,7 @@ export interface MeshData {
 export interface MaterialGroup extends MeshData {
 	material: string;    // lower case, under materials/
 	surface: Surface;
+	texSize?: [number, number];  // the size the texture coordinates are over (the compiler's, from the material's texture)
 }
 
 export interface ModelMesh {
@@ -648,7 +649,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			out.push({
 				material, surface: tex.surface,
 				positions: new Float32Array(b.pos), normals: new Float32Array(b.nrm), colors: new Float32Array(b.col),
-				uv: new Float32Array(b.uv), lightUv: new Float32Array(b.lm),
+				uv: new Float32Array(b.uv), lightUv: new Float32Array(b.lm), texSize: tex.size as [number, number],
 			});
 		}
 		meshes.push({groups: out, edges: new Float32Array(edgeList)});
