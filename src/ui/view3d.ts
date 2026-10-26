@@ -42,6 +42,52 @@ export type CameraMode = 'eyes' | 'orbit' | 'free';
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
 const VIEW_NEARZ = 7;
+
+// Simple view: every surface drawn as plain grey geometry, faceted (flat
+// normals from screen derivatives), floors, walls and ceilings in their own
+// greys with a 64 unit grid on them (as dev textures), lit from above,
+// dimmer with distance; drawn at a fixed brightness whatever the exposure
+const simpleMaterial = new THREE.ShaderMaterial({
+	uniforms: {sceneExposure: exposureUniforms.sceneExposure},
+	side: THREE.DoubleSide,
+	clipping: true,
+	vertexShader: `
+		#include <common>
+		#include <skinning_pars_vertex>
+		#include <clipping_planes_pars_vertex>
+		varying vec3 vWorld;
+		void main() {
+			#include <begin_vertex>
+			#include <skinbase_vertex>
+			#include <skinning_vertex>
+			#include <project_vertex>
+			vec4 world = vec4(transformed, 1.0);
+			#ifdef USE_INSTANCING
+			world = instanceMatrix * world;
+			#endif
+			vWorld = (modelMatrix * world).xyz;
+			#include <clipping_planes_vertex>
+		}`,
+	fragmentShader: `
+		#include <clipping_planes_pars_fragment>
+		uniform float sceneExposure;
+		varying vec3 vWorld;
+		void main() {
+			#include <clipping_planes_fragment>
+			vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+			vec3 toEye = cameraPosition - vWorld;
+			if (dot(n, toEye) < 0.0) n = -n;
+			vec3 base = n.z > 0.7 ? vec3(0.40, 0.41, 0.43) : n.z < -0.7 ? vec3(0.30) : vec3(0.58, 0.58, 0.57);
+			float light = 0.55 + 0.3 * max(dot(n, normalize(vec3(0.35, 0.25, 1.0))), 0.0) + 0.15 * abs(n.x);
+			// (the grid on the plane the surface faces most, its lines a pixel or so wide)
+			vec3 a = abs(n);
+			vec2 g = a.z > a.x && a.z > a.y ? vWorld.xy : a.x > a.y ? vWorld.yz : vWorld.xz;
+			vec2 cell = abs(fract(g / 64.0 + 0.5) - 0.5) * 64.0 / max(fwidth(g), vec2(1e-3));
+			float line = 1.0 - clamp(min(cell.x, cell.y), 0.0, 1.0);
+			vec3 c = base * light * (1.0 - 0.18 * line) * mix(1.0, 0.45, clamp(length(toEye) / 6000.0, 0.0, 1.0));
+			gl_FragColor = vec4(pow(c, vec3(2.2)) / max(sceneExposure, 1e-3), 1.0);
+		}`,
+});
 const PIP_SCALE = 0.3, PIP_INSET = 25 / 720;  // ss_pipscale, ss_pip_right/bottom_offset (at autorender's 720p)
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 // The view model's field of view: Portal's client mode takes cl_viewmodelfov
@@ -1941,6 +1987,7 @@ export class View3D {
 			surface.position.x = 0.6;
 			group.add(surface);
 			group.userData.portalSurface = surface;
+			surface.userData.portal = true;
 			return group;
 		}
 		if (t.className === 'CPortalLaser') {
@@ -4768,7 +4815,70 @@ export class View3D {
 	private compositeScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.composite), {frustumCulled: false}));
 	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
+	// the simple view (see simpleMaterial): no sky, particles, sprites or
+	// see-through surfaces; portals and the entities' see-through effects
+	// (light bridges, funnels, lasers, fizzlers) still drawn as themselves
+	simple = false;
 	render() {
+		if (!this.simple) {
+			this.renderFrame();
+			return;
+		}
+		const hidden: THREE.Object3D[] = [];
+		const hide = (o: THREE.Object3D | null | undefined) => {
+			if (o?.visible) {
+				o.visible = false;
+				hidden.push(o);
+			}
+		};
+		hide(this.sky);
+		hide(this.particleRenderer?.group);
+		hide(this.vmParticleRenderer?.group);
+		hide(this.sprites?.group);
+		this.ownMaterial.length = 0;
+		for (const root of [this.scene, this.vmScene]) {
+			root.traverse(o => {
+				const m = o as THREE.Mesh;
+				if (!m.isMesh || !m.visible) return;
+				if (m.userData.portal) this.ownMaterial.push(m);
+				else if ([m.material].flat().every(x => x.transparent || x.blending === THREE.AdditiveBlending)) {
+					hide(m);
+					let e: THREE.Object3D | null = m;
+					while (e && e !== this.entityGroup) e = e.parent;
+					if (e) this.ownMaterial.push(m);
+				}
+			});
+		}
+		this.scene.overrideMaterial = this.vmScene.overrideMaterial = simpleMaterial;
+		try {
+			this.renderFrame();
+		} finally {
+			this.scene.overrideMaterial = this.vmScene.overrideMaterial = null;
+			for (const o of hidden) o.visible = true;
+			this.ownMaterial.length = 0;
+		}
+	}
+	private ownMaterial: THREE.Mesh[] = [];
+
+	// (simple view: the portals over their grey stand-ins and the entities'
+	// see-through effects, as themselves)
+	private drawPortalSurfaces(r: THREE.WebGLRenderer) {
+		const override = this.scene.overrideMaterial;
+		if (!override || !this.ownMaterial.length) return;
+		this.scene.overrideMaterial = null;
+		const auto = r.autoClear;
+		r.autoClear = false;
+		for (const m of this.ownMaterial) {
+			const was = m.visible;
+			m.visible = true;
+			r.render(m, this.camera);
+			m.visible = was;
+		}
+		r.autoClear = auto;
+		this.scene.overrideMaterial = override;
+	}
+
+	private renderFrame() {
 		const r = this.renderer;
 		if (!r) return;
 		// orbit: the camera stays on the player's side of walls, as a game's
@@ -4819,6 +4929,7 @@ export class View3D {
 		// portal views and the meter are, so each material compiles once),
 		// then exposed, clamped and encoded to the screen by a final pass
 		this.renderScene(r);
+		this.drawPortalSurfaces(r);
 		this.drawNearPortals(r);
 		if (this.mode === 'eyes' && this.vmShown && !this.pip?.taunt) {
 			this.vmCam.position.copy(this.camera.position);
@@ -4847,7 +4958,7 @@ export class View3D {
 		}
 		r.setRenderTarget(null);
 		this.composite.uniforms.bloom.value = this.bloom.render(r, frame, this.exposure);
-		this.composite.uniforms.bloomAmount.value = this.bloomOverride ?? this.bloomScale;
+		this.composite.uniforms.bloomAmount.value = this.simple ? 0 : this.bloomOverride ?? this.bloomScale;
 		r.setRenderTarget(null);
 		this.composite.uniforms.frame.value = frame.texture;
 		this.composite.uniforms.exposure.value = this.exposure;
