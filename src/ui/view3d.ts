@@ -3272,11 +3272,16 @@ export class View3D {
 			// co-op's view model grab: the client draws it facing the way the
 			// holder faces (their yaw, turned by the object's preferred carry
 			// angles), not as the server has it
+			// (with no preferred angles, FLT_MAX, it keeps the turn it had
+			// against the holder's yaw: the server's at that update)
 			const carry = ok.extra?.m_qPreferredPlayerCarryAngles as number[] | undefined;
 			if (Number(k.extra?.m_bUseVMGrab) === 1 && carry) {
 				const yaw = new THREE.Vector3(1, 0, 0).transformDirection(eye);
 				const yawAngle = Math.atan2(yaw.y, yaw.x) * 180 / Math.PI;
-				const q = new THREE.Quaternion().setFromEuler(toEuler([0, yawAngle, 0])).multiply(new THREE.Quaternion().setFromEuler(toEuler(carry as Vec3)));
+				const turn = carry.every(a => Math.abs(a) < 1e30)
+					? new THREE.Quaternion().setFromEuler(toEuler(carry as Vec3))
+					: new THREE.Quaternion().setFromEuler(toEuler([0, hk.angles[1], 0])).invert().multiply(new THREE.Quaternion().setFromEuler(toEuler(ok.angles)));
+				const q = new THREE.Quaternion().setFromEuler(toEuler([0, yawAngle, 0])).multiply(turn);
 				apparent = new THREE.Matrix4().compose(new THREE.Vector3().setFromMatrixPosition(apparent), q, new THREE.Vector3(1, 1, 1));
 			}
 			// (where the holder sees it, for the gun's arcs)
