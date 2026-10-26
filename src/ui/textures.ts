@@ -51,14 +51,15 @@ export class TextureCache {
 		}
 	}
 
-	// `path` under materials/, without .vtf; `linear`: data, not colour (normal maps)
-	get(path: string, linear = false): Promise<THREE.Texture | null> {
-		const key = path.toLowerCase() + (linear ? '|linear' : '');
+	// `path` under materials/, without .vtf; `linear`: data, not colour (normal
+	// maps); `frame`: one of an animated texture's frames
+	get(path: string, linear = false, frame = 0): Promise<THREE.Texture | null> {
+		const key = path.toLowerCase() + (linear ? '|linear' : '') + (frame ? `#${frame}` : '');
 		this.lastUsed.set(key, this.generation);
 		let p = this.cache.get(key);
 		if (!p) {
 			if (this.files.mapPak?.has(`materials/${path.toLowerCase()}.vtf`)) this.fromMap.add(key);
-			const loading: Promise<THREE.Texture | null> = this.load(path.toLowerCase(), linear).catch(() => null).then(t => {
+			const loading: Promise<THREE.Texture | null> = this.load(path.toLowerCase(), linear, frame).catch(() => null).then(t => {
 				if (this.cache.get(key) === loading) this.loaded.set(key, t);
 				return t;
 			});
@@ -68,12 +69,12 @@ export class TextureCache {
 		return p;
 	}
 
-	private async load(path: string, linear: boolean): Promise<THREE.Texture | null> {
+	private async load(path: string, linear: boolean, frame: number): Promise<THREE.Texture | null> {
 		// the header, then only the level drawn (not the whole file)
 		const file = `materials/${path}.vtf`;
 		const head = await this.files.readRange(file, 0, 1024);
 		if (!head) return null;
-		const level = vtfLevel(head, this.maxSize);
+		const level = vtfLevel(head, this.maxSize, frame);
 		if (!level) return null;
 		const data = level.offset + level.size <= head.length
 			? head.subarray(level.offset, level.offset + level.size)
@@ -84,7 +85,7 @@ export class TextureCache {
 		// (the full size, as the material's mapped by: the level drawn can be smaller)
 		const fullSize = [head[16] | head[17] << 8, head[18] | head[19] << 8];
 		if (dxt && compressedSupport.dxt && (linear || compressedSupport.srgb) && level.width % 4 === 0 && level.height % 4 === 0) {
-			const tex = await this.compressed(file, head, level, linear);
+			const tex = await this.compressed(file, head, level, linear, frame);
 			if (tex) {
 				tex.userData.fullSize = fullSize;
 				return tex;
@@ -109,8 +110,8 @@ export class TextureCache {
 
 	// the drawn level and every smaller one as one compressed texture (the
 	// levels sit together in the file, smallest first)
-	private async compressed(file: string, head: Uint8Array, level: NonNullable<ReturnType<typeof vtfLevel>>, linear: boolean): Promise<THREE.Texture | null> {
-		const mips = vtfMips(head, this.maxSize);
+	private async compressed(file: string, head: Uint8Array, level: NonNullable<ReturnType<typeof vtfLevel>>, linear: boolean, frame: number): Promise<THREE.Texture | null> {
+		const mips = vtfMips(head, this.maxSize, frame);
 		if (!mips?.length) return null;
 		const start = Math.min(...mips.map(m => m.offset)), end = Math.max(...mips.map(m => m.offset + m.size));
 		const bytes = end <= head.length ? head.subarray(start, end) : await this.files.readRange(file, start, end - start);

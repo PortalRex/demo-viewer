@@ -38,7 +38,8 @@ export function readVtf(bytes: Uint8Array, maxSize = 1024): VtfImage | null {
 
 // where the level readVtf takes is in the file, from its header alone
 // (enough bytes to cover the header and its resource list)
-export function vtfLevel(bytes: Uint8Array, maxSize = 1024): (Omit<VtfImage, 'data'> & {offset: number; size: number}) | null {
+// (`frame`: which of an animated texture's frames, the first by default)
+export function vtfLevel(bytes: Uint8Array, maxSize = 1024, frame = 0): (Omit<VtfImage, 'data'> & {offset: number; size: number}) | null {
 	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	if (v.getUint32(0, true) !== 0x00465456) return null;  // "VTF\0"
 	const minor = v.getUint32(8, true);
@@ -77,6 +78,7 @@ export function vtfLevel(bytes: Uint8Array, maxSize = 1024): (Omit<VtfImage, 'da
 	}
 	const w = Math.max(1, width >> level), h = Math.max(1, height >> level);
 	const size = bytesFor(format, w, h);
+	offset += Math.min(Math.max(0, frame), frames - 1) * size * faces;
 	const F = VtfFormat;
 	const hasAlpha = [F.DXT3, F.DXT5, F.DXT1_ONEBITALPHA, F.RGBA8888, F.ABGR8888, F.ARGB8888, F.BGRA8888, F.IA88, F.A8, F.BGRA4444, F.BGRA5551].includes(format as never)
 		&& (flags & (0x1000 | 0x2000)) !== 0;  // ONEBITALPHA | EIGHTBITALPHA
@@ -85,7 +87,7 @@ export function vtfLevel(bytes: Uint8Array, maxSize = 1024): (Omit<VtfImage, 'da
 
 // the drawn level (as vtfLevel picks it) and every smaller one, largest
 // first: where each level's first frame is in the file
-export function vtfMips(bytes: Uint8Array, maxSize = 1024): {width: number; height: number; offset: number; size: number}[] | null {
+export function vtfMips(bytes: Uint8Array, maxSize = 1024, frame = 0): {width: number; height: number; offset: number; size: number}[] | null {
 	const top = vtfLevel(bytes, maxSize);
 	if (!top) return null;
 	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -105,7 +107,7 @@ export function vtfMips(bytes: Uint8Array, maxSize = 1024): {width: number; heig
 	for (let m = level; m < mipCount; m++) {
 		const w = Math.max(1, width >> m), h = Math.max(1, height >> m);
 		const size = bytesFor(top.format, w, h);
-		out.push({width: w, height: h, offset, size});
+		out.push({width: w, height: h, offset: offset + Math.min(Math.max(0, frame), frames - 1) * size, size});
 		if (m + 1 < mipCount) offset -= bytesFor(top.format, Math.max(1, width >> (m + 1)), Math.max(1, height >> (m + 1))) * frames;
 	}
 	return out;

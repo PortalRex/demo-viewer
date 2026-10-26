@@ -34,6 +34,7 @@ export interface MaterialGroup extends MeshData {
 	material: string;    // lower case, under materials/
 	surface: Surface;
 	texSize?: [number, number];  // the size the texture coordinates are over (the compiler's, from the material's texture)
+	overlayId?: number;  // an overlay an info_overlay_accessor can change (its texture's frame)
 }
 
 export interface ModelMesh {
@@ -661,10 +662,13 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 	// face it covers, its texture coordinates by where each point falls in the
 	// quad (bilinearly), then laid on the face along the overlay's normal
 	const overlayLump = await read(LUMP.OVERLAYS);
-	const overlayGroups = new Map<string, {tex: TexInfo; b: Builder}>();
+	// (each one an accessor can change apart: the others, by material)
+	const accessed = new Set(entities.filter(e => e.classname === 'info_overlay_accessor').map(e => Number(e.overlayid)));
+	const overlayGroups = new Map<string, {tex: TexInfo; b: Builder; id?: number}>();
 	const OVERLAY_SIZE = 352;
 	for (let o = 0; o + OVERLAY_SIZE <= overlayLump.byteLength; o += OVERLAY_SIZE) {
 		const fv = (k: number) => overlayLump.getFloat32(o + k, true);
+		const id = overlayLump.getInt32(o, true);
 		const ti = overlayLump.getInt16(o + 4, true);
 		const faceCount = overlayLump.getUint16(o + 6, true) & 0x3fff;
 		if (ti < 0 || ti * 72 >= texinfo.byteLength) continue;
@@ -682,10 +686,11 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		// the quad in overlay-plane coordinates, corners A B C D = points 0 3 2 1
 		const quad = pts.map(p => [p[0], p[1]]);
 		const A = quad[0], B = quad[3], C = quad[2], D = quad[1];
-		let g = overlayGroups.get(tex.material);
+		const key = accessed.has(id) ? `${tex.material}#${id}` : tex.material;
+		let g = overlayGroups.get(key);
 		if (!g) {
-			g = {tex, b: new Builder()};
-			overlayGroups.set(tex.material, g);
+			g = {tex, b: new Builder(), id: accessed.has(id) ? id : undefined};
+			overlayGroups.set(key, g);
 		}
 		for (let k = 0; k < faceCount; k++) {
 			const f = overlayLump.getInt32(o + 8 + k * 4, true);
@@ -721,12 +726,12 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		}
 	}
 	const overlays: MaterialGroup[] = [];
-	for (const [material, {tex, b: ob}] of overlayGroups) {
+	for (const {tex, b: ob, id} of overlayGroups.values()) {
 		if (ob.empty) continue;
 		overlays.push({
-			material, surface: tex.surface,
+			material: tex.material, surface: tex.surface,
 			positions: new Float32Array(ob.pos), normals: new Float32Array(ob.nrm), colors: new Float32Array(ob.col),
-			uv: new Float32Array(ob.uv), lightUv: new Float32Array(ob.lm),
+			uv: new Float32Array(ob.uv), lightUv: new Float32Array(ob.lm), overlayId: id,
 		});
 	}
 

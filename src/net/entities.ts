@@ -57,6 +57,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 		'localdata.m_iBonusChallenge', 'm_iBonusChallenge', 'm_StatsThisLevel.iNumPortalsPlaced', 'm_StatsThisLevel.fNumSecondsTaken',
 		// the funnel they're in (the recording player's only)
 		'm_PortalLocal.m_hTractorBeam'],
+	// which frame an overlay's texture shows (indicator lights' two colours)
+	CInfoOverlayAccessor: ['m_iOverlayID', 'm_iTextureFrameIndex'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
 	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
 	// whose view model it is (co-op recordings have one per player)

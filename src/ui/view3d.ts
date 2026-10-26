@@ -180,7 +180,7 @@ class MaterialLibrary {
 		this.lightmap = lightmap;
 	}
 
-	private apply(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo) {
+	private apply(mat: THREE.MeshBasicMaterial | THREE.MeshLambertMaterial, info: MaterialInfo, frame = 0) {
 		// a monitor screen ($basetexture _rt_Camera): what the active
 		// point_camera sees, unlit, tinted as dev_tvmonitor's proxies hold it
 		if (info.baseTexture === '_rt_camera' && this.cameraTexture) {
@@ -244,7 +244,7 @@ class MaterialLibrary {
 		const phong = mat.userData.ambientLit && info.phong;
 		const phongMask = phong && !info.phongBaseMask && info.bumpMap ? this.textures.get(info.bumpMap, true) : Promise.resolve(null);
 		const phongExp = phong && info.phongExponentTexture ? this.textures.get(info.phongExponentTexture, true) : Promise.resolve(null);
-		Promise.all([this.textures.get(info.baseTexture), envMask, glowMask, phongMask, phongExp]).then(([tex, maskMap, glow, phMask, phExp]) => {
+		Promise.all([this.textures.get(info.baseTexture, false, frame), envMask, glowMask, phongMask, phongExp]).then(([tex, maskMap, glow, phMask, phExp]) => {
 			if (!tex) return;
 			// (with neither a mask nor alpha in the base texture, the engine drops it)
 			if (mat.userData.ambientLit && info.selfIllum && (glow || tex.userData.hasAlpha)) mat.userData.selfIllum = {tint: info.selfIllumTint, mask: glow};
@@ -427,11 +427,12 @@ class MaterialLibrary {
 
 	// an overlay's material: the world material, drawn just in front of the
 	// face it's laid on (and DecalModulate's stains multiplying what's there)
-	forOverlay(group: MaterialGroup): THREE.Material {
-		const key = `overlay:${group.material}`;
+	// (`frame`: the frame of its texture an info_overlay_accessor picks)
+	forOverlay(group: MaterialGroup, frame = 0): THREE.Material {
+		const key = `overlay:${group.material}` + (frame ? `#${frame}` : '');
 		const cached = this.world.get(key);
 		if (cached) return cached;
-		const mat = this.forWorld({...group, material: group.material}, key) as THREE.MeshBasicMaterial;
+		const mat = this.forWorld({...group, material: group.material}, key, frame) as THREE.MeshBasicMaterial;
 		mat.polygonOffset = true;
 		mat.polygonOffsetFactor = -1;
 		mat.polygonOffsetUnits = -4;
@@ -451,7 +452,7 @@ class MaterialLibrary {
 		return mat;
 	}
 
-	forWorld(group: MaterialGroup, cacheKey = group.material): THREE.Material {
+	forWorld(group: MaterialGroup, cacheKey = group.material, frame = 0): THREE.Material {
 		const cached = this.world.get(cacheKey);
 		if (cached) return cached;
 		const mat = new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.FrontSide});
@@ -479,7 +480,7 @@ class MaterialLibrary {
 				}
 			}
 			if (info.water) mat.userData.texSize = group.texSize;
-			this.apply(mat, info);
+			this.apply(mat, info, frame);
 			this.applyBackFaces(mat);
 			mat.needsUpdate = true;
 			this.onChange();
@@ -957,6 +958,7 @@ export class View3D {
 		for (const rt of this.waterTargets.values()) rt.dispose();
 		this.waterTargets.clear();
 		this.waterMeshes = [];
+		this.accessedOverlays.clear();
 		this.particleRenderer?.dispose();
 		this.vmParticleRenderer?.dispose();
 		const token = ++this.mapToken;
@@ -1064,6 +1066,7 @@ export class View3D {
 			const mesh = new THREE.Mesh(geometry(g), this.library!.forOverlay(g));
 			mesh.name = `overlay ${g.material}`;
 			mesh.renderOrder = 1;
+			if (g.overlayId !== undefined) this.accessedOverlays.set(g.overlayId, {mesh, group: g});
 			overlays.add(mesh);
 		}
 		this.mapGroup.add(overlays);
@@ -3648,6 +3651,10 @@ export class View3D {
 			}
 			for (const t of ents.tracks) {
 				const k = keyAt(t, tick);
+				if (t.className === 'CInfoOverlayAccessor') {
+					this.overlayFrame(k);
+					continue;
+				}
 				if (this.frozen.has(t)) continue;  // (drawn with the static props)
 				const show = !!k && (this.shows(t, k) || (held.has(t) && t.model.endsWith('.mdl')));
 				const o = show ? this.objectFor(t, k?.skin ?? 0, Number(k?.extra?.m_nBody ?? 0), k?.model ?? t.model) : this.objects.get(t);
@@ -4184,6 +4191,14 @@ export class View3D {
 		return saved;
 	}
 
+	// overlays an info_overlay_accessor names, by overlay id: the frame of
+	// their texture follows its m_iTextureFrameIndex
+	private accessedOverlays = new Map<number, {mesh: THREE.Mesh; group: MaterialGroup}>();
+	private overlayFrame(k: EntityKey | undefined) {
+		const o = k?.extra ? this.accessedOverlays.get(Number(k.extra.m_iOverlayID)) : undefined;
+		if (o) o.mesh.material = this.library!.forOverlay(o.group, Number(k!.extra!.m_iTextureFrameIndex ?? 0) || 0);
+	}
+
 	private waterMeshes: THREE.Mesh[] = [];
 	private waterTargets = new Map<number, THREE.WebGLRenderTarget>();
 	private waterCam = new THREE.PerspectiveCamera();
@@ -4381,7 +4396,9 @@ export class View3D {
 	pick(x: number, y: number) {
 		const ray = new THREE.Raycaster();
 		ray.setFromCamera(new THREE.Vector2(x * 2 - 1, 1 - y * 2), this.camera);
-		const hit = ray.intersectObjects([this.mapGroup, this.propGroup, this.entityGroup], true)[0];
+		// (the nearest shown: rays find hidden objects too)
+		const shown = (o: THREE.Object3D | null): boolean => !o || (o.visible && shown(o.parent));
+		const hit = ray.intersectObjects([this.mapGroup, this.propGroup, this.entityGroup], true).find(h => shown(h.object));
 		if (!hit) return null;
 		let o: THREE.Object3D | null = hit.object;
 		const path: string[] = [];
