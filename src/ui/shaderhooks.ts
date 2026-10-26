@@ -541,6 +541,8 @@ const ENV_FRAGMENT = `
 	#endif
 	#if defined(ENVMASK_TEXTURE) && defined(USE_MAP) && !defined(ENVMASK_BASE) && !defined(ENVMASK_BUMP)
 		mask = texture2D(envMaskMap, vMapUv).r;
+	#elif defined(ENVMASK_ALPHA) && defined(USE_MAP)
+		mask = texture2D(envMaskMap, vMapUv).a;
 	#endif
 		vec3 spec = envScale * textureCube(envCube, reflect(eye, n)).rgb;
 		// $envmaplightscale (darker where the surface's light is) and the mask
@@ -550,6 +552,10 @@ const ENV_FRAGMENT = `
 		spec *= mask * envTint;
 		spec = mix(spec, spec * spec, envContrast);
 		spec = mix(vec3(dot(spec, vec3(0.299, 0.587, 0.114))), spec, envSaturation);
+	#ifdef REFRACT_ENV
+		// (Refract's reflection: by a fresnel from 0.6 face on)
+		spec *= 0.6 + 0.4 * (1.0 - clamp(dot(n, -eye), 0.0, 1.0));
+	#endif
 		outgoingLight += spec;
 		envAdded = spec;
 	}
@@ -599,7 +605,7 @@ export interface ModelEnv {
 	contrast: number;
 	saturation: [number, number, number];
 	lightScale: number;
-	mask: 'none' | 'base' | 'texture';
+	mask: 'none' | 'base' | 'texture' | 'alpha';  // (alpha: in the mask map's alpha, Refract's normal map)
 	maskMap: THREE.Texture | null;
 }
 
@@ -659,6 +665,7 @@ function hook(material: THREE.Material, paint: boolean) {
 		material.defines = {...material.defines, ENVMAP_CUBE: ''};
 		if (env.mask === 'base') material.defines.ENVMASK_BASE = '';
 		if (env.mask === 'texture' && env.maskMap) material.defines.ENVMASK_TEXTURE = '';
+		if (env.mask === 'alpha' && env.maskMap) material.defines.ENVMASK_ALPHA = '';
 	}
 	if (lit) {
 		material.userData.ambUniforms = {

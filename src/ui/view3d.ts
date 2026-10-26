@@ -378,8 +378,16 @@ class MaterialLibrary {
 			};
 		}
 		mat.needsUpdate = true;
+		// (the reflection masked by the normal map's alpha: loaded before the
+		// tint goes on, as objects take their own copies then)
+		const env = mat.userData.modelEnv as {mask: string; maskMap: THREE.Texture | null} | undefined;
+		const mask = env && info.normalMap ? this.textures.get(info.normalMap, true) : Promise.resolve(null);
 		if (info.refractTintTexture) {
-			this.textures.get(info.refractTintTexture).then(tex => {
+			Promise.all([this.textures.get(info.refractTintTexture), mask]).then(([tex, maskMap]) => {
+				if (env && maskMap) {
+					env.mask = 'alpha';
+					env.maskMap = maskMap;
+				}
 				if (!tex) {
 					mat.userData.textureless = true;
 					return;
