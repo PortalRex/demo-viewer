@@ -625,6 +625,8 @@ export class View3D {
 	private tracksByIndex = new Map<number, EntityTrack[]>();
 	// the world's solid faces, for keeping the orbit camera inside the map
 	private collision: MeshBVH | null = null;
+	// the world's glass (what stops turrets' lasers besides the solid faces)
+	private glassCollision: MeshBVH | null = null;
 	// particle effects: info_particle_system entities, each active run an instance
 	private particleLib: ParticleLibrary | null = null;
 	private particleRenderer: ParticleRenderer | null = null;
@@ -997,6 +999,7 @@ export class View3D {
 			this.mapGroup.add(mask);
 		}
 		this.collision = worldCollision(bsp.models[0]);
+		this.glassCollision = worldCollision(bsp.models[0], true);
 		this.paintBlobs?.dispose();
 		if (this.paintBlobs) this.scene.remove(this.paintBlobs.group);
 		const collision = this.collision;
@@ -1961,6 +1964,7 @@ export class View3D {
 	// the "light" attachment along the eyes' aim, to what it hits (8192 out)
 	// and on through portals, while m_bLaserOn (flickering when out of ammo)
 	private turretLasers = new Map<EntityTrack, Laser>();
+	private laserRay = new THREE.Raycaster();
 	private updateTurretLasers(tick: number) {
 		const seen = new Set<EntityTrack>();
 		for (const t of this.entities!.tracks) {
@@ -1974,8 +1978,22 @@ export class View3D {
 			const start = new THREE.Vector3().setFromMatrixPosition(muzzle);
 			const dir = new THREE.Vector3().setFromMatrixColumn(eyes, 0).normalize();
 			const ray = new THREE.Ray(start.clone().addScaledVector(dir, 1), dir);
-			const world = this.collision?.raycastFirst(ray, THREE.DoubleSide);
-			let dist = world && world.distance < 8192 ? world.distance + 1 : 8192;
+			// (traced as a shot is, MASK_SHOT: the world and its glass, props,
+			// light bridges and other entities' models)
+			let dist = 8192;
+			for (const tree of [this.collision, this.glassCollision]) {
+				const hit = tree?.raycastFirst(ray, THREE.DoubleSide);
+				if (hit) dist = Math.min(dist, hit.distance + 1);
+			}
+			this.laserRay.set(ray.origin, ray.direction);
+			this.laserRay.far = dist;
+			const blockers = [this.propGroup, ...[...this.objects].filter(([other, obj]) => other !== t && obj.visible && other.className !== 'CPortal_Player' && other.className !== 'CProp_Portal').map(([, obj]) => obj)];
+			const solid = this.laserRay.intersectObjects(blockers, true).find(h => {
+				const m = (h.object as THREE.Mesh).material as THREE.Material | undefined;
+				// (effects let it through, light bridges don't)
+				return h.object.visible && m && (h.object.userData.bridge || !m.userData.effect && !(m as THREE.ShaderMaterial).isShaderMaterial);
+			});
+			if (solid) dist = Math.min(dist, solid.distance + 1);
 			// (players stop it too: their boxes, 32 wide, 72 tall or 36 ducked)
 			for (const p of this.entities!.tracks) {
 				const pk = p.className === 'CPortal_Player' ? keyAt(p, tick) : undefined;
@@ -4010,10 +4028,10 @@ export class View3D {
 	}
 }
 
-// one triangle soup of the world's solid faces (not glass or liquids) with a
-// BVH, for ray tests
-function worldCollision(m: ModelMesh): MeshBVH | null {
-	const solid = m.groups.filter(g => g.surface !== 'glass' && g.surface !== 'liquid');
+// one triangle soup of the world's solid faces (not glass or liquids), or
+// with `glass` its glass alone, with a BVH, for ray tests
+function worldCollision(m: ModelMesh, glass = false): MeshBVH | null {
+	const solid = m.groups.filter(g => glass ? g.surface === 'glass' : g.surface !== 'glass' && g.surface !== 'liquid');
 	const count = solid.reduce((n, g) => n + g.positions.length, 0);
 	if (!count) return null;
 	const pos = new Float32Array(count);
