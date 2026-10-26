@@ -29,8 +29,16 @@ export const exposureUniforms = {
 	sceneExposure: {value: 1},
 };
 
+// mat_ambient_light_r/g/b (a player's setting, recorded by SAR): light
+// added to every model's lighting cube, static props' too (the engine's
+// light cache), in lightmap units; the world's lightmaps don't take it
+export const modelAmbientUniforms = {
+	modelAmbient: {value: new THREE.Vector3()},
+};
+
 const FOG_HEAD = `
 uniform float sceneExposure;
+uniform vec3 modelAmbient;
 `;
 
 const FOG_FRAGMENT = `
@@ -229,7 +237,7 @@ const AMBIENT_FRAGMENT = `
 		vec3 n2 = n * n;
 		vec3 amb = n2.x * (n.x >= 0.0 ? ambCube[0] : ambCube[1])
 			+ n2.y * (n.y >= 0.0 ? ambCube[2] : ambCube[3])
-			+ n2.z * (n.z >= 0.0 ? ambCube[4] : ambCube[5]);
+			+ n2.z * (n.z >= 0.0 ? ambCube[4] : ambCube[5]) + modelAmbient;
 		for (int i = 0; i < 2; i++) {
 			vec3 l = ambLightPos[i] - vDitherWorld;
 			amb += ambLightColor[i] * max(dot(n, normalize(l)), 0.0);
@@ -382,6 +390,7 @@ const BUMP_FRAGMENT = `
 		#endif
 		}
 	#endif
+		lmColor += modelAmbient;
 		reflectedLight.indirectDiffuse += lmColor * lightMapIntensity * RECIPROCAL_PI;
 		surfaceLight = lmColor * lightMapIntensity * RECIPROCAL_PI;
 		paintLight = lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;
@@ -570,7 +579,7 @@ function hook(material: THREE.Material, paint: boolean) {
 		}
 	}
 	material.onBeforeCompile = shader => {
-		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms, exposureUniforms, flashUniforms);
+		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, gooUniforms, exposureUniforms, flashUniforms, modelAmbientUniforms);
 		if (paint) {
 			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
@@ -584,7 +593,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			);
 		}
 		// static props (their light baked into vertex colours) take the
-		// projected spotlight too: the albedo times its light, added
+		// projected spotlight and mat_ambient_light too: the albedo times their light, added
 		if (material.userData.vertexLit) {
 			shader.vertexShader = 'varying vec3 vFlashN;\n' + shader.vertexShader.replace(
 				'#include <project_vertex>',
@@ -594,7 +603,7 @@ function hook(material: THREE.Material, paint: boolean) {
 				'vec3 outgoingLight = reflectedLight.indirectDiffuse;',
 				`vec3 outgoingLight = reflectedLight.indirectDiffuse;
 	#ifdef USE_MAP
-		outgoingLight += texture2D(map, vMapUv).rgb * diffuse * flashLight(vDitherWorld, normalize(vFlashN));
+		outgoingLight += texture2D(map, vMapUv).rgb * diffuse * (flashLight(vDitherWorld, normalize(vFlashN)) + modelAmbient);
 	#endif`,
 			);
 		}

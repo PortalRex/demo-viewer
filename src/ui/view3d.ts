@@ -18,7 +18,7 @@ import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAsse
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints} from './particles.ts';
-import {AMBIENT_SCALE, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, setModelEnvCube, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
+import {AMBIENT_SCALE, modelAmbientUniforms, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, setModelEnvCube, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
 import {TextureCache, compressedSupport} from './textures.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
@@ -612,6 +612,7 @@ export class View3D {
 	private styleValues = new Map<number, number>();  // what the lightmap texture was composed with
 	// bumped when a style changes, for models to be re-lit
 	private styleGen = 0;
+	private ambientLight: {tick: number; rgb: [number, number, number]}[] = [];
 	private styleNow = (style: number) => this.styleValues.get(style) ?? 1;
 	// fog (colour 0..255, gamma) and auto exposure: the map's defaults until
 	// the player's controllers say otherwise
@@ -1477,6 +1478,15 @@ export class View3D {
 		}
 		this.interval = track.seg.intervalPerTick;
 		this.track = track;
+		// the player's mat_ambient_light_r/g/b as it changes (SAR records it)
+		this.ambientLight = [];
+		const rgb: [number, number, number] = [0, 0, 0];
+		for (const e of track.seg.sar ?? []) {
+			const c = e.kind === 'cvar' ? /^mat_ambient_light_([rgb])$/.exec(e.name) : null;
+			if (!c || e.kind !== 'cvar') continue;
+			rgb['rgb'.indexOf(c[1])] = Number(e.value) || 0;
+			this.ambientLight.push({tick: e.tick, rgb: [...rgb]});
+		}
 		this.bobClock = null;
 		this.paint?.texture.dispose();
 		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint) : null;
@@ -1855,7 +1865,7 @@ export class View3D {
 	private lightForPoint(point: THREE.Vector3): [number, number, number] {
 		const amb = this.bsp?.ambient;
 		if (!amb) return [1, 1, 1];
-		const key = `${Math.round(point.x / 4)},${Math.round(point.y / 4)},${Math.round(point.z / 4)},${this.styleGen}`;
+		const key = `${Math.round(point.x / 4)},${Math.round(point.y / 4)},${Math.round(point.z / 4)},${this.styleGen},${modelAmbientUniforms.modelAmbient.value.x}`;
 		const known = this.pointLight.get(key);
 		if (known) return known;
 		if (this.pointLight.size > 4096) this.pointLight.clear();
@@ -1868,7 +1878,7 @@ export class View3D {
 				for (let ch = 0; ch < 3; ch++) box[side * 3 + ch] += l.color[ch] * Math.abs(c);
 			}
 		}
-		const out: [number, number, number] = [0, 0, 0];
+		const out = modelAmbientUniforms.modelAmbient.value.toArray() as [number, number, number];
 		for (let side = 0; side < 6; side++) for (let ch = 0; ch < 3; ch++) out[ch] += box[side * 3 + ch] / 6;
 		const light: [number, number, number] = [Math.min(out[0], 1), Math.min(out[1], 1), Math.min(out[2], 1)];
 		this.pointLight.set(key, light);
@@ -3465,6 +3475,9 @@ export class View3D {
 			}
 		}
 
+		let ambient: [number, number, number] = [0, 0, 0];
+		for (const a of this.ambientLight) if (a.tick <= tick) ambient = a.rgb;
+		modelAmbientUniforms.modelAmbient.value.set(...ambient);
 		if (ents) this.placeAttached(tick);
 		if (ents) this.updateTurretLasers(tick);
 		if (ents) this.updatePaintBlobs(tick);
