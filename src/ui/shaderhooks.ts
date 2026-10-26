@@ -610,6 +610,7 @@ uniform float envContrast;
 uniform vec3 envSaturation;
 uniform sampler2D envMaskMap;
 uniform float envLightScale;
+uniform float envFresnel;
 varying vec3 vEnvN;
 vec3 surfaceLight = vec3(1.0);
 vec3 envAdded = vec3(0.0);
@@ -639,6 +640,15 @@ const ENV_FRAGMENT = `
 		// $envmaplightscale (darker where the surface's light is) and the mask
 		// go in before the tint and contrast, as the engine's shaders do: the
 		// contrast squares them too
+	#ifdef ENV_FRESNEL
+		{
+			// (Phong's $envmapfresnel: by its fresnel ranges, low/mid/high by (1-N.V)^2)
+			float f = 1.0 - clamp(dot(n, -eye), 0.0, 1.0);
+			f *= f;
+			float fresnel = f > 0.5 ? mix(phongFresnel.y, phongFresnel.z, 2.0 * f - 1.0) : mix(phongFresnel.x, phongFresnel.y, 2.0 * f);
+			spec = mix(spec, spec * fresnel, envFresnel);
+		}
+	#endif
 		spec = mix(spec, spec * clamp(surfaceLight, 0.0, 1.0), envLightScale);
 		spec *= mask * envTint;
 		spec = mix(spec, spec * spec, envContrast);
@@ -731,6 +741,7 @@ export interface ModelEnv {
 	lightScale: number;
 	mask: 'none' | 'base' | 'texture' | 'alpha';  // (alpha: in the mask map's alpha, Refract's normal map)
 	maskMap: THREE.Texture | null;
+	fresnel: number;  // $envmapfresnel (Phong): scaled by the phong fresnel ranges this much
 }
 
 // the cube an object's own lit materials reflect
@@ -769,6 +780,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			envSaturation: {value: new THREE.Vector3(1, 1, 1)},
 			envMaskMap: {value: null},
 			envLightScale: {value: 0},
+			envFresnel: {value: 0},
 			detailMap: {value: null},
 			detailScale: {value: 4},
 			detailBlend: {value: 1},
@@ -786,8 +798,10 @@ function hook(material: THREE.Material, paint: boolean) {
 			envSaturation: {value: new THREE.Vector3(...env.saturation)},
 			envMaskMap: {value: env.maskMap},
 			envLightScale: {value: env.lightScale},
+			envFresnel: {value: env.fresnel},
 		};
 		material.defines = {...material.defines, ENVMAP_CUBE: ''};
+		if (env.fresnel && material.userData.phong) material.defines.ENV_FRESNEL = '';
 		if (env.mask === 'base') material.defines.ENVMASK_BASE = '';
 		if (env.mask === 'texture' && env.maskMap) material.defines.ENVMASK_TEXTURE = '';
 		if (env.mask === 'alpha' && env.maskMap) material.defines.ENVMASK_ALPHA = '';

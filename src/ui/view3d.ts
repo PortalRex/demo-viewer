@@ -239,10 +239,13 @@ class MaterialLibrary {
 			mat.userData.textureless = true;
 			return;
 		}
-		// a lit model's reflection (the cube is per object, see lightModels;
-		// a mask in the bump map's alpha needs the bump map, which models don't draw)
-		const envMask = !mat.userData.vertexLit && mat.userData.ambientLit && info.envMap && info.envMask !== 'bump'
-			? (info.envMask === 'texture' && info.envMaskTexture ? this.textures.get(info.envMaskTexture, true) : Promise.resolve(null))
+		// a lit model's reflection (the cube is per object, see lightModels).
+		// With $phong the engine masks it by the base texture's alpha unless
+		// $normalmapalphaenvmapmask says the bump map's (Phong's shader)
+		const envMaskKind = info.phong && info.envMask === 'none' ? 'base' : info.envMask;
+		const envMaskName = envMaskKind === 'texture' ? info.envMaskTexture : envMaskKind === 'bump' ? info.bumpMap : '';
+		const envMask = !mat.userData.vertexLit && mat.userData.ambientLit && info.envMap
+			? (envMaskName ? this.textures.get(envMaskName, true) : Promise.resolve(null))
 			: null;
 		const glowMask = mat.userData.ambientLit && info.selfIllum && info.selfIllumMask ? this.textures.get(info.selfIllumMask, true) : Promise.resolve(null);
 		// $phong's mask (the bump map's alpha, unless it's the base's) and exponents
@@ -260,9 +263,12 @@ class MaterialLibrary {
 				};
 			}
 			if (envMask) {
+				// (Phong's reflection has no contrast, saturation or light scale)
 				mat.userData.modelEnv = {
-					tint: info.envTint, contrast: info.envContrast, saturation: info.envSaturation, lightScale: info.envLightScale,
-					mask: info.envMask === 'texture' && !maskMap ? 'none' : info.envMask, maskMap, cube: info.envMap,
+					tint: info.envTint, contrast: info.phong ? 0 : info.envContrast, saturation: info.phong ? [1, 1, 1] : info.envSaturation,
+					lightScale: info.phong ? 0 : info.envLightScale,
+					mask: envMaskKind === 'bump' ? (maskMap ? 'alpha' : 'none') : envMaskKind === 'texture' && !maskMap ? 'none' : envMaskKind,
+					maskMap, cube: info.envMap, fresnel: info.phong ? info.envFresnel : 0,
 				};
 			}
 			mat.map = tex;
@@ -398,7 +404,7 @@ class MaterialLibrary {
 			mat.defines.REFRACT_ENV = '';
 			mat.userData.modelEnv = {
 				tint: info.envTint, contrast: info.envContrast, saturation: info.envSaturation, lightScale: info.envLightScale,
-				mask: 'none', maskMap: null, cube: info.envMap,
+				mask: 'none', maskMap: null, cube: info.envMap, fresnel: 0,
 			};
 		}
 		mat.needsUpdate = true;
