@@ -2566,7 +2566,9 @@ export class View3D {
 			const end = start.clone().addScaledVector(dir, dist);
 			let laser = this.turretLasers.get(t);
 			if (!laser) {
-				laser = new Laser(this.effects, 0.75, [1, 32 / 255, 32 / 255], 'effects/redlaser1');
+				// (the beam's render colour, 255 32 32, isn't drawn: redlaser1 has no
+				// $vertexcolor; its own red shows)
+				laser = new Laser(this.effects, 0.75, [1, 1, 1], 'effects/redlaser1');
 				this.entityGroup.add(laser.group);
 				this.turretLasers.set(t, laser);
 			}
