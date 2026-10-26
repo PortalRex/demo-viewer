@@ -736,6 +736,8 @@ export class View3D {
 	private collision: MeshBVH | null = null;
 	// the world's glass (what stops turrets' lasers besides the solid faces)
 	private glassCollision: MeshBVH | null = null;
+	// and its liquids' surfaces (soft particles fade into water too)
+	private liquidCollision: MeshBVH | null = null;
 	// particle effects: info_particle_system entities, each active run an instance
 	private particleLib: ParticleLibrary | null = null;
 	private particleRenderer: ParticleRenderer | null = null;
@@ -1080,6 +1082,15 @@ export class View3D {
 		this.particleLib.lightAt = point => this.lightForPoint(point);
 		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
 		this.particleRenderer.visibility = (point, eye, radius) => this.pointSeen(point, eye, radius);
+		this.particleRenderer.surface = (from, dir, far) => {
+			const ray = new THREE.Ray(from, dir);
+			let near = Infinity;
+			for (const tree of [this.collision, this.liquidCollision]) {
+				const hit = tree?.raycastFirst(ray, THREE.DoubleSide);
+				if (hit && hit.distance < near) near = hit.distance;
+			}
+			return near <= far ? near : Infinity;
+		};
 		this.scene.add(this.particleRenderer.group);
 		if (this.vmParticleRenderer) {
 			this.vmParticleRenderer.clear();
@@ -1150,7 +1161,8 @@ export class View3D {
 			this.mapGroup.add(mask);
 		}
 		this.collision = worldCollision(bsp.models[0]);
-		this.glassCollision = worldCollision(bsp.models[0], true);
+		this.glassCollision = worldCollision(bsp.models[0], 'glass');
+		this.liquidCollision = worldCollision(bsp.models[0], 'liquid');
 		this.paintBlobs?.dispose();
 		if (this.paintBlobs) this.scene.remove(this.paintBlobs.group);
 		for (const pb of this.particleBlobs.values()) {
@@ -4740,9 +4752,9 @@ export class View3D {
 }
 
 // one triangle soup of the world's solid faces (not glass or liquids), or
-// with `glass` its glass alone, with a BVH, for ray tests
-function worldCollision(m: ModelMesh, glass = false): MeshBVH | null {
-	const solid = m.groups.filter(g => glass ? g.surface === 'glass' : g.surface !== 'glass' && g.surface !== 'liquid');
+// its glass or its liquids alone, with a BVH, for ray tests
+function worldCollision(m: ModelMesh, only?: 'glass' | 'liquid'): MeshBVH | null {
+	const solid = m.groups.filter(g => only ? g.surface === only : g.surface !== 'glass' && g.surface !== 'liquid');
 	const count = solid.reduce((n, g) => n + g.positions.length, 0);
 	if (!count) return null;
 	const pos = new Float32Array(count);

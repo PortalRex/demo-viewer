@@ -909,6 +909,9 @@ interface SpriteMaterial {
 	// radius as a fraction of its distance from the eye (fading out, then
 	// gone, between the last two: smoke at the camera)
 	size: [number, number, number, number];
+	// $depthblend: faded where it meets what's behind it, over this many
+	// units ($depthblendscale), else 0
+	depthBlend: number;
 }
 
 // a blob-rendered system's particles this frame, and the blob shape
@@ -990,6 +993,9 @@ export class ParticleRenderer {
 	// how much of a point the camera sees (0..1), for renderers with a
 	// visibility proxy; everything counts as seen without it
 	visibility: ((point: THREE.Vector3, camera: THREE.Vector3, radius: number) => number) | null = null;
+	// how far from a point along a direction the world's first surface is
+	// (Infinity for none within `far`), for $depthblend sprites
+	surface: ((from: THREE.Vector3, dir: THREE.Vector3, far: number) => number) | null = null;
 
 	constructor(files: GameFiles, materials: Materials, textures: TextureCache) {
 		this.files = files;
@@ -1057,7 +1063,29 @@ export class ParticleRenderer {
 		const size: [number, number, number, number] = [param('$minsize', 0), param('$maxsize', 20), param('$startfadesize', 10), param('$endfadesize', 20)];
 		const sheet = bytes ? readVtfSheet(bytes) : null;
 		sheets.set(name, sheet);
-		return {material, sheet, orientation: Number(m.params.get('$orientation') ?? 0) || 0, dual, size};
+		const depthBlend = on('$depthblend') ? param('$depthblendscale', 50) : 0;
+		return {material, sheet, orientation: Number(m.params.get('$orientation') ?? 0) || 0, dual, size, depthBlend};
+	}
+
+	// $depthblend, as the shader's (each pixel faded by how far the world
+	// behind it is, over the blend scale), taken over the card at its centre
+	// and four points around it: how far the surface behind each is
+	private depthFade(at: THREE.Vector3, radius: number, camPos: THREE.Vector3, right: THREE.Vector3, up: THREE.Vector3, scale: number): number {
+		const offsets = radius < 16 ? [[0, 0]] : [[0, 0], [0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5]];
+		let sum = 0;
+		for (const [x, y] of offsets) {
+			const p = at.clone().addScaledVector(right, x * radius).addScaledVector(up, y * radius);
+			const dir = p.clone().sub(camPos);
+			const d = dir.length();
+			if (d < 1e-3) {
+				sum += 1;
+				continue;
+			}
+			dir.divideScalar(d);
+			const hit = this.surface!(camPos, dir, d + scale);
+			sum += Math.min(1, Math.max(0, (hit - d) / scale));
+		}
+		return sum / offsets.length;
 	}
 
 	// rebuilds the quads of every live particle
@@ -1131,6 +1159,10 @@ export class ParticleRenderer {
 							alpha *= 1 - (radius - startFade * l) / Math.max(1e-6, (endFade - startFade) * l);
 						}
 						radius = Math.min(radius, maxSize * l);
+						if (sprite.depthBlend && this.surface) {
+							alpha *= this.depthFade(at, radius, camPos, right, up, sprite.depthBlend);
+							if (alpha <= 0.002) continue;
+						}
 					}
 					const age = inst.time + inst.ahead - p.born;
 					const uv = frameUv(sprite.sheet, p.seq, fit ? age / Math.max(p.life, 1e-3) : age * rate, !!fit);
