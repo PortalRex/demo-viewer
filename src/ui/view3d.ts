@@ -3784,7 +3784,21 @@ export class View3D {
 		// (the engine eases in by its rate x 2 x the frame time, at most 1/60 of
 		// the way a frame (1/15 of the histogram's 16 buckets, quartered): at
 		// the 60 frames a second the game's recorded at, always that 1/60)
-		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
+		let t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
+		// (the engine eases towards a weighted average of the last ten frames'
+		// targets: the oldest and newest count most, the middle ones least)
+		if (this.meterSnap) this.targetHistory.length = 0;
+		this.targetHistory.push(t);
+		if (this.targetHistory.length > 10) this.targetHistory.shift();
+		if (this.targetHistory.length === 10) {
+			let sum = 0, weights = 0;
+			this.targetHistory.forEach((v, i) => {
+				const w = Math.abs(i - 5) / 5;
+				sum += w * v;
+				weights += w;
+			});
+			t = sum / weights;
+		}
 		this.exposure += (t - this.exposure) * (1 - Math.pow(1 - 1 / 60, dt * 60));
 		r.toneMappingExposure = this.exposure;
 		exposureUniforms.sceneExposure.value = this.exposure;
@@ -3795,6 +3809,7 @@ export class View3D {
 	private meterTick = 0;
 	private meterTickLast = 0;
 	private meterSnap = true;
+	private targetHistory: number[] = [];
 
 	// the fog colour as drawn: three mixes fog in after exposure and output
 	// encoding, so it's given already exposed and encoded
