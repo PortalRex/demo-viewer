@@ -940,7 +940,9 @@ const VERTEX = `
 	void main() {
 		vUv = uv;
 		vUv2 = uv2;
-		vColor = pcolor;
+		// (SpriteCard's vertex shader takes the particle colour from gamma
+		// to linear: GammaToLinear, pow 2.2; alpha as it is)
+		vColor = vec4(pow(max(pcolor.rgb, vec3(0.0)), vec3(2.2)), pcolor.a);
 		gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 	}`;
 
