@@ -63,6 +63,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CMovieDisplay: ['m_bEnabled', 'm_bLooping', 'm_szMovieFilename', 'm_szGroupName', 'm_bStretchToFill', 'm_bForcedSlave', 'm_bUseCustomUVs', 'm_flUMin', 'm_flUMax', 'm_flVMin', 'm_flVMax'],
 	// which frame an overlay's texture shows (indicator lights' two colours)
 	CInfoOverlayAccessor: ['m_iOverlayID', 'm_iTextureFrameIndex'],
+	// (and a brush's: signs a texture toggle switches, co-op's team door signs)
+	CFuncBrush: ['m_iTextureFrameIndex'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
 	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
 	// whose view model it is (co-op recordings have one per player)

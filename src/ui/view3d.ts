@@ -509,6 +509,10 @@ class MaterialLibrary {
 				}
 			}
 			if (info.water) mat.userData.texSize = group.texSize;
+			if (info.selfIllum && !info.unlit && info.shader === 'lightmappedgeneric') {
+				(mat.userData.envUniforms.worldGlowTint.value as THREE.Vector3).set(...info.selfIllumTint);
+				mat.defines = {...mat.defines, WORLD_SELFILLUM: ''};
+			}
 			// a displacement's second texture, blended in by its painted alpha
 			if (info.baseTexture2) {
 				const blend2 = {map2: {value: null as THREE.Texture | null}, modulate: {value: null as THREE.Texture | null}};
@@ -955,11 +959,23 @@ export class View3D {
 		return group;
 	}
 
+	// a brush entity's textures at a frame (its m_iTextureFrameIndex: the
+	// ToggleTexture proxy's, for signs that change)
+	private brushFrame(o: THREE.Object3D, frame: number) {
+		if ((o.userData.textureFrame ?? 0) === frame || !this.library) return;
+		o.userData.textureFrame = frame;
+		for (const c of o.children) {
+			const g = c.userData.brushGroup as MaterialGroup | undefined;
+			if (g) (c as THREE.Mesh).material = frame ? this.library.forWorld(g, `${g.material}#${frame}`, frame) : this.library.forWorld(g);
+		}
+	}
+
 	private brushModel(m: ModelMesh): THREE.Group {
 		const group = new THREE.Group();
 		for (const g of m.groups) {
 			const mesh = new THREE.Mesh(geometry(g), this.library!.forWorld(g));
 			mesh.name = `brush ${g.material}`;
+			mesh.userData.brushGroup = g;
 			if (g.surface === 'glass' || g.surface === 'liquid') mesh.renderOrder = 1;
 			group.add(mesh);
 		}
@@ -3867,6 +3883,7 @@ export class View3D {
 				const o = show ? this.objectFor(t, k?.skin ?? 0, Number(k?.extra?.m_nBody ?? 0), k?.model ?? t.model) : this.objects.get(t);
 				if (!o) continue;
 				o.visible = show;
+				if (show && k && t.className === 'CFuncBrush') this.brushFrame(o, Number(k.extra?.m_iTextureFrameIndex ?? 0) || 0);
 				// a doorway's fade brush: drawn by the camera's distance (a closed
 				// door's black backing; open doors fade it out)
 				if (show && k && t.className === 'CFuncAreaPortalWindow') o.visible = this.portalWindowBlend(o, k) >= 0.5;

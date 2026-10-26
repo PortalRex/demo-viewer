@@ -477,9 +477,18 @@ uniform sampler2D bumpLight2;
 uniform sampler2D bumpNormal;
 `;
 
+// LightmappedGeneric's $selfillum: the light goes to the tint where the
+// base texture's alpha says
+const WORLD_GLOW_FRAGMENT = `
+#if defined(WORLD_SELFILLUM) && defined(USE_MAP)
+	reflectedLight.indirectDiffuse = mix(reflectedLight.indirectDiffuse, worldGlowTint, texture2D(map, vMapUv).a);
+#endif
+`;
+
 // $detail (LightmappedGeneric's TextureCombine): a second texture at
 // detailScale x the base's coordinates, combined by mode
 export const DETAIL_HEAD = `
+uniform vec3 worldGlowTint;
 uniform sampler2D detailMap;
 uniform float detailScale;
 uniform float detailBlend;
@@ -753,6 +762,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			detailMap: {value: null},
 			detailScale: {value: 4},
 			detailBlend: {value: 1},
+			worldGlowTint: {value: new THREE.Vector3(1, 1, 1)},
 		};
 	}
 	// a model's $envmap: the cube is set per object (the map's nearest to it)
@@ -818,7 +828,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			}
 			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + DETAIL_HEAD + BLEND2_HEAD + shader.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' + BLEND2_FRAGMENT + DETAIL_FRAGMENT).replace(
 				'reflectedLight.indirectDiffuse += lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;',
-				BUMP_FRAGMENT,
+				BUMP_FRAGMENT + WORLD_GLOW_FRAGMENT,
 			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + DETAIL_POST_FRAGMENT + ENV_FRAGMENT).replace('#include <opaque_fragment>', PAINT_FINAL + '#include <opaque_fragment>');
 			shader.vertexShader = 'varying vec3 vEnvN;\n' + shader.vertexShader.replace(
 				'#include <project_vertex>',
@@ -866,7 +876,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + WATER_ALBEDO + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.BLEND2 !== undefined ? '+blend2' + (material.defines.BLEND2_MODULATE !== undefined ? 'm' : '') : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.WORLD_SELFILLUM !== undefined ? '+wglow' : '') + (material.defines?.BLEND2 !== undefined ? '+blend2' + (material.defines.BLEND2_MODULATE !== undefined ? 'm' : '') : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);
