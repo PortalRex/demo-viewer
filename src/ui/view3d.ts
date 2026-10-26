@@ -1900,10 +1900,10 @@ export class View3D {
 			const origin = new THREE.Vector3().setFromMatrixPosition(m);
 			const power = Number(e.m_PaintPowerType ?? 3);
 			const c = PAINT_COLORS[power] ?? PAINT_COLORS[3];
-			// (lit by the light where it sprays, the ambient cube's average, and
-			// bright even in the dark as the gel's shiny material reads)
+			// (lit by the light where it sprays: the ambient cube's average, as
+			// models are)
 			const cube = amb?.at([origin.x, origin.y, origin.z]).cube;
-			const light = cube ? 0.15 + cube.reduce((a, b) => a + b, 0) / 18 * AMBIENT_SCALE : 0.3;
+			const light = cube ? cube.reduce((a, b) => a + b, 0) / 18 * AMBIENT_SCALE : 0.3;
 			sprayers.push({
 				key: `${t.index}:${t.keys[0].tick}`, origin, dir: new THREE.Vector3().setFromMatrixColumn(m, 0).normalize(), periods,
 				rate: Number(e.m_flBlobsPerSecond ?? 0), minSpeed: Number(e.m_flMinSpeed ?? 100), maxSpeed: Number(e.m_flMaxSpeed ?? 100),

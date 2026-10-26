@@ -2,17 +2,27 @@
 // each side fires them from the sprayer's settings (rate, speed, spread, a
 // random seed) and moves them itself (sv_gravity, a little air drag) until
 // they hit something, drawing them merged as metaballs. Here each blob is
-// fired the same way, its path traced against the world once, and drawn as
-// a lit sphere in its gel's colour, so a moment shows the same stream
-// however it was reached.
+// fired the same way, its path traced against the world once, and the blobs
+// in the air drawn merged too (an isosurface through them, per patch of
+// space), lit, in their gel's colour; a moment shows the same stream however
+// it was reached.
 import * as THREE from 'three';
+import {MarchingCubes} from 'three/examples/jsm/objects/MarchingCubes.js';
 
 const GRAVITY = 600;        // sv_gravity (x paintblob_gravity_scale 1)
 const AIR_DRAG = 0.1;       // paintblob_air_drag: speed lost per second
 const STEP = 1 / 30;        // the path's samples
 const MAX_LIFE = 5;         // seconds a blob is followed (it lands well before)
-const RADIUS = 9;           // a blob's drawn radius (times its 0.7..1 scale): about the metaballs' merged size
+// The game's blob renderer, in its units of 10 (its grid, 0.8, is
+// paintblob_isosurface_box_width's 8): a blob's surface 1.3 out, its field
+// reaching 5.5 (r_paintblob_blr_render_radius, _cutoff_radius); times the
+// blob's 0.7..1 radius scale
+const RADIUS = 13;
+const CUTOFF_RATIO = 5.5 / 1.3;
+const GRID = 8;
 const CAPACITY = 4096;
+const CELL = 160;           // the patches of space a surface is built in
+const MAX_CELLS = 32;
 
 export interface Sprayer {
 	key: string;
@@ -35,6 +45,12 @@ interface Path {
 	scale: number;
 }
 
+interface Blob {
+	pos: THREE.Vector3;
+	radius: number;
+	color: THREE.Color;
+}
+
 const mulberry = (seed: number) => () => {
 	seed = (seed + 0x6d2b79f5) | 0;
 	let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -44,7 +60,8 @@ const mulberry = (seed: number) => () => {
 
 export class PaintBlobs {
 	readonly group = new THREE.Group();
-	private mesh: THREE.InstancedMesh;
+	private material: THREE.ShaderMaterial;
+	private cells: MarchingCubes[] = [];
 	private paths = new Map<string, Path>();
 	private used = new Set<string>();
 	private trace: (from: THREE.Vector3, to: THREE.Vector3) => number;
@@ -52,15 +69,16 @@ export class PaintBlobs {
 	// `trace`: how far along a segment the world is (Infinity when clear)
 	constructor(trace: (from: THREE.Vector3, to: THREE.Vector3) => number) {
 		this.trace = trace;
-		const material = new THREE.ShaderMaterial({
+		this.material = new THREE.ShaderMaterial({
+			vertexColors: true,
 			vertexShader: `
 				varying vec3 vN;
 				varying vec3 vColor;
 				varying vec3 vView;
 				void main() {
-					vec4 world = modelMatrix * instanceMatrix * vec4(position, 1.0);
-					vN = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * normal);
-					vColor = instanceColor;
+					vec4 world = modelMatrix * vec4(position, 1.0);
+					vN = normalize(mat3(modelMatrix) * normal);
+					vColor = color;
 					vView = normalize(cameraPosition - world.xyz);
 					gl_Position = projectionMatrix * viewMatrix * world;
 				}`,
@@ -72,23 +90,17 @@ export class PaintBlobs {
 					vec3 n = normalize(vN);
 					// lit mostly from above, with a wet sheen at the rim
 					float diffuse = 0.45 + 0.55 * max(n.z, 0.0);
-					float rim = pow(1.0 - max(dot(n, vView), 0.0), 3.0);
+					float rim = pow(1.0 - abs(dot(n, vView)), 3.0);
 					gl_FragColor = vec4(vColor * diffuse + vColor * rim * 0.6, 1.0);
 				}`,
 		});
-		material.userData.effect = true;
-		this.mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 12, 8), material, CAPACITY);
-		this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CAPACITY * 3), 3);
-		this.mesh.frustumCulled = false;
-		this.mesh.count = 0;
-		this.group.add(this.mesh);
+		this.material.userData.effect = true;
 	}
 
 	// the blobs in the air at `time` (seconds)
 	update(sprayers: Sprayer[], time: number) {
-		const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
-		const color = new THREE.Color();
-		let n = 0;
+		const s = new THREE.Vector3(), p = new THREE.Vector3();
+		const blobs: Blob[] = [];
 		this.used.clear();
 		for (const sp of sprayers) {
 			if (sp.rate <= 0) continue;
@@ -97,7 +109,7 @@ export class PaintBlobs {
 				if (end < from || time - MAX_LIFE > end) continue;
 				const first = Math.max(0, Math.ceil((time - MAX_LIFE - from) * sp.rate));
 				const last = Math.floor((end - from) * sp.rate);
-				for (let i = first; i <= last && n < CAPACITY; i++) {
+				for (let i = first; i <= last && blobs.length < CAPACITY; i++) {
 					const fired = from + i / sp.rate;
 					const age = time - fired;
 					if (age < 0) continue;
@@ -111,20 +123,61 @@ export class PaintBlobs {
 					if (age >= path.life) continue;
 					const f = age / STEP, k = Math.min(Math.floor(f), path.points.length / 3 - 2), t = f - k;
 					p.set(path.points[k * 3], path.points[k * 3 + 1], path.points[k * 3 + 2]).lerp(s.set(path.points[k * 3 + 3], path.points[k * 3 + 4], path.points[k * 3 + 5]), t);
-					const r = RADIUS * path.scale;
-					m.compose(p, q, s.set(r, r, r));
-					this.mesh.setMatrixAt(n, m);
-					color.setRGB(sp.color[0] * sp.light, sp.color[1] * sp.light, sp.color[2] * sp.light);
-					this.mesh.setColorAt(n, color);
-					n++;
+					blobs.push({pos: p.clone(), radius: RADIUS * path.scale, color: new THREE.Color(sp.color[0] * sp.light, sp.color[1] * sp.light, sp.color[2] * sp.light)});
 				}
 			}
 		}
-		this.mesh.count = n;
-		this.mesh.instanceMatrix.needsUpdate = true;
-		if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+		this.draw(blobs);
 		// forget the paths no longer in the air
 		if (this.paths.size > this.used.size + 512) for (const key of this.paths.keys()) if (!this.used.has(key)) this.paths.delete(key);
+	}
+
+	// The blobs as merged surfaces: space cut into cells, each built from the
+	// blobs in it and those reaching into it from next door (so neighbours'
+	// surfaces meet); a lone blob's surface at its radius
+	private draw(blobs: Blob[]) {
+		const byCell = new Map<string, {key: number[]; list: Blob[]}>();
+		const reach = RADIUS * CUTOFF_RATIO;
+		for (const b of blobs) {
+			const lo = [0, 1, 2].map(a => Math.floor((b.pos.getComponent(a) - reach) / CELL));
+			const hi = [0, 1, 2].map(a => Math.floor((b.pos.getComponent(a) + reach) / CELL));
+			for (let x = lo[0]; x <= hi[0]; x++) for (let y = lo[1]; y <= hi[1]; y++) for (let z = lo[2]; z <= hi[2]; z++) {
+				const id = `${x},${y},${z}`;
+				let c = byCell.get(id);
+				if (!c) byCell.set(id, c = {key: [x, y, z], list: []});
+				c.list.push(b);
+			}
+		}
+		let used = 0;
+		for (const {key, list} of byCell.values()) {
+			if (used >= MAX_CELLS) break;
+			let cube = this.cells[used];
+			if (!cube) {
+				// (the grid covers the cell and a blob's reach either side)
+				cube = new MarchingCubes(Math.ceil((CELL + RADIUS * CUTOFF_RATIO * 2) / GRID), this.material, false, true, 30000);
+				cube.frustumCulled = false;
+				this.cells.push(cube);
+				this.group.add(cube);
+			}
+			used++;
+			// (padded by a blob's reach either side: the grid's outer layer isn't drawn)
+			const size = CELL + reach * 2;
+			const min = new THREE.Vector3(key[0] * CELL - reach, key[1] * CELL - reach, key[2] * CELL - reach);
+			cube.position.copy(min).addScalar(size / 2);
+			cube.scale.setScalar(size / 2);
+			cube.reset();
+			// (a ball's field: strength / d^2 - subtract, gone at sqrt(strength /
+			// subtract), its surface where it reaches the isolation level: at
+			// its radius for this strength, with the reach the game's has)
+			const subtract = cube.isolation / (CUTOFF_RATIO * CUTOFF_RATIO - 1);
+			for (const b of list) {
+				const r = b.radius / size;
+				cube.addBall((b.pos.x - min.x) / size, (b.pos.y - min.y) / size, (b.pos.z - min.z) / size, r * r * (cube.isolation + subtract), subtract, b.color);
+			}
+			cube.update();
+			cube.visible = true;
+		}
+		for (let i = used; i < this.cells.length; i++) this.cells[i].visible = false;
 	}
 
 	// a blob as FirePaintBlob fires it: from a random point of the spray
@@ -173,12 +226,13 @@ export class PaintBlobs {
 
 	clear() {
 		this.paths.clear();
-		this.mesh.count = 0;
+		for (const cube of this.cells) cube.visible = false;
 	}
 
 	dispose() {
-		this.mesh.geometry.dispose();
-		(this.mesh.material as THREE.Material).dispose();
-		this.mesh.dispose();
+		for (const cube of this.cells) cube.geometry.dispose();
+		this.cells = [];
+		this.material.dispose();
+		this.group.clear();
 	}
 }
