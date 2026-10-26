@@ -116,6 +116,9 @@ function parseTint(v: string | undefined): [number, number, number] | null {
 	return isFinite(n) ? [n, n, n] : null;
 }
 
+// the conditional blocks Portal 2 applies on PC in HDR, at high GPU settings
+const CONDITIONS = new Set(['hdr', 'hdr_dx9', '>=dx90', '>=dx90_20b', 'dx90', 'dx90_20b', '>=dx80', '>=dx81', 'srgb', 'srgb_pc', '>=hdr_dx9', 'gpu>=1', 'gpu>=2']);
+
 const truthy = (v: string | undefined) => v !== undefined && v !== '0' && v.toLowerCase() !== 'false';
 
 export class Materials {
@@ -149,8 +152,11 @@ export class Materials {
 		if (!root || typeof root.value === 'string') return null;
 		const shader = root.key;
 		const params = new Map<string, string>();
+		// (blocks for the renderer's settings: those for an HDR, DX9-class,
+		// sRGB PC renderer override the plain values, in order)
 		const take = (list: KV) => {
 			for (const e of list) if (typeof e.value === 'string') params.set(e.key, e.value);
+			for (const e of list) if (typeof e.value !== 'string' && CONDITIONS.has(e.key)) take(e.value);
 		};
 		if (shader === 'patch' && depth < 4) {
 			const include = root.value.find(e => e.key === 'include');
