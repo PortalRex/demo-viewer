@@ -2,6 +2,8 @@
 // browser reads the files from the folder the user picks (File System Access
 // API), or in development from the dev server's /__game/ route.
 
+import {soon} from '../core/later.ts';
+
 export interface GameFS {
 	label: string;
 	// a byte range of a file relative to the install folder, or null if missing
@@ -99,7 +101,7 @@ export class HttpFS implements GameFS {
 			this.queue.push({path, offset, length, done, fail});
 			if (!this.flushing) {
 				this.flushing = true;
-				setTimeout(() => this.flush(), 0);
+				soon(() => this.flush());
 			}
 		});
 	}

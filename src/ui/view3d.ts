@@ -31,6 +31,7 @@ import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt, type ScreenFade, type HudMessage} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
+import {later} from '../core/later.ts';
 import {Bloom, ENCODE} from './bloom.ts';
 
 export type CameraMode = 'eyes' | 'orbit' | 'free';
@@ -779,8 +780,8 @@ export class View3D {
 	private loaded() {
 		this.compileNeeded = true;
 		this.onLoaded();
-		clearTimeout(this.precompileTimer);
-		this.precompileTimer = setTimeout(() => {
+		this.precompileTimer?.();
+		this.precompileTimer = later(() => {
 			if (this.freezeStatics()) {
 				this.mergeProps();
 				this.mergeFrozenKids();
@@ -788,7 +789,7 @@ export class View3D {
 			this.precompile();
 		}, 400);
 	}
-	private precompileTimer: ReturnType<typeof setTimeout> | undefined;
+	private precompileTimer: (() => void) | undefined;
 
 	private precompile() {
 		const r = this.renderer;
@@ -4244,7 +4245,7 @@ export class View3D {
 
 	private frame: THREE.WebGLRenderTarget | null = null;
 	private compileNeeded = true;
-	private recheck: ReturnType<typeof setTimeout> | undefined;
+	private recheck: (() => void) | undefined;
 	private compiling = new Set<THREE.Material>();
 
 	// the drawn meshes whose shaders are still compiling (none once all are)
@@ -4418,7 +4419,7 @@ export class View3D {
 		}
 		for (const o of waiting) o.visible = true;
 		// (and drawn again once they're ready, even while paused)
-		if (waiting.length && !this.recheck) this.recheck = setTimeout(() => {
+		if (waiting.length && !this.recheck) this.recheck = later(() => {
 			this.recheck = undefined;
 			this.onLoaded();
 		}, 30);

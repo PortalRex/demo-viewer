@@ -12,6 +12,7 @@ import type {BspMap} from './game/bsp.ts';
 import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
+import {later} from './core/later.ts';
 import {Materials} from './game/materials.ts';
 import type {MaterialInfo} from './game/materials.ts';
 import {Zip} from './game/zip.ts';
@@ -264,7 +265,7 @@ view3d.onLoaded = () => {
 		if (!playing) render();
 	};
 	requestAnimationFrame(redraw);
-	setTimeout(redraw, 100);
+	later(redraw, 100);
 };
 let mapToken = 0;
 
