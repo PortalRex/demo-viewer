@@ -60,8 +60,13 @@ export class Sprites {
 			// (additive modes fog to black, as the Sprite shader's FogToBlack:
 			// they fade out in the fog)
 			const additive = s.mode !== kRenderNormal && s.mode !== kRenderTransAlpha;
-			const k = blend * s.hdrScale * (additive ? 1 - s.fog : 1);
-			const c = [s.color[0] * k, s.color[1] * k, s.color[2] * k, s.mode === kRenderNormal ? 1 : s.alpha];
+			// The Sprite shader takes its vertex colour (a glow's blend already
+			// in it) and $hdrcolorscale from gamma to linear; a normal sprite
+			// has no vertex colour
+			const linear = (v: number) => Math.pow(Math.max(0, v), 2.2);
+			const rgb = s.mode === kRenderNormal ? [1, 1, 1] : s.color.map(v => linear(v * blend));
+			const k = linear(s.hdrScale) * (additive ? 1 - s.fog : 1);
+			const c = [rgb[0] * k, rgb[1] * k, rgb[2] * k, s.mode === kRenderNormal ? 1 : s.alpha];
 			const ax = right.clone().multiplyScalar(m.width / 2 * scale), ay = up.clone().multiplyScalar(m.height / 2 * scale);
 			const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => s.origin.clone().addScaledVector(ax, x).addScaledVector(ay, y));
 			const uvs = [[0, 1], [1, 1], [1, 0], [0, 0]];

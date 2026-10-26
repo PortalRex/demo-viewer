@@ -7,6 +7,7 @@ import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {composeLightmap, styleValue} from '../game/bsp.ts';
 import type {BspMap, MeshData, MaterialGroup, ModelMesh} from '../game/bsp.ts';
 import type {GameFiles} from '../game/files.ts';
+import {MODEL_LIGHTS} from '../game/ambient.ts';
 import type {Materials, MaterialInfo, WaterParams} from '../game/materials.ts';
 import {readVtfCube, decodeVtf, VtfFormat} from '../game/vtf.ts';
 import {loadModel} from '../game/mdl.ts';
@@ -1381,7 +1382,7 @@ export class View3D {
 					for (let c = 0; c < 3; c++) {
 						const cube = light.cube;
 						let v = n.x * n.x * cube[(n.x >= 0 ? 0 : 3) + c] + n.y * n.y * cube[(n.y >= 0 ? 6 : 9) + c] + n.z * n.z * cube[(n.z >= 0 ? 12 : 15) + c];
-						for (const li of light.lights.slice(0, 2)) {
+						for (const li of light.lights.slice(0, MODEL_LIGHTS)) {
 							l.set(li.pos[0] - p.x, li.pos[1] - p.y, li.pos[2] - p.z);
 							const d = l.length(), a = li.atten;
 							l.divideScalar(Math.max(d, 1e-3));
@@ -2098,7 +2099,8 @@ export class View3D {
 			list.push({
 				material: t.model.replace(/\.vmt$/i, ''), origin, scale: Number(e.m_flSpriteScale ?? 1), mode,
 				color: [(c & 255) / 255, ((c >>> 8) & 255) / 255, ((c >>> 16) & 255) / 255],
-				alpha: Number(e.m_nBrightness ?? 255) / 255, hdrScale: Number(e.m_flHDRColorScale ?? 1) || 1,
+				// (its brightness times its render colour's alpha: CSprite::DrawModel)
+				alpha: Number(e.m_nBrightness ?? 255) / 255 * ((c >>> 24) / 255), hdrScale: Number(e.m_flHDRColorScale ?? 1) || 1,
 				seen: mode === 3 || mode === 9 ? this.pointSeen(origin, eye, Number(e.m_flGlowProxySize ?? 2) || 2) : 1,
 				fog: fogAt(origin),
 			});
@@ -2219,9 +2221,15 @@ export class View3D {
 		return seen;
 	}
 	private discSeen(point: THREE.Vector3, eye: THREE.Vector3, radius: number): number {
-		const d = point.distanceTo(eye);
+		let d = point.distanceTo(eye);
 		if (d < 2) return 1;
 		const dir = point.clone().sub(eye).divideScalar(d);
+		// (the proxy stands its radius in front of the point, towards the eye:
+		// PixelVisibility_DrawProxy, so a glow inside its fixture still shows)
+		if (d > radius + 2) {
+			point = point.clone().addScaledVector(dir, -radius);
+			d -= radius;
+		}
 		const side = new THREE.Vector3(0, 0, 1).cross(dir);
 		if (side.lengthSq() < 1e-6) side.set(1, 0, 0);
 		side.normalize();

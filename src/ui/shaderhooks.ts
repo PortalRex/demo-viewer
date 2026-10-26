@@ -5,6 +5,7 @@
 //   (no transparency sorting, no blending), more of it the closer it is to
 //   the line of sight
 import * as THREE from 'three';
+import {MODEL_LIGHTS} from '../game/ambient.ts';
 
 export const paintUniforms = {
 	paintMap: {value: null as THREE.Texture | null},
@@ -346,7 +347,7 @@ vec3 flashLight(vec3 p, vec3 n) {
 `;
 
 // Models that move are lit as the engine lights them: an ambient cube (six
-// colours by normal direction) plus up to two local lights, per object (set
+// colours by normal direction) plus up to three local lights, per object (set
 // just before each draw, as the materials are shared)
 export interface ModelLighting {
 	cube: number[];  // 6 x rgb: +x -x +y -y +z -z, linear lightmap units
@@ -357,9 +358,9 @@ export const AMBIENT_SCALE = 1.5;  // the lightmap scale (see view3d)
 
 const AMBIENT_FRAGMENT_HEAD = `
 uniform vec3 ambCube[6];
-uniform vec3 ambLightPos[2];
-uniform vec3 ambLightColor[2];
-uniform vec3 ambLightAtten[2];  // constant, linear, quadratic falloff
+uniform vec3 ambLightPos[3];
+uniform vec3 ambLightColor[3];
+uniform vec3 ambLightAtten[3];  // constant, linear, quadratic falloff
 uniform float ambScale;
 uniform vec3 selfIllumTint;
 uniform float phongExponent;
@@ -381,8 +382,8 @@ const AMBIENT_FRAGMENT = `
 			+ n2.z * (n.z >= 0.0 ? ambCube[4] : ambCube[5]) + modelAmbient;
 		// (each local light falling off to this point, as the engine's vertex
 		// shader does: lights right by the camera don't blow the gun out)
-		vec3 lightAt[2];
-		for (int i = 0; i < 2; i++) {
+		vec3 lightAt[3];
+		for (int i = 0; i < 3; i++) {
 			vec3 l = ambLightPos[i] - vDitherWorld;
 			float d = length(l);
 			vec3 a = ambLightAtten[i];
@@ -406,7 +407,7 @@ const AMBIENT_FRAGMENT = `
 			exponent = 1.0 + 149.0 * texture2D(phongExpMap, vMapUv).r;
 		#endif
 			vec3 spec = vec3(0.0);
-			for (int i = 0; i < 2; i++) {
+			for (int i = 0; i < 3; i++) {
 				vec3 l = normalize(ambLightPos[i] - vDitherWorld);
 				spec += pow(clamp(dot(n, normalize(eye + l)), 0.0, 1.0), exponent) * sqrt(clamp(dot(n, l), 0.0, 1.0)) * lightAt[i];
 			}
@@ -459,7 +460,7 @@ export function useModelLighting(mesh: THREE.Object3D) {
 		const cube = u.ambCube.value as THREE.Vector3[];
 		for (let i = 0; i < 6; i++) cube[i].set(l.cube[i * 3], l.cube[i * 3 + 1], l.cube[i * 3 + 2]);
 		const pos = u.ambLightPos.value as THREE.Vector3[], col = u.ambLightColor.value as THREE.Vector3[], att = u.ambLightAtten.value as THREE.Vector3[];
-		for (let i = 0; i < 2; i++) {
+		for (let i = 0; i < MODEL_LIGHTS; i++) {
 			const light = l.lights[i];
 			const color = light?.base ?? light?.color;
 			pos[i].set(light?.pos[0] ?? 0, light?.pos[1] ?? 0, light?.pos[2] ?? 0);
@@ -809,13 +810,13 @@ function hook(material: THREE.Material, paint: boolean) {
 	if (lit) {
 		material.userData.ambUniforms = {
 			ambCube: {value: Array.from({length: 6}, () => new THREE.Vector3())},
-			ambLightPos: {value: [new THREE.Vector3(), new THREE.Vector3()]},
-			ambLightColor: {value: [new THREE.Vector3(), new THREE.Vector3()]},
-			ambLightAtten: {value: [new THREE.Vector3(1, 0, 0), new THREE.Vector3(1, 0, 0)]},
+			ambLightPos: {value: Array.from({length: MODEL_LIGHTS}, () => new THREE.Vector3())},
+			ambLightColor: {value: Array.from({length: MODEL_LIGHTS}, () => new THREE.Vector3())},
+			ambLightAtten: {value: Array.from({length: MODEL_LIGHTS}, () => new THREE.Vector3(1, 0, 0))},
 			ambScale: {value: AMBIENT_SCALE},
 		};
 		// $selfillum: the unlit colour (times the tint) where the mask says
-		// $phong: highlights from the two local lights
+		// $phong: highlights from the local lights
 		const ph = material.userData.phong as {exponent: number; boost: number; fresnel: number[]; tint: number[]; baseMask: boolean; maskMap: THREE.Texture | null; expMap: THREE.Texture | null} | undefined;
 		if (ph) {
 			Object.assign(material.userData.ambUniforms, {

@@ -28,6 +28,10 @@ export interface ModelLight {
 
 const LIGHT_FLAG_IN_AMBIENT_CUBE = 0x1;
 
+// the local lights a model takes (r_worldlights, 3 in Portal 2's engine;
+// the hardware allows 4); the rest go into its ambient cube
+export const MODEL_LIGHTS = 3;
+
 export class AmbientLighting {
 	private planes: DataView;
 	private nodes: DataView;
@@ -166,7 +170,7 @@ export class AmbientLighting {
 	}
 
 	// The direct lights not already in the cubes that reach the point: the
-	// strongest two as local lights, the rest added into the cube by
+	// strongest three as local lights (MODEL_LIGHTS), the rest added into the cube by
 	// direction (as the light cache's AddWorldLightToAmbientCube)
 	private lightsAt(p: number[], cube?: number[], visible?: (from: number[], to: [number, number, number]) => boolean, style?: (s: number) => number): ModelLight['lights'] {
 		const lit: {pos: [number, number, number]; color: [number, number, number]; base: [number, number, number]; atten: [number, number, number]; s: number}[] = [];
@@ -207,7 +211,7 @@ export class AmbientLighting {
 		lit.sort((a, b) => b.s - a.s);
 		const reach = visible ? lit.filter(l => visible(p, l.pos)) : lit;
 		if (cube) {
-			for (const l of reach.slice(2)) {
+			for (const l of reach.slice(MODEL_LIGHTS)) {
 				const d = [l.pos[0] - p[0], l.pos[1] - p[1], l.pos[2] - p[2]];
 				const len = Math.hypot(d[0], d[1], d[2]) || 1;
 				for (let axis = 0; axis < 3; axis++) {
@@ -217,6 +221,6 @@ export class AmbientLighting {
 				}
 			}
 		}
-		return reach.slice(0, 2).map(({pos, color, base, atten}) => ({pos, color, base, atten}));
+		return reach.slice(0, MODEL_LIGHTS).map(({pos, color, base, atten}) => ({pos, color, base, atten}));
 	}
 }
