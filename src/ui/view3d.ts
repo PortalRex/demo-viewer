@@ -107,7 +107,9 @@ const PAINT_COLORS: Record<number, number[]> = {0: [20, 120, 255], 1: [160, 160,
 // the brightest 2% at 0.6 (holding still when 0.6 is already in their
 // bucket), or the median at 0.03 if that's brighter. Null with nothing to
 // measure.
-function histogramTarget(px: Uint16Array, w: number, h: number, exposure: number): number | null {
+function histogramTarget(px: Uint16Array, w: number, h: number, exposure: number, fade?: {rgb: number[]; alpha: number; modulate: boolean}): number | null {
+	const fadeLum = fade ? 0.2126 * fade.rgb[0] + 0.7152 * fade.rgb[1] + 0.0722 * fade.rgb[2] : 0;
+	const faded = (lum: number) => !fade?.alpha ? lum : fade.modulate ? lum * (1 - fade.alpha + fade.alpha * fadeLum) : lum * (1 - fade.alpha) + fade.alpha * fadeLum;
 	const BUCKETS = 16;
 	const edges = Array.from({length: BUCKETS + 1}, (_, k) => Math.pow(k / BUCKETS, 2.5));
 	const counts = new Array(BUCKETS).fill(0);
@@ -117,7 +119,7 @@ function histogramTarget(px: Uint16Array, w: number, h: number, exposure: number
 	for (let y = Math.floor(h * 0.075); y < Math.ceil(h * 0.925); y++) {
 		for (let x = Math.floor(w * 0.05); x < Math.ceil(w * 0.95); x++) {
 			const i = (y * w + x) * 4;
-			const lum = 0.2126 * enc(f(px[i])) + 0.7152 * enc(f(px[i + 1])) + 0.0722 * enc(f(px[i + 2]));
+			const lum = faded(0.2126 * enc(f(px[i])) + 0.7152 * enc(f(px[i + 1])) + 0.0722 * enc(f(px[i + 2])));
 			let b = 0;
 			while (b < BUCKETS - 1 && lum >= edges[b + 1]) b++;
 			counts[b]++;
@@ -3764,12 +3766,14 @@ export class View3D {
 			const px = new Uint16Array(w * h * 4);
 			this.meterPending = true;
 			const exposed = this.exposure;
+			// (the game meters the frame as shown: under the screen fade)
+			const fade = this.fadeAt(this.meterTick);
 			const reading = r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px);
 			r.setRenderTarget(frameTarget);
 			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
 			reading.then(() => {
-				const target = histogramTarget(px, w, h, exposed);
+				const target = histogramTarget(px, w, h, exposed, fade);
 				if (target) this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
 				if (target && this.meterSnap) {
 					this.exposure = this.meterTarget!;
@@ -4273,19 +4277,25 @@ export class View3D {
 	// spent ones go unless they stay out; a purge clears the earlier ones.
 	// Together: the highest alpha, the colours averaged.
 	private screenFade(tick: number) {
+		const f = this.fadeAt(tick);
 		const u = this.composite.uniforms;
-		u.fade.value.set(0, 0, 0, 0);
+		u.fade.value.set(f.rgb[0], f.rgb[1], f.rgb[2], f.alpha);
+		u.fadeModulate.value = f.modulate ? 1 : 0;
+	}
+	private fadeAt(tick: number): {rgb: number[]; alpha: number; modulate: boolean} {
+		const none = {rgb: [0, 0, 0], alpha: 0, modulate: false};
 		const fades = this.entities?.fades;
-		if (!fades?.length || this.mode !== 'eyes' || this.followed) return;
+		if (!fades?.length || this.mode !== 'eyes' || this.followed) return none;
 		const now = tick * this.interval;
 		let active: {f: ScreenFade; speed: number; end: number; reset: number}[] = [];
 		// a bare purge first (instant, opaque, fading in: co-op starts) lifts a
-		// fade that stayed out from before the recording began
+		// fade that stayed out from before the recording began; the game's
+		// frames stay black a little longer, then come in (measured on
+		// autorender's: 0.55 s, then 0.35 s)
 		const first = fades[0];
-		if (first.tick > 0 && first.flags === 17 && !first.duration && !first.hold && first.color[3] === 255 && tick < first.tick) {
-			u.fade.value.set(first.color[0] / 255, first.color[1] / 255, first.color[2] / 255, 1);
-			u.fadeModulate.value = 0;
-			return;
+		if (first.tick > 0 && first.flags === 17 && !first.duration && !first.hold && first.color[3] === 255) {
+			const since = (tick - first.tick) * this.interval;
+			if (since < 0.9) return {rgb: first.color.slice(0, 3).map(v => v / 255), alpha: Math.min(1, Math.max(0, (0.9 - since) / 0.35)), modulate: false};
 		}
 		for (const f of fades) {
 			if (f.tick > tick) break;
@@ -4304,7 +4314,7 @@ export class View3D {
 			active.push({f, speed, end, reset});
 		}
 		active = active.filter(a => !(now > a.reset && now > a.end) || (a.f.flags & 8));
-		if (!active.length) return;
+		if (!active.length) return none;
 		let alpha = 0, modulate = false;
 		const rgb = [0, 0, 0];
 		for (const {f, speed, end} of active) {
@@ -4314,8 +4324,7 @@ export class View3D {
 			for (let i = 0; i < 3; i++) rgb[i] += f.color[i];
 			if (f.flags & 4) modulate = true;
 		}
-		u.fade.value.set(rgb[0] / active.length / 255, rgb[1] / active.length / 255, rgb[2] / active.length / 255, alpha / 255);
-		u.fadeModulate.value = modulate ? 1 : 0;
+		return {rgb: rgb.map(v => v / active.length / 255), alpha: alpha / 255, modulate};
 	}
 	private compositeScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.composite), {frustumCulled: false}));
 	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
