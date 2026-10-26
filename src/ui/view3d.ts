@@ -2039,6 +2039,13 @@ export class View3D {
 		const ents = this.entities;
 		if (!this.sprites || !ents) return;
 		const eye = this.camera.position;
+		// (the world's fog at a point, as its shader mixes it in)
+		const fog = this.fog;
+		const fogAt = (p: THREE.Vector3) => {
+			if (!fog) return 0;
+			const f = Math.min(fog.maxDensity, Math.min(1, Math.max(0, (p.distanceTo(eye) - fog.start) / Math.max(fog.end - fog.start, 1))));
+			return f * f;
+		};
 		const list: SpriteSpec[] = [];
 		for (const t of ents.tracks) {
 			if (t.className !== 'CSprite' || !t.model.endsWith('.vmt')) continue;
@@ -2058,6 +2065,7 @@ export class View3D {
 				color: [(c & 255) / 255, ((c >>> 8) & 255) / 255, ((c >>> 16) & 255) / 255],
 				alpha: Number(e.m_nBrightness ?? 255) / 255, hdrScale: Number(e.m_flHDRColorScale ?? 1) || 1,
 				seen: mode === 3 || mode === 9 ? this.pointSeen(origin, eye, Number(e.m_flGlowProxySize ?? 2) || 2) : 1,
+				fog: fogAt(origin),
 			});
 		}
 		this.sprites.update(list, this.camera);

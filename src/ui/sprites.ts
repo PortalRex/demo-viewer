@@ -16,6 +16,7 @@ export interface SpriteSpec {
 	mode: number;            // render mode
 	hdrScale: number;        // m_flHDRColorScale
 	seen: number;            // how much of its glow proxy shows (0..1)
+	fog: number;             // how fogged it is where it stands (0..1)
 }
 
 const kRenderNormal = 0, kRenderGlow = 3, kRenderTransAlpha = 4, kRenderWorldGlow = 9;
@@ -56,7 +57,10 @@ export class Sprites {
 				// (a plain glow: one size on screen)
 				if (s.mode === kRenderGlow) scale *= dist / 200;
 			}
-			const k = blend * s.hdrScale;
+			// (additive modes fog to black, as the Sprite shader's FogToBlack:
+			// they fade out in the fog)
+			const additive = s.mode !== kRenderNormal && s.mode !== kRenderTransAlpha;
+			const k = blend * s.hdrScale * (additive ? 1 - s.fog : 1);
 			const c = [s.color[0] * k, s.color[1] * k, s.color[2] * k, s.mode === kRenderNormal ? 1 : s.alpha];
 			const ax = right.clone().multiplyScalar(m.width / 2 * scale), ay = up.clone().multiplyScalar(m.height / 2 * scale);
 			const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => s.origin.clone().addScaledVector(ax, x).addScaledVector(ay, y));
