@@ -3088,13 +3088,20 @@ export class View3D {
 		ents.effects.forEach((fx, n) => {
 			if (fx.tick > tick) return;
 			if (fx.name === 'PortalBlast') {
-				// the shot: from the gun to where the portal lands, in 0.1s
+				// the shot: from the gun to where the portal lands, in 0.1s (its
+				// death time is when it was fired: the least C_PortalBlast takes),
+				// leaving along the aim and bending onto the hit (between the start
+				// and a point that runs from the aim's to the hit)
 				const color = this.portalColor(fx.color === 2, this.teamOf(fx.entity, tick));
 				const from = new THREE.Vector3(...fx.origin), to = new THREE.Vector3(...fx.start);
 				const dir = to.clone().sub(from).normalize();
 				const basis = new THREE.Matrix4().lookAt(new THREE.Vector3(), dir, new THREE.Vector3(0, 0, 1));
+				const aim = from.clone().addScaledVector(new THREE.Vector3(1, 0, 0).applyEuler(toEuler([fx.angles[0], fx.angles[1], 0])), from.distanceTo(to));
 				const flight = 0.1;
-				const at = (t: number) => basis.clone().setPosition(from.clone().lerp(to, Math.min(1, t / flight)));
+				const at = (t: number) => {
+					const f = Math.min(1, t / flight);
+					return basis.clone().setPosition(from.clone().lerp(aim.clone().lerp(to, f), f));
+				};
 				run(`blast:${n}`, 'portal_projectile_stream', fx.tick, fx.tick + Math.round(flight / this.interval), () =>
 					new Map([[0, at(0)], [1, at(0)], [2, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]), {cpAt: at});
 				return;
