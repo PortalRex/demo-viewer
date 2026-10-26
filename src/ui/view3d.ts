@@ -340,10 +340,27 @@ class MaterialLibrary {
 			mat.defines = {...mat.defines, REFRACT_TINT: '', REFRACT_UNSCALED: ''};
 			delete mat.defines.BACKFACE_SHADE;
 			mat.color.setRGB(info.refractTint[0], info.refractTint[1], info.refractTint[2], THREE.LinearSRGBColorSpace);
+			// $localrefract: looked into, the texture seen through its
+			// normal map at a depth below the surface (the slats of light covers)
+			const local = info.localRefract && info.normalMap ? {normal: {value: null as THREE.Texture | null}, params: {value: new THREE.Vector2(0, info.localRefract)}} : null;
+			if (local) {
+				mat.userData.refractLocal = local;
+				mat.defines.REFRACT_LOCAL = '';
+			}
 			mat.needsUpdate = true;
-			this.textures.get(info.baseTexture).then(tex => {
+			Promise.all([this.textures.get(info.baseTexture), local ? this.textures.get(info.normalMap, true) : null]).then(([tex, normal]) => {
 				if (!tex) return;
 				mat.map = tex;
+				if (local) {
+					if (normal) {
+						// (the engine's height / width of the texture, in whole numbers)
+						const size = (tex.userData.fullSize as [number, number] | undefined) ?? [tex.image.width, tex.image.height];
+						local.params.value.x = Math.floor(size[1] / size[0]);
+						local.normal.value = normal;
+					} else {
+						delete mat.defines?.REFRACT_LOCAL;
+					}
+				}
 				mat.needsUpdate = true;
 				this.onChange();
 			});

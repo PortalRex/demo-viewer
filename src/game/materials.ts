@@ -87,6 +87,7 @@ export interface MaterialInfo {
 	phongExponentTexture: string;  // $phongexponenttexture: exponent 1 + 149 x its red
 	cloakFactor: number;     // $cloakfactor (VertexLitGeneric): how far it's drawn as the screen behind it
 	normalMap: string;       // $normalmap (Refract: its alpha masks the reflection)
+	localRefract: number;    // Refract's $localrefract: its depth ($localrefractdepth), else 0
 	water: WaterParams | null;  // the Water shader's settings
 }
 
@@ -125,7 +126,7 @@ const MISSING: MaterialInfo = {
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
 	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
 	phong: false, phongExponent: 5, phongBoost: 1, phongFresnel: [0, 0.5, 1], phongTint: [1, 1, 1], phongBaseMask: false, phongExponentTexture: '',
-	cloakFactor: 0, normalMap: '', water: null,
+	cloakFactor: 0, normalMap: '', localRefract: 0, water: null,
 };
 
 function parseColor(v: string | undefined): [number, number, number] | null {
@@ -219,7 +220,7 @@ export class Materials {
 			found: true,
 			shader,
 			noPortal: truthy(p.get('%noportal')),
-			translucent: truthy(p.get('$translucent')) || shader === 'refract' || truthy(p.get('$additive')),
+			translucent: truthy(p.get('$translucent')) || (shader === 'refract' && !truthy(p.get('$localrefract'))) || truthy(p.get('$additive')),
 			// (by the name's last part: a map's patch folder can say "goo" too)
 			liquid: shader === 'water' || /water|goo/.test(name.slice(name.lastIndexOf('/') + 1)) && shader !== 'lightmappedgeneric',
 			// (eyes: the iris texture, projected by the model loader)
@@ -258,6 +259,7 @@ export class Materials {
 			phongExponentTexture: (p.get('$phongexponenttexture') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			cloakFactor: Number(p.get('$cloakfactor') ?? 0) || 0,
 			normalMap: texturePath(p.get('$normalmap')),
+			localRefract: truthy(p.get('$localrefract')) ? Number(p.get('$localrefractdepth') ?? 0.05) || 0.05 : 0,
 			water: shader === 'water' ? waterParams(p) : null,
 		};
 	}

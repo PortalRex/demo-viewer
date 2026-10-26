@@ -391,7 +391,7 @@ export function ownLitMaterial(shared: THREE.Material): THREE.Material {
 	const m = shared.clone();
 	// (three's copy leaves out a built-in material's defines: Refract, goo...)
 	m.defines = {...shared.defines};
-	m.userData = {ambientLit: true, modelEnv: shared.userData.modelEnv, selfIllum: shared.userData.selfIllum, phong: shared.userData.phong};
+	m.userData = {ambientLit: true, modelEnv: shared.userData.modelEnv, selfIllum: shared.userData.selfIllum, phong: shared.userData.phong, refractLocal: shared.userData.refractLocal};
 	hook(m, false);
 	return m;
 }
@@ -564,8 +564,35 @@ const ENV_FRAGMENT = `
 
 // Refract surfaces draw their (unlit) tint, multiplied onto what's behind;
 // with a reflection, the reflection added and the tint as a grey level in
-// alpha (blended as reflection + behind x alpha)
+// alpha (blended as reflection + behind x alpha). $localrefract looks into
+// the base texture instead: through the normal map, from a depth below the
+// surface, darker where the normal tilts (the slats of light covers)
 const REFRACT_FRAGMENT = `
+#if defined(REFRACT_LOCAL) && defined(USE_MAP)
+	{
+		// (the tangent frame from screen-space derivatives: there are no
+		// tangent attributes; the binormal runs along the texture's v)
+		vec3 dp1 = dFdx(vDitherWorld), dp2 = dFdy(vDitherWorld);
+		vec2 duv1 = dFdx(vMapUv), duv2 = dFdy(vMapUv);
+		vec3 gn = normalize(cross(dp1, dp2));
+		vec3 dp2perp = cross(dp2, gn), dp1perp = cross(gn, dp1);
+		vec3 tw = dp2perp * duv1.x + dp1perp * duv2.x;
+		vec3 bw = dp2perp * duv1.y + dp1perp * duv2.y;
+		float frameScale = inversesqrt(max(max(dot(tw, tw), dot(bw, bw)), 1e-20));
+		tw *= frameScale;
+		bw *= frameScale;
+		vec3 nTs = texture2D(refractNormal, vMapUv).xyz * 2.0 - 1.0;
+		vec3 toEye = normalize(cameraPosition - vDitherWorld);
+		vec3 rTs = normalize(vec3(dot(toEye, tw), dot(toEye, bw), dot(toEye, gn)));
+		float rDotN = -rTs.z;
+		vec2 ruv = rTs.xy / rDotN + nTs.xy + (1.0 - nTs.z) * rTs.xy / rDotN;
+		ruv = ruv * vec2(refractLocalParams.x, 1.0) * refractLocalParams.y + vMapUv;
+		vec3 seen = texture2D(map, clamp(ruv, 0.0, 1.0)).rgb;
+		float seenA = texture2D(map, clamp(vMapUv + nTs.xy * 0.1, 0.0, 1.0)).a;
+		seen = mix(seen, vec3(seenA), 0.025);
+		diffuseColor.rgb = seen * pow(max(nTs.z, 0.0), 3.0) * diffuse;
+	}
+#endif
 #if defined(REFRACT_TINT) && defined(REFRACT_ENV)
 	diffuseColor.a = dot(diffuseColor.rgb, vec3(1.0 / 3.0));
 	outgoingLight = envAdded;
@@ -574,6 +601,12 @@ const REFRACT_FRAGMENT = `
 #endif
 #ifdef REFRACT_UNSCALED
 	outgoingLight /= sceneExposure;
+#endif
+`;
+const REFRACT_LOCAL_HEAD = `
+#ifdef REFRACT_LOCAL
+uniform sampler2D refractNormal;
+uniform vec2 refractLocalParams;  // the texture's height / width, the depth
 #endif
 `;
 
@@ -698,6 +731,8 @@ function hook(material: THREE.Material, paint: boolean) {
 	material.onBeforeCompile = shader => {
 		Object.assign(shader.uniforms, ditherUniforms, fogUniforms, exposureUniforms, flashUniforms, modelAmbientUniforms);
 		if (material.userData.waterUniforms) Object.assign(shader.uniforms, waterUniforms, material.userData.waterUniforms);
+		const local = material.userData.refractLocal as {normal: THREE.IUniform; params: THREE.IUniform} | undefined;
+		if (local) Object.assign(shader.uniforms, {refractNormal: local.normal, refractLocalParams: local.params});
 		if (paint) {
 			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
@@ -746,12 +781,12 @@ function hook(material: THREE.Material, paint: boolean) {
 			'#include <project_vertex>\n\tvDitherWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;\n\tvDitherUp = normalize(mat3(modelMatrix) * normal).z;',
 		);
 		shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', REFRACT_FRAGMENT + WATER_FRAGMENT + '#include <opaque_fragment>');
-		shader.fragmentShader = DITHER_FRAGMENT_HEAD + FOG_HEAD + FLASH_HEAD + 'uniform float fogMaxDensity;\n' + WATER_HEAD + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
+		shader.fragmentShader = DITHER_FRAGMENT_HEAD + FOG_HEAD + FLASH_HEAD + 'uniform float fogMaxDensity;\n' + WATER_HEAD + REFRACT_LOCAL_HEAD + (paint ? PAINT_FRAGMENT_HEAD : '') + shader.fragmentShader
 			.replace('#include <fog_fragment>', FOG_FRAGMENT)
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + WATER_ALBEDO + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);
