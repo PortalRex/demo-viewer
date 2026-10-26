@@ -41,10 +41,11 @@ export class Visibility {
 		return leaf >= 0 && leaf * 32 + 6 <= this.leaves.byteLength ? this.leaves.getInt16(leaf * 32 + 4, true) : -1;
 	}
 
-	// the clusters of every leaf a box touches
+	// the clusters of every leaf a box touches (a unit around it, and on
+	// both sides of a plane it lies in: flat panels sit right on the floor's)
 	clustersInBox(min: ArrayLike<number>, max: ArrayLike<number>): number[] {
 		const out = new Set<number>();
-		const c = [0, 1, 2].map(i => (min[i] + max[i]) / 2), e = [0, 1, 2].map(i => (max[i] - min[i]) / 2);
+		const c = [0, 1, 2].map(i => (min[i] + max[i]) / 2), e = [0, 1, 2].map(i => (max[i] - min[i]) / 2 + 1);
 		const stack = [this.head];
 		while (stack.length) {
 			const node = stack.pop()!;
@@ -57,8 +58,8 @@ export class Visibility {
 			const n = [0, 4, 8].map(k => this.planes.getFloat32(pn * 20 + k, true));
 			const d = n[0] * c[0] + n[1] * c[1] + n[2] * c[2] - this.planes.getFloat32(pn * 20 + 12, true);
 			const r = Math.abs(n[0]) * e[0] + Math.abs(n[1]) * e[1] + Math.abs(n[2]) * e[2];
-			if (d > -r) stack.push(this.nodes.getInt32(o + 4, true));
-			if (d < r) stack.push(this.nodes.getInt32(o + 8, true));
+			if (d >= -r) stack.push(this.nodes.getInt32(o + 4, true));
+			if (d <= r) stack.push(this.nodes.getInt32(o + 8, true));
 		}
 		return [...out];
 	}
@@ -86,8 +87,10 @@ export class Visibility {
 	}
 }
 
-// whether any of `clusters` is in a visible set
+// whether any of `clusters` is in a visible set (none known: it counts as
+// visible)
 export function anyVisible(set: Uint8Array, clusters: ArrayLike<number>): boolean {
+	if (!clusters.length) return true;
 	for (let i = 0; i < clusters.length; i++) {
 		const c = clusters[i];
 		if (c >= 0 && set[c >> 3] & (1 << (c & 7))) return true;
