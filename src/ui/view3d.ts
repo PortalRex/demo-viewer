@@ -1555,14 +1555,16 @@ export class View3D {
 		if (t.className === 'CPortal_Player') {
 			// the player's own model (Chell, ATLAS, P-body); a capsule until it loads
 			const group = new THREE.Group();
-			const body = new THREE.CapsuleGeometry(16, 40, 4, 12);
-			body.rotateX(Math.PI / 2);
-			body.translate(0, 0, 36);
-			const capsule = new THREE.Mesh(body, new THREE.MeshLambertMaterial({color: /eggbot/.test(t.model) ? 0xff8a1f : 0x5aa9ff}));
+			const shape = new THREE.CapsuleGeometry(16, 40, 4, 12);
+			shape.rotateX(Math.PI / 2);
+			shape.translate(0, 0, 36);
+			const capsule = new THREE.Mesh(shape, new THREE.MeshLambertMaterial({color: /eggbot/.test(t.model) ? 0xff8a1f : 0x5aa9ff}));
 			group.add(capsule);
-			this.model(t.model || 'models/player/chell/player.mdl', skin).then(asset => {
+			this.model(t.model || 'models/player/chell/player.mdl', skin, body).then(asset => {
 				if (!asset?.skeleton) return;
 				group.remove(capsule);
+				shape.dispose();
+				(capsule.material as THREE.Material).dispose();
 				const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material: p.material})));
 				group.add(anim.group);
 				group.userData.anim = anim;
@@ -1663,7 +1665,7 @@ export class View3D {
 			group.add(box);
 		}
 		// the real model when it loads, animated when it can be
-		this.model(model, skin).then(asset => {
+		this.model(model, skin, body).then(asset => {
 			if (box) {
 				group.remove(box);
 				box.geometry.dispose();
@@ -2814,9 +2816,12 @@ export class View3D {
 			hookMeshes(o);
 			// (fresh world matrix: held objects are placed by hand each frame)
 			o.updateWorldMatrix(true, false);
-			// the model's centre in its own space, once it has loaded (models
-			// with their origin at their feet are lit at their middle)
+			// where it's lit from, in its own space: its model's illumination
+			// position, as the engine lights it; else (players, brushes) its
+			// centre once it has loaded
 			let local = o.userData.lightCentre as THREE.Vector3 | undefined;
+			const illum = (o.userData.asset as ModelAsset | undefined)?.model.illumPosition;
+			if (!local && illum) local = o.userData.lightCentre = new THREE.Vector3(...illum);
 			if (!local) {
 				o.updateMatrixWorld(true);
 				const box = new THREE.Box3().setFromObject(o);

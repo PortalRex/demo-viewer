@@ -222,7 +222,8 @@ function fieldsFor(cls: ServerClass): ClassFields {
 		rate: find(cls, 'm_flPlaybackRate'),
 		clientSide: find(cls, 'm_bClientSideAnimation'),
 		parity: find(cls, 'm_nNewSequenceParity'),
-		extra: (EXTRA_PROPS[cls.name] ?? []).map(n => [n, cls.index.get(n) ?? -1] as [string, number]).filter(([, i]) => i >= 0),
+		// (and every model's body groups: a Frankenturret's head, ...)
+		extra: [...new Set([...(EXTRA_PROPS[cls.name] ?? []), 'm_nBody'])].map(n => [n, cls.index.get(n) ?? -1] as [string, number]).filter(([, i]) => i >= 0),
 		cell: [find(cls, 'm_cellbits'), find(cls, 'm_cellX'), find(cls, 'm_cellY'), find(cls, 'm_cellZ')],
 		cellOrigin: origin >= 0 && (cls.flat[origin].prop.flags & (F.CELLCOORD | F.CELLCOORDLP | F.CELLCOORDINT)) !== 0,
 		angles: find(cls, 'm_angRotation', 'm_angAbsRotation'),

@@ -22,6 +22,7 @@ export interface StudioModel {
 	max: [number, number, number];
 	meshes: {vertexCount: number}[];  // the drawn studio meshes, by their number in .vhv files
 	checksum: number;
+	illumPosition: [number, number, number];  // where the engine lights it from, in its own space
 	bytes: Uint8Array;  // the .mdl, for the skeleton and animations
 }
 
@@ -176,7 +177,7 @@ export async function loadModel(files: GameFiles, name: string, color: [number, 
 		});
 	}
 	if (!out.length) return null;
-	return {groups: out, min: hull(104), max: hull(116), meshes: meshList, checksum: m.getUint32(8, true), bytes: mdl};
+	return {groups: out, min: hull(104), max: hull(116), meshes: meshList, checksum: m.getUint32(8, true), illumPosition: hull(92), bytes: mdl};
 }
 
 // Strip group headers are 25 bytes, or 33 in files with topology data
