@@ -493,6 +493,21 @@ const BUMP_FRAGMENT = `
 		reflectedLight.indirectDiffuse += flashLight(vDitherWorld, normalize(vEnvN)) * lightMapIntensity * RECIPROCAL_PI;
 `;
 
+// the self-illuminated detail modes, added after the lighting
+// (TextureCombinePostLighting): 5 adds the detail times the blend factor, 6
+// fades a band of it in
+const DETAIL_POST_FRAGMENT = `
+#if defined(DETAIL_MODE) && defined(USE_MAP)
+#if DETAIL_MODE == 5
+	outgoingLight += detailBlend * detailTexel.rgb;
+#elif DETAIL_MODE == 6
+	outgoingLight += detailBlend > 0.5
+		? min(vec3(1.0), max(vec3(0.0), detailTexel.rgb - (1.0 - detailBlend)) / detailBlend)
+		: 4.0 * detailBlend * max(vec3(0.0), detailTexel.rgb - 0.5);
+#endif
+#endif
+`;
+
 // Reflections (LightmappedGeneric's $envmap): the cubemap along the view
 // reflected off the surface, tinted, contrast and saturation adjusted,
 // scaled by a mask, added on top of the lit colour
@@ -682,7 +697,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + DETAIL_HEAD + shader.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' + DETAIL_FRAGMENT).replace(
 				'reflectedLight.indirectDiffuse += lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;',
 				BUMP_FRAGMENT,
-			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + ENV_FRAGMENT).replace('#include <opaque_fragment>', PAINT_FINAL + '#include <opaque_fragment>');
+			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + DETAIL_POST_FRAGMENT + ENV_FRAGMENT).replace('#include <opaque_fragment>', PAINT_FINAL + '#include <opaque_fragment>');
 			shader.vertexShader = 'varying vec3 vEnvN;\n' + shader.vertexShader.replace(
 				'#include <project_vertex>',
 				'#include <project_vertex>\n\tvEnvN = normalize(mat3(modelMatrix) * normal);',

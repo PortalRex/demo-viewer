@@ -485,8 +485,9 @@ class MaterialLibrary {
 			mat.needsUpdate = true;
 			this.onChange();
 			if (info.envMap && info.envMap !== 'env_cubemap' && !info.translucent && !info.water) this.applyEnv(mat, info);
-			// detail modes drawn: mod2x, additive, two-pattern mod2x, multiply, ssbump detail
-			if (info.detail && !info.unlit && [0, 1, 7, 8, 10].includes(info.detailBlendMode) && info.shader === 'lightmappedgeneric') {
+			// detail modes drawn: mod2x, additive, self-illuminated (and its
+			// threshold fade), two-pattern mod2x, multiply, ssbump detail
+			if (info.detail && !info.unlit && [0, 1, 5, 6, 7, 8, 10].includes(info.detailBlendMode) && info.shader === 'lightmappedgeneric') {
 				// (linear: only the fade and over modes are sRGB)
 				this.textures.get(info.detail, true).then(tex => {
 					if (!tex) return;
