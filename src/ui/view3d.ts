@@ -2254,13 +2254,16 @@ export class View3D {
 		ray.far = d - 0.1;
 		const world = this.collision?.raycastFirst(ray.ray, THREE.DoubleSide);
 		if (world && world.distance < ray.far) return false;
-		// (only what's drawn: shown entities, and their shown parts)
+		// (only what's drawn into the depth buffer, which the engine's
+		// occlusion query tests against: shown entities and their shown
+		// parts, not translucent or hidden materials (a relay's lens))
 		const shown = (o: THREE.Object3D) => {
 			for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false;
 			return true;
 		};
+		const writesDepth = (m: THREE.Material | THREE.Material[]) => (Array.isArray(m) ? m : [m]).some(x => x.visible && x.depthWrite);
 		const candidates = [this.propGroup, ...this.entityGroup.children.filter(o => o.visible)];
-		return !ray.intersectObjects(candidates, true).some(h => shown(h.object));
+		return !ray.intersectObjects(candidates, true).some(h => shown(h.object) && writesDepth((h.object as THREE.Mesh).material));
 	}
 
 	// the matrix taking things in front of portal `from` to the same place
