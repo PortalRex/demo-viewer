@@ -62,6 +62,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 		'm_Shared.m_nPlayerCond', 'm_bTauntRemoteView', 'm_vecRemoteViewAngles', 'm_fTauntCameraDistance', 'm_nTeamTauntState'],
 	// Bink movie screens: the vgui screen (a panel this wide and tall at its
 	// origin) and the movie display it shows (elevator signs)
+	// finale 4's neurotoxin clock (its vgui screens show the time left)
+	CNeurotoxinCountdown: ['m_bEnabled', 'm_flCountdownTime'],
 	CVGuiScreen: ['m_flWidth', 'm_flHeight', 'm_nPanelName', 'm_fScreenFlags', 'm_nAttachmentIndex', 'm_nOverlayMaterial'],
 	CMovieDisplay: ['m_bEnabled', 'm_bLooping', 'm_szMovieFilename', 'm_szGroupName', 'm_bStretchToFill', 'm_bForcedSlave', 'm_bUseCustomUVs', 'm_flUMin', 'm_flUMax', 'm_flVMin', 'm_flVMax'],
 	// which frame an overlay's texture shows (indicator lights' two colours)

@@ -2351,6 +2351,15 @@ export class View3D {
 			const k = keyAt(t, tick);
 			// an indicator panel's: its check (or cross), or while it counts
 			// down its dial's lit background (the dial's slices aren't drawn)
+			// finale 4's neurotoxin clock: the time left on the screen
+			const clock = k?.parent !== undefined ? this.entityAt(k.parent, tick, 'CNeurotoxinCountdown') : undefined;
+			if (k && clock) {
+				const m = (Number(k.extra?.m_fScreenFlags ?? 0) & 1) ? this.worldMatrix(t, k, tick, 0) : null;
+				const text = this.neurotoxinClock(tick);
+				if (!m || text === null) continue;
+				specs.push({key: `${t.index}:${t.keys[0].tick}`, file: '', image: 'vgui/screens/screen', text, start: 0, looping: false, corners: corners(m, k), uv: [0, 1, 0, 1]});
+				continue;
+			}
 			const panel = k?.parent !== undefined ? this.entityAt(k.parent, tick, 'CLabIndicatorPanel') : undefined;
 			if (k && panel) {
 				const m = (Number(k.extra?.m_fScreenFlags ?? 0) & 1) ? this.worldMatrix(t, k, tick, 0) : null;
@@ -4400,6 +4409,21 @@ export class View3D {
 		}
 		return {rgb: rgb.map(v => v / active.length / 255), alpha: alpha / 255, modulate};
 	}
+	// What the neurotoxin clocks show (CNeurotoxinCountdownScreen): the first
+	// enabled countdown's time as minutes:seconds:hundredths, every screen the
+	// same one; at zero, 00:00:00 blinking at 5 Hz; none when none is enabled
+	private neurotoxinClock(tick: number): string | null {
+		const countdowns = this.entities!.tracks.filter(t => t.className === 'CNeurotoxinCountdown')
+			.sort((a, b) => a.keys[0].tick - b.keys[0].tick || a.index - b.index);
+		const k = countdowns.map(t => keyAt(t, tick)).find(k => k && !k.removed && Number(k.extra?.m_bEnabled));
+		if (!k) return null;
+		const left = Number(k.extra?.m_flCountdownTime ?? 0);
+		const minutes = Math.trunc(Math.trunc(left) / 60), seconds = Math.trunc(left) % 60;
+		const two = (n: number) => String(Math.max(0, n)).padStart(2, '0');
+		if (minutes <= 0 && seconds <= 0) return Math.floor(tick * this.interval * 10) % 2 === 0 ? '00:00:00' : '';
+		return `${two(minutes)}:${two(seconds)}:${two(Math.trunc(left * 100) % 100)}`;
+	}
+
 	// A fizzler's vortices (the objects in its range) and the pulse when a
 	// portal shot hits it (up to 10x over 0.1 s, back over 0.1 s:
 	// C_TriggerPortalCleanser::GetCurrentState), from when the shot time changed
