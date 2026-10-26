@@ -1767,7 +1767,15 @@ export class View3D {
 		}
 		this.bobClock = null;
 		this.paint?.texture.dispose();
-		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint) : null;
+		this.paint = this.bsp && entities?.paint.length ? new PaintLayer(this.bsp, entities.paint, (entity, tick) => {
+			// (a brush entity: its model, and the world taken into its space)
+			const t = (this.tracksByIndex.get(entity) ?? []).find(c => keyAt(c, tick));
+			const k = t && keyAt(t, tick);
+			const model = /^\*(\d+)$/.exec(k?.model ?? t?.model ?? '');
+			if (!k || !model) return null;
+			const inverse = new THREE.Matrix4().compose(new THREE.Vector3(...k.origin), new THREE.Quaternion().setFromEuler(toEuler(k.angles)), new THREE.Vector3(1, 1, 1)).invert();
+			return {model: Number(model[1]), toLocal: p => new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(inverse).toArray()};
+		}) : null;
 		paintUniforms.paintMap.value = this.paint?.texture ?? null;
 		paintUniforms.paintOn.value = this.paint ? 1 : 0;
 		if (this.paint && this.bsp?.lightmap) {

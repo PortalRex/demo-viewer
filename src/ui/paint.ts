@@ -20,6 +20,9 @@ const COLORS: Record<number, [number, number, number]> = {
 
 const bias = (x: number, b: number) => Math.pow(x, Math.log(b) / Math.log(0.5));
 
+// a brush entity's model and the mapping from the world into its space, at a tick
+export type PaintTarget = (entity: number, tick: number) => {model: number; toLocal: (p: number[]) => number[]} | null;
+
 export class PaintLayer {
 	readonly texture: THREE.DataTexture;
 	private bytes: Uint8Array;
@@ -31,8 +34,11 @@ export class PaintLayer {
 	private applied = 0;  // events applied to `bytes`
 	private snapshots: {applied: number; bytes: Uint8Array}[] = [];
 	private dirty = true;
+	// a brush entity's model and placement when paint landed on it
+	private locate: PaintTarget;
 
-	constructor(bsp: BspMap, events: PaintEvent[]) {
+	constructor(bsp: BspMap, events: PaintEvent[], locate: PaintTarget = () => null) {
+		this.locate = locate;
 		this.width = bsp.lightmap?.width ?? 1;
 		this.height = bsp.lightmap?.height ?? 1;
 		this.bytes = new Uint8Array(this.width * this.height);
@@ -90,12 +96,20 @@ export class PaintLayer {
 			this.bytes.fill(0);
 			break;
 		case 'all':
-			for (const [, f] of this.faces) this.fill(f, (e.power << ALPHA_BITS) | ALPHA_MAX);
+			for (const [, f] of this.faces) if (f.model === 0) this.fill(f, (e.power << ALPHA_BITS) | ALPHA_MAX);
 			break;
-		case 'world':
-			if (e.entity !== 0) break;  // brush entities aren't painted yet
-			for (const p of e.points) this.splat(p, e.radius, e.power, e.alpha);
+		case 'world': {
+			// (on a brush entity: in its own space, as WorldToEntitySpace)
+			const target = e.entity === 0 ? {model: 0, toLocal: (p: number[]) => p} : this.locate(e.entity, e.tick);
+			if (!target) break;
+			for (const p of e.points) this.splat(target.toLocal(p), e.radius, e.power, e.alpha, target.model);
 			break;
+		}
+		case 'remove': {
+			const target = this.locate(e.entity, e.tick);
+			if (target) for (const [, f] of this.faces) if (f.model === target.model) this.fill(f, 0);
+			break;
+		}
 		}
 	}
 
@@ -105,8 +119,9 @@ export class PaintLayer {
 
 	// one paint sphere: every face it reaches gets a circle of coverage,
 	// strongest at the centre (as the engine's splats, without their noise)
-	private splat(p: number[], radius: number, power: number, coat: number) {
+	private splat(p: number[], radius: number, power: number, coat: number, model: number) {
 		for (const [, f] of this.faces) {
+			if (f.model !== model) continue;
 			const planeDist = p[0] * f.normal[0] + p[1] * f.normal[1] + p[2] * f.normal[2] - f.dist;
 			if (Math.abs(planeDist) >= radius) continue;
 			if (Math.hypot(p[0] - f.center[0], p[1] - f.center[1], p[2] - f.center[2]) > f.radius + radius) continue;

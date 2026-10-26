@@ -124,9 +124,10 @@ export interface StaticProp {
 	leaves: number[];  // the BSP leaves it's in (for visibility)
 }
 
-// A lit world face, for painting: where its luxels are in the lightmap atlas
-// and how world positions map onto them
+// A lit face, for painting: where its luxels are in the lightmap atlas and
+// how positions map onto them (a brush entity's in its own space)
 export interface PaintFace {
+	model: number;      // its brush model (0 = the world)
 	x: number;          // block position in the atlas (luxel 0,0)
 	y: number;
 	w: number;          // luxels
@@ -571,10 +572,11 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 		composeLightmap(lightmap, defaultStyle);
 	}
 
-	// faces that can carry paint: lit world faces (model 0)
+	// faces that can carry paint: lit faces, the world's and brush entities'
+	// (paint names the entity it lands on: UTIL_PaintBrushEntity)
 	const paintFaces = new Map<number, PaintFace>();
-	{
-		const first = models.getInt32(40, true), count = models.getInt32(44, true);
+	for (let model = 0; model * 48 + 48 <= models.byteLength; model++) {
+		const first = models.getInt32(model * 48 + 40, true), count = models.getInt32(model * 48 + 44, true);
 		for (let f = first; f < first + count; f++) {
 			const b = blocks.get(f);
 			if (!b) continue;
@@ -585,7 +587,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			for (const v of vs) for (let k = 0; k < 3; k++) c[k] += v[k] / vs.length;
 			const radius = Math.max(...vs.map(v => Math.hypot(v[0] - c[0], v[1] - c[1], v[2] - c[2])));
 			const {normal, dist} = facingOf(f, vs);
-			paintFaces.set(f, {x: b.x, y: b.y, w: b.w, h: b.h, mins: b.mins, lmVecs: tex.lmVecs, normal, dist, center: c, radius});
+			paintFaces.set(f, {model, x: b.x, y: b.y, w: b.w, h: b.h, mins: b.mins, lmVecs: tex.lmVecs, normal, dist, center: c, radius});
 		}
 	}
 
