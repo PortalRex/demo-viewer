@@ -165,8 +165,10 @@ if (import.meta.env.DEV) {
 		return done.length;
 	};
 	// open a fixture (unless it's open), wait for the 3D view to finish
-	// loading at `tick`, and save a shot as fixtures/shots/<name>.jpg
-	w.shootAt = async (path: string, tick: number, name: string, width = 640, height = 360) => {
+	// loading at `tick`, and save a shot as fixtures/shots/<name>.jpg; played
+	// into from `preroll` ticks before, so the exposure has adapted as the
+	// game's would have (it eases in over a second or so)
+	w.shootAt = async (path: string, tick: number, name: string, width = 640, height = 360, preroll = 300) => {
 		if (!document.title.startsWith(path.split('/').pop()!)) {
 			const prev = pb;
 			await openPath(path);
@@ -189,6 +191,15 @@ if (import.meta.env.DEV) {
 		for (let i = 0; i < 4; i++) {
 			seekTo(tick);
 			await new Promise(r => setTimeout(r, 250));
+		}
+		if (preroll > 0) {
+			seekTo(Math.max(0, tick - preroll));
+			await new Promise(r => setTimeout(r, 250));
+			for (let t = Math.max(0, tick - preroll); t <= tick; t += 2) {
+				seekTo(t);
+				await new Promise(r => requestAnimationFrame(r));
+			}
+			seekTo(tick);
 		}
 		const url = view3d.snapshot(width, height, undefined, undefined, 'image/jpeg');
 		await fetch(`/__shot?name=${name}&ext=jpg`, {method: 'POST', body: url});

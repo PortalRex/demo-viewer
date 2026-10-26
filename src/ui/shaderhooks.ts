@@ -29,9 +29,9 @@ export const exposureUniforms = {
 	sceneExposure: {value: 1},
 };
 
-// mat_ambient_light_r/g/b (a player's setting, recorded by SAR): light
-// added to every model's lighting cube, static props' too (the engine's
-// light cache), in lightmap units; the world's lightmaps don't take it
+// mat_ambient_light_r/g/b (where the recording's console commands set it):
+// light added to every model's lighting cube, static props' too (the
+// engine's light cache), and the world's lightmaps, in lightmap units
 export const modelAmbientUniforms = {
 	modelAmbient: {value: new THREE.Vector3()},
 };

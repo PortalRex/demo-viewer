@@ -1632,14 +1632,16 @@ export class View3D {
 		}
 		this.interval = track.seg.intervalPerTick;
 		this.track = track;
-		// the player's mat_ambient_light_r/g/b as it changes (SAR records it)
+		// mat_ambient_light_r/g/b as console commands in the recording set it
+		// (playback runs those; the player's own setting, which SAR's cvar
+		// list records, isn't applied when the demo is played back)
 		this.ambientLight = [];
 		const rgb: [number, number, number] = [0, 0, 0];
-		for (const e of track.seg.sar ?? []) {
-			const c = e.kind === 'cvar' ? /^mat_ambient_light_([rgb])$/.exec(e.name) : null;
-			if (!c || e.kind !== 'cvar') continue;
-			rgb['rgb'.indexOf(c[1])] = Number(e.value) || 0;
-			this.ambientLight.push({tick: e.tick, rgb: [...rgb]});
+		for (const c of track.seg.consoleCmds) {
+			const m = /^\s*mat_ambient_light_([rgb])\s+"?([-\d.]+)/.exec(c.text);
+			if (!m) continue;
+			rgb['rgb'.indexOf(m[1])] = Number(m[2]) || 0;
+			this.ambientLight.push({tick: c.tick, rgb: [...rgb]});
 		}
 		this.bobClock = null;
 		this.paint?.texture.dispose();
@@ -3505,8 +3507,7 @@ export class View3D {
 			const w = 64, h = 36;
 			// (with a stencil buffer: the sky is masked to the sky faces by it)
 			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType, stencilBuffer: true});
-			const fog = this.scene.fog;
-			this.scene.fog = null;
+			// (fogged: the game meters the frame as it's drawn)
 			// with a 3D skybox the sky box sits at the sky camera, where it
 			// would cover the whole view here
 			const skyShown = this.sky.visible;
@@ -3544,7 +3545,6 @@ export class View3D {
 			r.setRenderTarget(frameTarget);
 			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
-			this.scene.fog = fog;
 			reading.then(() => {
 				const target = histogramTarget(px, w, h, exposed);
 				if (target) this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
@@ -3554,8 +3554,11 @@ export class View3D {
 				}
 			}).catch(() => {}).finally(() => { this.meterPending = false; });
 		}
+		// (the engine eases in by its rate x 2 x the frame time, at most 1/60 of
+		// the way a frame (1/15 of the histogram's 16 buckets, quartered): at
+		// the 60 frames a second the game's recorded at, always that 1/60)
 		const t = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], this.meterTarget ?? this.exposure));
-		this.exposure += (t - this.exposure) * Math.min(1, dt * 1.5);
+		this.exposure += (t - this.exposure) * (1 - Math.pow(1 - 1 / 60, dt * 60));
 		r.toneMappingExposure = this.exposure;
 		exposureUniforms.sceneExposure.value = this.exposure;
 	}
