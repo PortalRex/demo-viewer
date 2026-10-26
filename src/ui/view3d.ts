@@ -2211,16 +2211,29 @@ export class View3D {
 		return parent.multiply(local);
 	}
 
-	// the tick a portal was last placed (moved or activated) at or before `tick`
-	private portalPlacedAt(t: EntityTrack, tick: number): number {
+	// the tick a portal was last placed (moved or activated) at or before
+	// `tick`; with `activated`, the last time it was switched on only
+	private portalPlacedAt(t: EntityTrack, tick: number, activated = false): number {
 		let i = keyIndexAt(t, tick);
 		while (i > 0) {
 			const k = t.keys[i], prev = t.keys[i - 1];
-			if (prev.active !== k.active || prev.origin.some((v, j) => Math.abs(v - k.origin[j]) > 0.5)) return k.tick;
+			const switchedOn = k.active && !prev.active;
+			const moved = prev.active !== k.active || prev.origin.some((v, j) => Math.abs(v - k.origin[j]) > 0.5);
+			if (activated ? switchedOn : moved) return k.tick;
 			i--;
 		}
 		// first seen already open: placed then, unless that's the recording's start
 		return i >= 0 && t.keys[i].tick > 1 ? t.keys[i].tick : tick - 1000;
+	}
+
+	// How much static covers a portal's view (C_Prop_Portal's m_fStaticAmount):
+	// all of it while unlinked; 1 when it's switched on or its partner is
+	// placed or moved, wearing off over a second
+	private portalStatic(t: EntityTrack, tick: number, link: number): number {
+		const partner = (this.tracksByIndex.get(link) ?? []).find(c => keyAt(c, tick)?.active);
+		if (!partner) return 1;
+		const since = tick - Math.max(this.portalPlacedAt(t, tick, true), this.portalPlacedAt(partner, tick));
+		return Math.min(1, Math.max(0, 1 - since * this.interval));
 	}
 
 	// Particle effects: info_particle_system runs (switched on to switched
@@ -3391,7 +3404,9 @@ export class View3D {
 						// opens over a tenth of a second from where it was placed (as
 						// the game's renders show: full within about six ticks)
 						u.open.value = (tick - this.portalPlacedAt(t, tick)) * this.interval * 10;
-						this.portals.set(t.index, {obj: o, link: Number(e.m_hLinkedPortal ?? -1) & 2047, halfW, halfH});
+						const link = Number(e.m_hLinkedPortal ?? -1) & 2047;
+						u.staticAmount.value = this.portalStatic(t, tick, link);
+						this.portals.set(t.index, {obj: o, link, halfW, halfH});
 					}
 				}
 			}

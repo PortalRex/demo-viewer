@@ -472,14 +472,15 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 // (an ellipse in the portal's own proportions, growing as it opens): the
 // view through the linked portal. Around its edge: flames from two layers
 // of scrolling noise, coloured by a 1D gradient texture, brighter towards
-// the bottom; an unlinked portal fills with them.
+// the bottom; an unlinked portal fills with them, and a newly placed one's
+// view shows through them as its static wears off.
 
 // `tint`: co-op portals (the tinted variant): the flames run from black to
 // the player's portal colour instead of through the colour texture
 export function portalMaterial(assets: EffectAssets | null, orange: boolean, tint: number[] | null = null): THREE.ShaderMaterial {
 	const m = new THREE.ShaderMaterial({
 		uniforms: {
-			view: {value: null}, hasView: {value: 0}, resolution: {value: new THREE.Vector2(1, 1)},
+			view: {value: null}, hasView: {value: 0}, staticAmount: {value: 1}, resolution: {value: new THREE.Vector2(1, 1)},
 			noise: {value: assets?.white ?? null}, gradient: {value: assets?.white ?? null},
 			open: {value: 1}, time: {value: 0}, exposure: {value: 1}, colorScale: {value: tint ? 1.5 : 4},
 			tint: {value: new THREE.Vector3(...(tint ?? [1, 1, 1]))}, tinted: {value: tint ? 1 : 0},
@@ -496,7 +497,7 @@ export function portalMaterial(assets: EffectAssets | null, orange: boolean, tin
 			}`,
 		fragmentShader: `
 			uniform sampler2D view, noise, gradient;
-			uniform float hasView, open, time, exposure, colorScale, tinted;
+			uniform float hasView, staticAmount, open, time, exposure, colorScale, tinted;
 			uniform vec3 tint;
 			uniform vec2 resolution;
 			varying vec2 vBase;
@@ -517,7 +518,8 @@ export function portalMaterial(assets: EffectAssets | null, orange: boolean, tin
 				n1 = texture2D(noise, noiseUv * 0.3 + vec2(scroll, 0.0) - n2.rg * 0.02);
 				float outerMask = (1.0 - linearstep(open2, open2 + OUTER, dist)) * (1.0 - hole);
 				float innerMask = linearstep(open2 - INNER, open2, dist) * hole;
-				float portalActive = hasView;
+				// (static: the view dissolving in through the flames after a placement)
+				float portalActive = hasView * (1.0 - clamp(staticAmount, 0.0, 1.0));
 				float fadeIn = max(clamp(openAmount * 2.5, 0.0, 1.0), 1.0 - portalActive);
 				float mask = (innerMask + outerMask) * fadeIn;
 				float flame = (n1.g + n2.g) * 0.5;
