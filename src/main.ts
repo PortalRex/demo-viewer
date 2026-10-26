@@ -169,11 +169,22 @@ if (import.meta.env.DEV) {
 	// loading at `tick`, and save a shot as fixtures/shots/<name>.jpg; played
 	// into from `preroll` ticks before, so the exposure has adapted as the
 	// game's would have (it eases in over a second or so)
+	// (waits made of message yields, not timers or frame callbacks: a
+	// background page throttles those to a minute or stops them)
+	const yieldNow = () => new Promise<void>(r => {
+		const c = new MessageChannel();
+		c.port1.onmessage = () => r();
+		c.port2.postMessage(0);
+	});
+	const sleep = async (ms: number) => {
+		const end = performance.now() + ms;
+		while (performance.now() < end) await yieldNow();
+	};
 	w.shootAt = async (path: string, tick: number, name: string, width = 640, height = 360, preroll = 300) => {
 		if (!document.title.startsWith(path.split('/').pop()!)) {
 			const prev = pb;
 			await openPath(path);
-			for (let i = 0; i < 80 && pb === prev; i++) await new Promise(r => setTimeout(r, 100));
+			for (let i = 0; i < 80 && pb === prev; i++) await sleep(100);
 		}
 		if (viewMode !== '3d') [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === '3D')?.click();
 		let quiet = performance.now();
@@ -185,25 +196,19 @@ if (import.meta.env.DEV) {
 		const t0 = performance.now();
 		while (performance.now() - t0 < 40000) {
 			seekTo(tick);
-			await new Promise(r => setTimeout(r, 250));
+			await sleep(250);
 			if (view3d.debugPlayer() && performance.now() - quiet > 2000) break;
 		}
 		view3d.onLoaded = orig;
 		for (let i = 0; i < 4; i++) {
 			seekTo(tick);
-			await new Promise(r => setTimeout(r, 250));
+			await sleep(250);
 		}
 		if (preroll > 0) {
 			seekTo(Math.max(0, tick - preroll));
-			await new Promise(r => setTimeout(r, 250));
-			// (played through frame by frame; a message yield, not a frame
-			// callback or timer, as a background page gets neither in time)
+			await sleep(250);
+			// (played through frame by frame)
 			view3d.syncMeter = true;
-			const yieldNow = () => new Promise<void>(r => {
-				const c = new MessageChannel();
-				c.port1.onmessage = () => r();
-				c.port2.postMessage(0);
-			});
 			for (let t = Math.max(0, tick - preroll); t <= tick; t += 2) {
 				seekTo(t);
 				await yieldNow();
