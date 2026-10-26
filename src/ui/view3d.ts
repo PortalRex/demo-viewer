@@ -28,7 +28,7 @@ import {Ropes, type RopeSpec} from './ropes.ts';
 import {MovieScreens, type ScreenSpec} from './movies.ts';
 import {Sprites, type SpriteSpec} from './sprites.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
-import {keyAt, keyIndexAt, type ScreenFade} from '../net/entities.ts';
+import {keyAt, keyIndexAt, type ScreenFade, type HudMessage} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
 import {Bloom, ENCODE} from './bloom.ts';
@@ -3448,6 +3448,13 @@ export class View3D {
 			o.matrix.copy(through ? through.multiply(apparent) : apparent);
 			o.matrixWorldNeedsUpdate = true;
 		}
+	}
+
+	// the on-screen text sent to the recording player (game_text: chapter
+	// titles), in Eyes view, with the seconds per tick
+	hudMessages(): {messages: HudMessage[]; interval: number} | null {
+		if (this.mode !== 'eyes' || this.followed || !this.entities?.hudMessages.length) return null;
+		return {messages: this.entities.hudMessages, interval: this.interval};
 	}
 
 	// The challenge mode HUD's numbers at a tick: the recording player's

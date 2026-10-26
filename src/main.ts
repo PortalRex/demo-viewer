@@ -11,6 +11,7 @@ import {loadBsp} from './game/bsp.ts';
 import type {BspMap} from './game/bsp.ts';
 import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
+import {HudText} from './ui/hudtext.ts';
 import {Materials} from './game/materials.ts';
 import type {MaterialInfo} from './game/materials.ts';
 import {Zip} from './game/zip.ts';
@@ -405,6 +406,32 @@ $('cm-toggle').onclick = () => {
 	$('cm-toggle').classList.toggle('on', cmShown);
 	render();
 };
+// the game's on-screen text (chapter titles) over the Eyes view; its toggle
+// shows when the recording has any and is remembered per browser
+let titlesShown = true;
+try {
+	titlesShown = localStorage.getItem('hudTitles') !== 'off';
+} catch {}
+$('titles-toggle').classList.toggle('on', titlesShown);
+$('titles-toggle').onclick = () => {
+	titlesShown = !titlesShown;
+	try {
+		localStorage.setItem('hudTitles', titlesShown ? 'on' : 'off');
+	} catch {}
+	$('titles-toggle').classList.toggle('on', titlesShown);
+	render();
+};
+let hudText: HudText | null = null;
+function showHudText(tick: number) {
+	const hud = viewMode === '3d' ? view3d.hudMessages() : null;
+	$('titles-toggle').hidden = !hud;
+	if (gameFiles && hudText?.files !== gameFiles) {
+		hudText = new HudText(gameFiles, $('hud-text') as HTMLCanvasElement);
+		hudText.onLoaded = () => render();
+	}
+	hudText?.draw(hud && titlesShown ? hud.messages : null, tick * (hud?.interval ?? 0), hud?.interval ?? 0);
+}
+
 function showCmHud(stats: {portals: number; seconds: number} | null) {
 	$('cm-toggle').hidden = !stats;
 	$('cm-hud').hidden = !stats || !cmShown;
@@ -463,6 +490,7 @@ function render() {
 	if (viewMode === '3d') view3d.update(view, loc.tick);
 	else pathView.draw(view, loc.tick, seg.sar);
 	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null);
+	showHudText(loc.tick);
 	timeline.draw(t, loc.index);
 	speedGraph.draw(loc.tick);
 	inputs.show(cmd);

@@ -129,6 +129,7 @@ export interface EntityTimeline {
 	particleNames: string[];          // "ParticleEffectNames" (info_particle_system's m_iEffectIndex)
 	effects: EffectEvent[];           // dispatched effects (temp entities), in tick order
 	fades: ScreenFade[];              // screen fades sent to the recording player, in tick order
+	hudMessages: HudMessage[];        // on-screen text (game_text: chapter titles), in tick order
 }
 
 // A "Fade" user message (ScreenFade_t): over `duration` seconds to or from
@@ -143,6 +144,26 @@ export interface ScreenFade {
 }
 // Portal 2's user message number for it (registration order)
 const MSG_FADE = 13;
+
+// A "HudMsg" user message (game_text): text on a channel (a new one
+// replaces the channel's last), at x/y in 0..1 of the screen (-1 centred),
+// in colour1 (colour2 for effect 2's write-out flash), fading in, held,
+// fading out (seconds; effect 2's fade in is per character)
+export interface HudMessage {
+	tick: number;
+	channel: number;
+	x: number;
+	y: number;
+	color1: [number, number, number, number];
+	color2: [number, number, number, number];
+	effect: number;
+	fadeIn: number;
+	fadeOut: number;
+	hold: number;
+	fxTime: number;
+	text: string;     // may be a localization token (#portal2_Chapter3_Title)
+}
+const MSG_HUDMSG = 6;
 
 // A DispatchEffect from the server (CTEEffectDispatch): "PortalBlast" for a
 // portal shot (origin: where it left the gun, start: where the portal
@@ -278,6 +299,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 	const paint: PaintEvent[] = [];
 	const effects: EffectEvent[] = [];
 	const fades: ScreenFade[] = [];
+	const hudMessages: HudMessage[] = [];
 	const lightStyles: LightStyleChange[] = [];
 	const stylePatterns = new Map<number, string>();
 	let tableTick = 0;
@@ -498,6 +520,21 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 					applyPacketEntities(h, r.tick);
 				},
 				onUserMessage: (type, data) => {
+					if (type === MSG_HUDMSG) {
+						try {
+							const channel = data.u(8), x = data.f32(), y = data.f32();
+							const color = (): [number, number, number, number] => [data.u(8), data.u(8), data.u(8), data.u(8)];
+							const color1 = color(), color2 = color();
+							const effect = data.u(8), fadeIn = data.f32(), fadeOut = data.f32(), hold = data.f32(), fxTime = data.f32();
+							const bytes: number[] = [];
+							for (let c = data.u(8); c && bytes.length < 512; c = data.u(8)) bytes.push(c);
+							const text = new TextDecoder().decode(new Uint8Array(bytes));
+							hudMessages.push({tick: r.tick, channel, x, y, color1, color2, effect, fadeIn, fadeOut, hold, fxTime, text});
+						} catch {
+							// a short message: ignore it
+						}
+						return;
+					}
 					if (type === MSG_FADE) {
 						try {
 							// (times in 1/512 s: SCREENFADE_FRACBITS 9)
@@ -575,7 +612,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	}
 	const particleNames = (tableByName.get('ParticleEffectNames')?.entries ?? []).map(e => e?.name ?? '');
-	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, effects, fades};
+	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, effects, fades, hudMessages};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
