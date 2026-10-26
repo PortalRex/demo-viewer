@@ -4,6 +4,7 @@
 // use, and drawn as camera-facing sprites (animated through their
 // texture's sheet), velocity-stretched trails or ropes.
 import * as THREE from 'three';
+import {writeAttribute} from './dynamic.ts';
 import {readParticleSystems} from '../game/pcf.ts';
 import type {ParticleSystemDef, ParticleOperator, DmxValue} from '../game/pcf.ts';
 import {readVtfSheet} from '../game/vtf.ts';
@@ -108,15 +109,39 @@ interface Particle {
 	normal?: THREE.Vector3;  // the way its card faces (renderers' orientation_type 3)
 }
 
-function mulberry(seed: number) {
-	let a = seed >>> 0;
-	return () => {
-		a = (a + 0x6d2b79f5) >>> 0;
-		let t = a;
-		t = Math.imul(t ^ (t >>> 15), t | 1);
-		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
+// (its state kept apart, so an instance can be saved and picked up again)
+interface Rng {
+	a: number;
+}
+function nextRandom(r: Rng) {
+	r.a = (r.a + 0x6d2b79f5) >>> 0;
+	let t = r.a;
+	t = Math.imul(t ^ (t >>> 15), t | 1);
+	t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+	return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+const copyParticle = (p: Particle): Particle => ({
+	...p, pos: p.pos.clone(), vel: p.vel.clone(), color: [...p.color], baseColor: [...p.baseColor], osc: [...p.osc],
+	pathAt: p.pathAt?.clone(), normal: p.normal?.clone(),
+});
+
+// everything an instance changes as it runs, for picking it up again later
+// (seeking back without simulating from the start)
+export interface InstanceState {
+	time: number;
+	emitting: boolean;
+	cps: ControlPoints;
+	rng: number;
+	lighting: ParticleInstance['lighting'];
+	emitted: Map<ParticleOperator, number>;
+	pathBulge: THREE.Vector3 | undefined;
+	spawned: number;
+	restartAt: number;
+	emitBase: number;
+	sizeScale: number;
+	particles: Particle[];
+	children: InstanceState[];
 }
 
 const getField = (p: Particle, f: number): number => {
@@ -158,9 +183,10 @@ export class ParticleInstance {
 	private given: ControlPoints | null = null;
 	// moves control point 0 over time (a blast in flight); called each step
 	cpAt: ((t: number) => THREE.Matrix4) | null = null;
+	private rng: Rng;
 	private rand: () => number;
 	private lib: ParticleLibrary;
-	private lighting: {cp: number; at: THREE.Vector3; color: [number, number, number]} | null = null;
+	lighting: {cp: number; at: THREE.Vector3; color: [number, number, number]} | null = null;
 	private emitted = new Map<ParticleOperator, number>();
 	private children: {inst: ParticleInstance; delay: number}[] = [];
 	private parent: ParticleInstance | null = null;
@@ -177,7 +203,9 @@ export class ParticleInstance {
 		this.def = def;
 		this.cps = cps;
 		this.lib = lib;
-		this.rand = mulberry(seed);
+		const rng: Rng = {a: seed >>> 0};
+		this.rng = rng;
+		this.rand = () => nextRandom(rng);
 		const late = (o: ParticleOperator) => o.fn.startsWith('position modify') || o.fn === 'remap initial distance to control point to scalar';
 		this.initOrder = [...def.initializers.filter(o => !late(o)), ...def.initializers.filter(late)];
 		if (depth < 4) {
@@ -219,7 +247,35 @@ export class ParticleInstance {
 
 	// starts the simulation at `t` (for effects that have been running a
 	// long while: what was emitted before then is gone anyway)
+	snapshot(): InstanceState {
+		return {
+			time: this.time, emitting: this.emitting, cps: new Map([...this.cps].map(([k, m]) => [k, m.clone()])), rng: this.rng.a,
+			lighting: this.lighting, emitted: new Map(this.emitted), pathBulge: this.pathBulge?.clone(), spawned: this.spawned,
+			restartAt: this.restartAt, emitBase: this.emitBase, sizeScale: this.sizeScale,
+			particles: this.particles.map(copyParticle), children: this.children.map(c => c.inst.snapshot()),
+		};
+	}
+
+	// back to a saved state (the state stays as it was, for using again)
+	restore(s: InstanceState) {
+		this.time = s.time;
+		this.emitting = s.emitting;
+		this.cps = new Map([...s.cps].map(([k, m]) => [k, m.clone()]));
+		this.rng.a = s.rng;
+		this.lighting = s.lighting;
+		this.emitted = new Map(s.emitted);
+		this.pathBulge = s.pathBulge?.clone();
+		this.spawned = s.spawned;
+		this.restartAt = s.restartAt;
+		this.emitBase = s.emitBase;
+		this.sizeScale = s.sizeScale;
+		this.particles = s.particles.map(copyParticle);
+		this.children.forEach((c, i) => s.children[i] && c.inst.restore(s.children[i]));
+	}
+
 	skipTo(t: number) {
+		// (on the step grid, as advance keeps to it)
+		t = Math.floor(t / STEP) * STEP;
 		this.time = t;
 		for (const e of this.def.emitters) if (e.fn === 'emit_instantaneously' && num(e, 'emission_start_time', 0) < t) this.emitted.set(e, 0);
 	}
@@ -256,9 +312,13 @@ export class ParticleInstance {
 		for (const c of this.children) c.inst.setCpAt(t => fn(t + c.delay));
 	}
 
-	// runs the effect up to `t` seconds
+	// runs the effect up to `t` seconds, in whole steps from its start (so a
+	// moment is the same however it was reached); particles are drawn the
+	// rest of the way along their velocity
+	ahead = 0;
 	advance(t: number) {
-		while (this.time + 1e-6 < t) this.step(Math.min(STEP, t - this.time));
+		while (this.time + STEP <= t + 1e-6) this.step(STEP);
+		this.ahead = Math.max(0, t - this.time);
 	}
 
 	private cp(n: number): THREE.Matrix4 {
@@ -982,8 +1042,9 @@ export class ParticleRenderer {
 				if (p.drawAlpha <= 0.002 || p.drawRadius <= 0) continue;
 				// (the sprite shader's size limits, by distance from the eye)
 				let radius = p.drawRadius * visRadius, alpha = p.drawAlpha * visAlpha;
+				const at = inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos;
 				if (!trail) {
-					const l = p.pos.distanceTo(camPos);
+					const l = at.distanceTo(camPos);
 					radius = Math.max(radius, minSize * l);
 					if (radius > startFade * l) {
 						if (radius > endFade * l) continue;
@@ -991,16 +1052,16 @@ export class ParticleRenderer {
 					}
 					radius = Math.min(radius, maxSize * l);
 				}
-				const age = inst.time - p.born;
+				const age = inst.time + inst.ahead - p.born;
 				const uv = frameUv(sprite.sheet, p.seq, fit ? age / Math.max(p.life, 1e-3) : age * rate, !!fit);
-				let ax: THREE.Vector3, ay: THREE.Vector3, center = p.pos;
+				let ax: THREE.Vector3, ay: THREE.Vector3, center = at;
 				if (trail) {
 					// stretched back along the velocity, as wide as the radius
 					const speed = p.vel.length();
 					const len = Math.min(num(r, 'max length', 2000), Math.max(num(r, 'min length', 0), speed * p.trail));
 					if (speed < 1e-3) continue;
 					const dir = p.vel.clone().divideScalar(speed);
-					center = p.pos.clone().addScaledVector(dir, -len / 2);
+					center = at.clone().addScaledVector(dir, -len / 2);
 					const toCam = camPos.clone().sub(center).normalize();
 					ax = dir.clone().cross(toCam).normalize().multiplyScalar(p.drawRadius);
 					ay = dir.multiplyScalar(len / 2);
@@ -1039,10 +1100,11 @@ export class ParticleRenderer {
 				this.group.add(mesh);
 			}
 			const g = mesh.geometry;
-			g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
-			g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
-			g.setAttribute('pcolor', new THREE.Float32BufferAttribute(b.col, 4));
-			mesh.visible = b.pos.length > 0;
+			const count = writeAttribute(g, 'position', b.pos, 3);
+			writeAttribute(g, 'uv', b.uv, 2);
+			writeAttribute(g, 'pcolor', b.col, 4);
+			g.setDrawRange(0, count);
+			mesh.visible = count > 0;
 		}
 	}
 
@@ -1057,12 +1119,14 @@ export class ParticleRenderer {
 		const aimAt = aim ? inst.cpPos(num(aim, 'control point', 0)) : null;
 		const ps = [...inst.particles].sort((x, y) => x.index - y.index);
 		if (ps.length < 2) return;
+		// (each the rest of the step along its velocity, as sprites are drawn)
+		const pos = ps.map(p => inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos);
 		const sub = Math.max(1, Math.floor(num(r, 'subdivision_count', 3)));
 		const texel = num(r, 'texel_size', 4);
 		const scroll = num(r, 'texture_scroll_rate', 0) * inst.time + num(r, 'texture_offset', 0);
 		const pts: {p: THREE.Vector3; w: number; c: number[]}[] = [];
 		for (let i = 0; i + 1 < ps.length; i++) {
-			const p0 = ps[Math.max(0, i - 1)].pos, p1 = ps[i].pos, p2 = ps[i + 1].pos, p3 = ps[Math.min(ps.length - 1, i + 2)].pos;
+			const p0 = pos[Math.max(0, i - 1)], p1 = pos[i], p2 = pos[i + 1], p3 = pos[Math.min(ps.length - 1, i + 2)];
 			for (let s = 0; s < sub; s++) {
 				const t = s / sub, t2 = t * t, t3 = t2 * t;
 				const p = new THREE.Vector3(
@@ -1076,7 +1140,7 @@ export class ParticleRenderer {
 			}
 		}
 		const last = ps[ps.length - 1];
-		pts.push({p: last.pos.clone(), w: last.drawRadius / 2, c: [...last.color, last.drawAlpha]});
+		pts.push({p: pos[pos.length - 1].clone(), w: last.drawRadius / 2, c: [...last.color, last.drawAlpha]});
 		let dist = 0;
 		for (let i = 0; i + 1 < pts.length; i++) {
 			const a = pts[i], z = pts[i + 1];

@@ -4,6 +4,7 @@
 // dimmed by how much of their proxy shows and with distance; a plain glow
 // keeps one size on screen (StandardGlowBlend).
 import * as THREE from 'three';
+import {writeAttribute} from './dynamic.ts';
 import type {EffectAssets} from './effects.ts';
 
 export interface SpriteSpec {
@@ -79,9 +80,9 @@ export class Sprites {
 				this.group.add(mesh);
 			}
 			const g = mesh.geometry;
-			g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
-			g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
-			g.setAttribute('color', new THREE.Float32BufferAttribute(b.col, 4));
+			g.setDrawRange(0, writeAttribute(g, 'position', b.pos, 3));
+			writeAttribute(g, 'uv', b.uv, 2);
+			writeAttribute(g, 'color', b.col, 4);
 			mesh.visible = true;
 		}
 	}

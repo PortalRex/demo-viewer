@@ -70,10 +70,18 @@ export interface Attachment {
 	local: number[];  // 3x4, row major (attachment -> bone space)
 }
 
+// a box on a bone, in the bone's space: what shots (and turrets' lasers) hit
+export interface Hitbox {
+	bone: number;
+	min: [number, number, number];
+	max: [number, number, number];
+}
+
 export interface Skeleton {
 	bones: Bone[];
 	sequences: Sequence[];
 	attachments: Attachment[];
+	hitboxes: Hitbox[];  // the first hitbox set's (the one entities use unless told otherwise)
 	ref?: Pose;      // reference pose, made on first use
 }
 
@@ -224,7 +232,18 @@ export async function loadSkeleton(files: GameFiles, mdl: Uint8Array): Promise<S
 			local: Array.from({length: 12}, (_, k) => v.getFloat32(o + 12 + k * 4, true)),
 		});
 	}
-	return {bones: main.bones, sequences, attachments};
+	// hitboxes (mstudiobbox_t, 68 bytes) of set 0
+	const hitboxes: Hitbox[] = [];
+	if (v.getInt32(172, true) > 0) {
+		const set = v.getInt32(176, true);
+		const n = v.getInt32(set + 4, true), boxes = set + v.getInt32(set + 8, true);
+		for (let i = 0; i < n; i++) {
+			const o = boxes + i * 68;
+			const f = (k: number) => v.getFloat32(o + k, true);
+			hitboxes.push({bone: v.getInt32(o, true), min: [f(8), f(12), f(16)], max: [f(20), f(24), f(28)]});
+		}
+	}
+	return {bones: main.bones, sequences, attachments, hitboxes};
 }
 
 // ---- sampling ----

@@ -7,7 +7,7 @@
 // space), lit, in their gel's colour; a moment shows the same stream however
 // it was reached.
 import * as THREE from 'three';
-import {MarchingCubes} from 'three/examples/jsm/objects/MarchingCubes.js';
+import {IsoGrid} from './isosurface.ts';
 
 const GRAVITY = 600;        // sv_gravity (x paintblob_gravity_scale 1)
 const AIR_DRAG = 0.1;       // paintblob_air_drag: speed lost per second
@@ -26,6 +26,8 @@ const CELL = 160;           // the patches of space a surface is built in
 // steps so neighbouring cells' grids share their points and the surfaces
 // they both build meet exactly
 const PAD = (Math.ceil(RADIUS * CUTOFF_RATIO / GRID) + 1) * GRID;
+// the field's level at the surface: a lone ball's (1 - d^2/R^2)^3 at its radius
+const ISO = (1 - 1 / (CUTOFF_RATIO * CUTOFF_RATIO)) ** 3;
 const MAX_CELLS = 32;
 
 export interface Sprayer {
@@ -65,7 +67,7 @@ const mulberry = (seed: number) => () => {
 export class PaintBlobs {
 	readonly group = new THREE.Group();
 	private material: THREE.ShaderMaterial;
-	private cells: MarchingCubes[] = [];
+	private cells: IsoGrid[] = [];
 	private paths = new Map<string, Path>();
 	private used = new Set<string>();
 	private trace: (from: THREE.Vector3, to: THREE.Vector3) => number;
@@ -154,24 +156,23 @@ export class PaintBlobs {
 		let used = 0;
 		for (const {key, list} of byCell.values()) {
 			if (used >= MAX_CELLS) break;
-			let cube = this.cells[used];
-			if (!cube) {
-				cube = new MarchingCubes((CELL + PAD * 2) / GRID, this.material, false, true, 30000);
-				cube.frustumCulled = false;
-				this.cells.push(cube);
-				this.group.add(cube);
+			let grid = this.cells[used];
+			if (!grid) {
+				grid = new IsoGrid((CELL + PAD * 2) / GRID, this.material, 30000);
+				this.cells.push(grid);
+				this.group.add(grid.mesh);
 			}
 			used++;
 			const size = CELL + PAD * 2;
 			const min = new THREE.Vector3(key[0] * CELL - PAD, key[1] * CELL - PAD, key[2] * CELL - PAD);
-			cube.position.copy(min).addScalar(size / 2);
-			cube.scale.setScalar(size / 2);
-			cube.reset();
-			this.fill(cube, list, min, size);
-			cube.update();
-			cube.visible = true;
+			grid.clear();
+			this.fill(grid, list, min);
+			grid.polygonize(ISO, min, GRID);
+			// (its bounds: each view leaves out the cells it can't see)
+			grid.mesh.geometry.boundingSphere = new THREE.Sphere(min.clone().addScalar(size / 2), size * Math.sqrt(3) / 2);
+			grid.mesh.visible = true;
 		}
-		for (let i = used; i < this.cells.length; i++) this.cells[i].visible = false;
+		for (let i = used; i < this.cells.length; i++) this.cells[i].mesh.visible = false;
 	}
 
 	// The blobs' field on a cell's grid: each a soft ball (1 - d^2/R^2)^3
@@ -179,20 +180,17 @@ export class PaintBlobs {
 	// its render radius, so neighbours within about R of each other run
 	// together into one stream; the colour is the blobs' own, weighted by
 	// their field
-	private weight = new Float32Array(0);
-	private fill(cube: MarchingCubes, blobs: Blob[], min: THREE.Vector3, size: number) {
-		const n = cube.size, n2 = n * n;
-		const field = cube.field, palette = cube.palette;
-		if (this.weight.length !== field.length) this.weight = new Float32Array(field.length);
-		const weight = this.weight;
-		weight.fill(0);
-		const cell = size / n;  // world units per grid step
-		cube.isolation = (1 - 1 / (CUTOFF_RATIO * CUTOFF_RATIO)) ** 3;
+	private fill(grid: IsoGrid, blobs: Blob[], min: THREE.Vector3) {
+		const n = grid.n, n2 = n * n;
+		const {field, palette, weight} = grid;
 		for (const b of blobs) {
-			const reach = b.radius * CUTOFF_RATIO / cell;  // in grid steps
-			const cx = (b.pos.x - min.x) / cell, cy = (b.pos.y - min.y) / cell, cz = (b.pos.z - min.z) / cell;
+			const reach = b.radius * CUTOFF_RATIO / GRID;  // in grid steps
+			const cx = (b.pos.x - min.x) / GRID, cy = (b.pos.y - min.y) / GRID, cz = (b.pos.z - min.z) / GRID;
 			// (not the grid's outer layer: its normals aren't defined)
 			const lo = (c: number) => Math.max(1, Math.ceil(c - reach)), hi = (c: number) => Math.min(n - 2, Math.floor(c + reach));
+			const from = [lo(cx), lo(cy), lo(cz)], to = [hi(cx), hi(cy), hi(cz)];
+			if (from.some((v, a) => v > to[a])) continue;
+			grid.touch(from, to);
 			const inv = 1 / (reach * reach);
 			for (let z = lo(cz); z <= hi(cz); z++) {
 				const dz2 = (z - cz) ** 2;
@@ -210,12 +208,6 @@ export class PaintBlobs {
 					}
 				}
 			}
-		}
-		for (let i = 0; i < weight.length; i++) {
-			if (weight[i] <= 0) continue;
-			palette[i * 3] /= weight[i];
-			palette[i * 3 + 1] /= weight[i];
-			palette[i * 3 + 2] /= weight[i];
 		}
 	}
 
@@ -265,11 +257,11 @@ export class PaintBlobs {
 
 	clear() {
 		this.paths.clear();
-		for (const cube of this.cells) cube.visible = false;
+		for (const grid of this.cells) grid.mesh.visible = false;
 	}
 
 	dispose() {
-		for (const cube of this.cells) cube.geometry.dispose();
+		for (const grid of this.cells) grid.dispose();
 		this.cells = [];
 		this.material.dispose();
 		this.group.clear();

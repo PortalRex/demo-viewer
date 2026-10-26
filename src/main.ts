@@ -95,6 +95,41 @@ if (import.meta.env.DEV) {
 		Object.assign(out, view3d.debugStats());
 		return out;
 	};
+	// timing by stage: `n` seeks `step` ticks apart from `from` (negative
+	// steps for scrubbing back), each stage's average CPU time per frame
+	w.prof = (from: number, n = 60, step = 1) => {
+		const v = view3d as unknown as Record<string, unknown>;
+		const stages = ['update', 'render', 'renderScene', 'renderPortalViews', 'renderMonitorCamera', 'meterExposure', 'updateParticles',
+			'updatePaintBlobs', 'updateTurretLasers', 'updateRopes', 'updateFlashlight', 'lightModels', 'updateSprites', 'updateViewModel', 'placeAttached'];
+		const times: Record<string, number> = {};
+		const originals = new Map<string, unknown>();
+		for (const name of stages) {
+			const fn = v[name];
+			if (typeof fn !== 'function') continue;
+			originals.set(name, fn);
+			times[name] = 0;
+			v[name] = function (this: unknown, ...args: unknown[]) {
+				const start = performance.now();
+				try {
+					return (fn as (...a: unknown[]) => unknown).apply(this, args);
+				} finally {
+					times[name] += performance.now() - start;
+				}
+			};
+		}
+		try {
+			seekTo(from - step * 3);
+			seekTo(from - step * 2);
+			for (const k in times) times[k] = 0;
+			const start = performance.now();
+			for (let i = 0; i < n; i++) seekTo(from + i * step);
+			const out: Record<string, string> = {total: ((performance.now() - start) / n).toFixed(2)};
+			for (const k of Object.keys(times).sort((a, b) => times[b] - times[a])) if (times[k] / n >= 0.05) out[k] = (times[k] / n).toFixed(2);
+			return out;
+		} finally {
+			for (const [name, fn] of originals) v[name] = fn;
+		}
+	};
 	// a small shot of every segment (at `frac` through it) into
 	// fixtures/shots/<name>/<index>_<map>.jpg, each once loading goes quiet
 	w.bloom = (scale: number | null) => {

@@ -17,9 +17,10 @@ import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, s
 import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
-import type {ControlPoints} from './particles.ts';
+import type {ControlPoints, InstanceState} from './particles.ts';
 import {AMBIENT_SCALE, modelAmbientUniforms, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, gooUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, setModelEnvCube, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
 import {TextureCache, compressedSupport} from './textures.ts';
+import {anyVisible} from '../game/vis.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
 import {PaintBlobs, type Sprayer} from './paintblobs.ts';
@@ -560,6 +561,9 @@ interface PlayerMotion {
 type ModelData = Omit<ModelAsset, 'parts'> & {parts: Omit<ModelAsset['parts'][number], 'material'>[]};
 // (maps a model can go unused for and stay loaded)
 const KEEP_MODEL_MAPS = 2;
+// the size of the patches of the map static props are merged in (each
+// culled on its own)
+const PROP_CHUNK = 1024;
 interface ModelEntry {
 	data: Promise<ModelData | null>;
 	fromMap: boolean;          // from the map's own files
@@ -631,7 +635,10 @@ export class View3D {
 	// particle effects: info_particle_system entities, each active run an instance
 	private particleLib: ParticleLibrary | null = null;
 	private particleRenderer: ParticleRenderer | null = null;
-	private particleRuns = new Map<string, {start: number; inst: ParticleInstance}>();
+	// effect runs as they stand, each with saved states along the way (every
+	// half second, the last six seconds) to pick up from when seeking back,
+	// instead of simulating from the start
+	private particleRuns = new Map<string, {start: number; inst: ParticleInstance; saved: InstanceState[]}>();
 	private particlesShown: ParticleInstance[] = [];
 	// portal edge effects, by portal (not drawn in the view through it)
 	private edgeParticles = new Map<ParticleInstance, number>();
@@ -885,6 +892,8 @@ export class View3D {
 		this.evictModels(!bsp);
 		this.readyModels.clear();
 		this.windowed = [];
+		this.visCulled = [];
+		this.visHidden.length = 0;
 		this.library?.dispose();
 		this.lightTex?.dispose();
 		for (const t of this.bumpTex) t.dispose();
@@ -1054,6 +1063,8 @@ export class View3D {
 				o.updateMatrixWorld(true);
 				o.matrixAutoUpdate = false;
 				for (const c of o.children) c.matrixAutoUpdate = false;
+				// (the clusters it's in, for culling by what can be seen)
+				if (bsp.vis) o.userData.clusters = [...new Set(prop.leaves.map(l => bsp.vis!.leafCluster(l)).filter(c => c >= 0))];
 				this.propGroup.add(o);
 				this.loaded();
 			}));
@@ -1194,6 +1205,11 @@ export class View3D {
 				mesh.name = `frozen ${part.name}`;
 				mesh.matrixAutoUpdate = false;
 				mesh.userData.window = t.userData?.frozenWindow;
+				const vis = this.bsp?.vis;
+				if (vis) {
+					g.computeBoundingBox();
+					mesh.userData.clusters = vis.clustersInBox(g.boundingBox!.min.toArray(), g.boundingBox!.max.toArray());
+				}
 				this.propGroup.add(mesh);
 			}
 			this.frozen.add(t);
@@ -1295,14 +1311,25 @@ export class View3D {
 	// with a bounds tree for ray tests
 	private mergeProps() {
 		const byMaterial = new Map<THREE.Material, THREE.Mesh[]>();
+		// each prop: the clusters it's in (on its top-level object)
+		const propOf = (o: THREE.Object3D) => {
+			while (o.parent && o.parent !== this.propGroup) o = o.parent;
+			return o;
+		};
 		this.propGroup.traverse(c => {
 			const mesh = c as THREE.Mesh;
-			if (!mesh.isMesh || Array.isArray(mesh.material) || !mesh.material.userData?.vertexLit) return;
+			// (not what an earlier pass already merged)
+			if (!mesh.isMesh || Array.isArray(mesh.material) || !mesh.material.userData?.vertexLit || mesh.userData.merged) return;
 			const g = mesh.geometry;
 			const key = mesh.material;
-			// (merged only with parts of the same layout)
-			// (and shown over the same ticks)
-			const sig = Object.keys(g.attributes).sort().join(',') + (g.index ? '+i' : '') + '@' + String(mesh.userData.window ?? '');
+			// (merged only with parts of the same layout, shown over the same
+			// ticks, and near each other: a patch of the map can be culled
+			// when it's out of view or can't be seen from the camera)
+			g.boundingSphere ?? g.computeBoundingSphere();
+			mesh.updateWorldMatrix(true, false);
+			const at = g.boundingSphere!.center.clone().applyMatrix4(mesh.matrixWorld);
+			const cell = [at.x, at.y, at.z].map(v => Math.floor(v / PROP_CHUNK)).join(',');
+			const sig = Object.keys(g.attributes).sort().join(',') + (g.index ? '+i' : '') + '@' + String(mesh.userData.window ?? '') + '#' + cell;
 			(mesh.userData as {mergeSig?: string}).mergeSig = sig;
 			const list = byMaterial.get(key) ?? [];
 			list.push(mesh);
@@ -1332,6 +1359,9 @@ export class View3D {
 				mesh.name = `merged props ${list[0].name}`;
 				mesh.matrixAutoUpdate = false;
 				mesh.userData.window = list[0].userData.window;
+				mesh.userData.merged = true;
+				const clusters = list.map(m => propOf(m).userData.clusters as number[] | undefined);
+				if (clusters.every(c => c)) mesh.userData.clusters = [...new Set(clusters.flat())];
 				for (const m of list) {
 					m.removeFromParent();
 					m.geometry.dispose();  // (each lit prop's own copy, see litProp)
@@ -1342,6 +1372,56 @@ export class View3D {
 		// prop groups left empty
 		for (const o of [...this.propGroup.children]) if (!(o as THREE.Mesh).isMesh && !o.children.length) o.removeFromParent();
 		this.windowed = this.propGroup.children.filter(o => o.userData.window && (o.userData.window[0] > -Infinity || o.userData.window[1] < Infinity));
+		this.visCulled = this.propGroup.children.filter(o => o.userData.clusters);
+	}
+
+	// Culling by the map's visibility sets, as the engine draws: for one
+	// view, what can't be seen from where it looks from is hidden (put back
+	// with uncull, before the next view or anything else looks at the scene)
+	private visCulled: THREE.Object3D[] = [];
+	private visHidden: THREE.Object3D[] = [];
+	private cullFrom(at: THREE.Vector3) {
+		this.uncull();
+		const vis = this.bsp?.vis;
+		const set = vis?.visibleFrom(vis.clusterAt([at.x, at.y, at.z]));
+		// (no set from outside the map or inside a wall: everything shows)
+		if (!set) return;
+		for (const o of this.visCulled) {
+			if (o.visible && !anyVisible(set, o.userData.clusters as number[])) {
+				o.visible = false;
+				this.visHidden.push(o);
+			}
+		}
+		// entities' models too (not effects: their geometry is rewritten as
+		// they go, so its bounds aren't to be trusted)
+		for (const [t, o] of this.objects) {
+			if (!o.visible || WORLD_SPACE.has(t.className) || !(t.model.endsWith('.mdl') || t.model.startsWith('*'))) continue;
+			const clusters = this.entityClusters(o);
+			if (clusters && !anyVisible(set, clusters)) {
+				o.visible = false;
+				this.visHidden.push(o);
+			}
+		}
+	}
+
+	// the clusters an entity's model is in (again once it moves or its pose
+	// reaches elsewhere; worked out once a frame; null while it has nothing)
+	private entityClusters(o: THREE.Object3D): number[] | null {
+		if (o.userData.clustersFrame === this.frameNumber) return o.userData.clusters as number[] | null;
+		o.userData.clustersFrame = this.frameNumber;
+		o.updateWorldMatrix(true, true);
+		const box = new THREE.Box3().setFromObject(o);
+		if (box.isEmpty()) return o.userData.clusters = null;
+		const key = [...box.min.toArray(), ...box.max.toArray()].map(v => Math.round(v / 4)).join(',');
+		if (o.userData.clustersKey !== key) {
+			o.userData.clusters = this.bsp!.vis!.clustersInBox(box.min.toArray(), box.max.toArray());
+			o.userData.clustersKey = key;
+		}
+		return o.userData.clusters as number[];
+	}
+	private uncull() {
+		for (const o of this.visHidden) o.visible = true;
+		this.visHidden.length = 0;
 	}
 
 	// The 2D skybox: six faces around the camera, drawn behind everything.
@@ -1825,7 +1905,23 @@ export class View3D {
 			const mesh = o as THREE.Mesh;
 			if (mesh.isMesh && (mesh.material as THREE.Material)?.userData?.cameraScreen) screens.push(mesh);
 		});
-		if (!screens.some(m => frustum.intersectsObject(m))) return;
+		// (only for a screen in view that can be seen from the camera)
+		const vis = this.bsp?.vis;
+		const set = vis?.visibleFrom(vis.clusterAt(this.camera.position.toArray()));
+		const seen = (m: THREE.Mesh) => {
+			if (!frustum.intersectsObject(m)) return false;
+			if (!vis || !set) return true;
+			// (the clusters it's in, again once it has moved)
+			m.updateWorldMatrix(true, false);
+			const at = m.matrixWorld.elements.slice(12, 15).map(v => Math.round(v)).join(',');
+			if (m.userData.clustersAt !== at) {
+				const box = new THREE.Box3().setFromObject(m);
+				m.userData.clusters = vis.clustersInBox(box.min.toArray(), box.max.toArray());
+				m.userData.clustersAt = at;
+			}
+			return anyVisible(set, m.userData.clusters as number[]);
+		};
+		if (!screens.some(seen)) return;
 		const cam = ents.tracks.find(t => t.className === 'CPointCamera' && Number(keyAt(t, tick)?.extra?.m_bActive) === 1);
 		const k = cam && keyAt(cam, tick);
 		if (!cam || !k) return;
@@ -1850,7 +1946,9 @@ export class View3D {
 		}
 		const target = r.getRenderTarget();
 		r.setRenderTarget(this.cameraTarget);
+		this.cullFrom(mc.position);
 		r.render(this.scene, mc);
+		this.uncull();
 		r.setRenderTarget(target);
 		this.scene.fog = fog;
 		fogUniforms.fogMaxDensity.value = density;
@@ -1888,7 +1986,19 @@ export class View3D {
 	// Whether a point shows from the eye (for particles' visibility proxies):
 	// nothing of the world, props or entities' models in between
 	private seenRay = new THREE.Raycaster();
+	// (asked again within a frame for the same point: particles are drawn
+	// again for each portal view)
+	private seenCache = new Map<string, number>();
 	private pointSeen(point: THREE.Vector3, eye: THREE.Vector3): number {
+		const key = `${point.x.toFixed(1)},${point.y.toFixed(1)},${point.z.toFixed(1)}|${eye.x.toFixed(1)},${eye.y.toFixed(1)},${eye.z.toFixed(1)}`;
+		let seen = this.seenCache.get(key);
+		if (seen === undefined) {
+			seen = this.pointSeenNow(point, eye);
+			this.seenCache.set(key, seen);
+		}
+		return seen;
+	}
+	private pointSeenNow(point: THREE.Vector3, eye: THREE.Vector3): number {
 		const d = point.distanceTo(eye);
 		if (d < 2) return 1;
 		const dir = point.clone().sub(eye).divideScalar(d);
@@ -1898,7 +2008,13 @@ export class View3D {
 		ray.far = d - 1;  // (the proxy's own size)
 		const world = this.collision?.raycastFirst(ray.ray, THREE.DoubleSide);
 		if (world && world.distance < d - 1) return 0;
-		return ray.intersectObjects([this.propGroup, this.entityGroup], true).some(h => h.object.visible) ? 0 : 1;
+		// (only what's drawn: shown entities, and their shown parts)
+		const shown = (o: THREE.Object3D) => {
+			for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false;
+			return true;
+		};
+		const candidates = [this.propGroup, ...this.entityGroup.children.filter(o => o.visible)];
+		return ray.intersectObjects(candidates, true).some(h => shown(h.object)) ? 0 : 1;
 	}
 
 	// the matrix taking things in front of portal `from` to the same place
@@ -2029,7 +2145,20 @@ export class View3D {
 			}
 			this.laserRay.set(ray.origin, ray.direction);
 			this.laserRay.far = dist;
-			const blockers = [this.propGroup, ...[...this.objects].filter(([other, obj]) => other !== t && obj.visible && other.className !== 'CPortal_Player' && other.className !== 'CProp_Portal').map(([, obj]) => obj)];
+			// (animated models by their hitboxes, as shots hit them; the rest by their meshes)
+			const blockers: THREE.Object3D[] = [this.propGroup];
+			for (const [other, obj] of this.objects) {
+				if (other === t || !obj.visible || other.className === 'CPortal_Player' || other.className === 'CProp_Portal') continue;
+				const anim = obj.userData.anim as AnimatedModel | undefined;
+				if (!anim?.hasHitboxes) {
+					blockers.push(obj);
+					continue;
+				}
+				anim.group.updateWorldMatrix(true, false);
+				const d = anim.hitboxDistance(ray, anim.group.matrixWorld);
+				if (d !== null && d < dist) dist = d + 1;
+			}
+			this.laserRay.far = dist;
 			const solid = this.laserRay.intersectObjects(blockers, true).find(h => {
 				const m = (h.object as THREE.Mesh).material as THREE.Material | undefined;
 				// (effects let it through, light bridges don't)
@@ -2190,7 +2319,10 @@ export class View3D {
 				redrawn = true;
 			}
 			r.setRenderTarget(rt);
+			// (what shows through is what can be seen from the exit portal)
+			this.cullFrom(at.clone().addScaledVector(normal, 8));
 			r.render(this.scene, cam);
+			this.uncull();
 			r.setRenderTarget(frameTarget);
 			r.clippingPlanes = [];
 			surface.visible = linkedSurface.visible = true;
@@ -2316,6 +2448,14 @@ export class View3D {
 			// a burst from long ago is over (no need to simulate it from the start)
 			if (time > 8 && !isEndless(def, lib)) return;
 			let r = this.particleRuns.get(key);
+			if (r && r.inst.time > time + 1e-4) {
+				// (back: from the latest saved state before then)
+				const back = r.saved.filter(st => st.time <= time + 1e-4).pop();
+				if (back) {
+					r.inst.restore(back);
+					r.saved = r.saved.filter(st => st.time <= back.time);
+				} else r = undefined;
+			}
 			if (!r || r.inst.time > time + 1e-4 || time - r.inst.time > 3) {
 				const c = cps();
 				if (!c) return;
@@ -2323,7 +2463,7 @@ export class View3D {
 				if (opts.cpAt) inst.setCpAt(opts.cpAt);
 				if (opts.size) inst.setSizeScale(opts.size);
 				if (time > 6 && !opts.cpAt) inst.skipTo(time - 6);
-				r = {start, inst};
+				r = {start, inst, saved: []};
 				this.particleRuns.set(key, r);
 			}
 			seen.add(key);
@@ -2338,6 +2478,11 @@ export class View3D {
 				r.inst.stopEmitting();
 			}
 			r.inst.advance(time);
+			const last = r.saved[r.saved.length - 1];
+			if (!r.inst.finished && (!last || r.inst.time - last.time >= 0.5)) {
+				r.saved.push(r.inst.snapshot());
+				if (r.saved.length > 12) r.saved.splice(0, 1);
+			}
 			if (r.inst.finished) return;
 			// glows drawn over everything still go when the world hides their
 			// origin from the camera (the game tests their visibility)
@@ -3253,7 +3398,9 @@ export class View3D {
 			for (const o of overlays) o.visible = false;
 			const frameTarget = r.getRenderTarget();
 			r.setRenderTarget(this.meter);
+			this.cullFrom(this.camera.position);
 			r.render(this.scene, this.camera);
+			this.uncull();
 			// the view model counts too (the game meters the whole frame, and
 			// the gun is often its brightest part)
 			if (this.mode === 'eyes' && this.vmShown) {
@@ -3399,8 +3546,11 @@ export class View3D {
 		}
 	}
 
+	private frameNumber = 0;
 	update(view: ViewState | null, tick: number) {
 		this.meterTick = tick;
+		this.frameNumber++;
+		this.seenCache.clear();
 		this.resize();
 		const ents = this.entities;
 		if (ents) {
@@ -3673,7 +3823,9 @@ export class View3D {
 		this.scene.background = null;
 		r.setRenderTarget(this.flashTarget);
 		r.clear();
+		this.cullFrom(fc.position);
 		r.render(this.scene, fc);
+		this.uncull();
 		for (const [mesh, m] of swapped) mesh.material = m;
 		this.scene.fog = fog;
 		this.scene.background = bg;
@@ -3964,7 +4116,9 @@ export class View3D {
 		const sc = this.skyCamera;
 		if (!sc) {
 			this.sky.position.copy(this.camera.position);
+			this.cullFrom(this.camera.position);
 			r.render(this.scene, this.camera);
+			this.uncull();
 			return;
 		}
 
@@ -3988,6 +4142,7 @@ export class View3D {
 		this.scene.fog = sc.fog;
 		const dither = ditherUniforms.ditherOn.value;
 		ditherUniforms.ditherOn.value = 0;
+		this.cullFrom(this.skyView.position);
 		r.render(this.scene, this.skyView);
 		ditherUniforms.ditherOn.value = dither;
 		for (const o of hidden) o.visible = true;
@@ -3995,7 +4150,9 @@ export class View3D {
 		r.clearDepth();
 		this.sky.visible = false;
 		this.scene.fog = this.worldFog;
+		this.cullFrom(this.camera.position);
 		r.render(this.scene, this.camera);
+		this.uncull();
 		this.sky.visible = true;
 		this.scene.background = background;
 		r.autoClear = true;

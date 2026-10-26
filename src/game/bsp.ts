@@ -4,12 +4,13 @@
 import type {GameFS} from './gamefs.ts';
 import type {MaterialInfo} from './materials.ts';
 import {AmbientLighting} from './ambient.ts';
+import {Visibility} from './vis.ts';
 
 const LUMP = {
 	ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7, LIGHTING: 8, EDGES: 12, SURFEDGES: 13,
 	MODELS: 14, DISPINFO: 26, DISP_VERTS: 33, GAME_LUMP: 35, PAKFILE: 40, CUBEMAPS: 42, OVERLAYS: 45, TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44,
 	LIGHTING_HDR: 53, FACES_HDR: 58,
-	NODES: 5, LEAFS: 10, WORLDLIGHTS: 15, LEAF_AMBIENT_INDEX_HDR: 51, LEAF_AMBIENT_INDEX: 52, WORLDLIGHTS_HDR: 54,
+	VISIBILITY: 4, NODES: 5, LEAFS: 10, WORLDLIGHTS: 15, LEAF_AMBIENT_INDEX_HDR: 51, LEAF_AMBIENT_INDEX: 52, WORLDLIGHTS_HDR: 54,
 	LEAF_AMBIENT_LIGHTING_HDR: 55, LEAF_AMBIENT_LIGHTING: 56,
 } as const;
 
@@ -117,6 +118,7 @@ export interface StaticProp {
 	skin: number;
 	index: number;  // in the map's list (its vertex lighting file is sp_hdr_<index>.vhv)
 	flags: number;  // STATIC_PROP_* (0x2 use lighting origin, 0x40 no per-vertex lighting...)
+	leaves: number[];  // the BSP leaves it's in (for visibility)
 }
 
 // A lit world face, for painting: where its luxels are in the lightmap atlas
@@ -143,6 +145,7 @@ export interface BspMap {
 	lightmap: Lightmap | null;
 	skyFaces: Float32Array;  // the world's sky faces, triangles: the skybox is seen only through them
 	ambient: AmbientLighting | null;  // lighting for moving models
+	vis: Visibility | null;  // what can be seen from where (vvis)
 	cubemaps: [number, number, number][];  // where the map's built cubemaps were taken (materials/maps/<map>/c<x>_<y>_<z>)
 	entities: Record<string, string>[];
 	materials: Map<string, MaterialInfo>;
@@ -728,9 +731,10 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 
 	const b = (i: number) => models.getFloat32(i, true);
 	// ambient cubes and world lights (HDR where the map has them)
-	const [nodes, leaves, ambIndexHdr, ambLightHdr, lightsHdr] = await Promise.all([
-		read(LUMP.NODES), read(LUMP.LEAFS), read(LUMP.LEAF_AMBIENT_INDEX_HDR), read(LUMP.LEAF_AMBIENT_LIGHTING_HDR), read(LUMP.WORLDLIGHTS_HDR),
+	const [nodes, leaves, ambIndexHdr, ambLightHdr, lightsHdr, visLump] = await Promise.all([
+		read(LUMP.NODES), read(LUMP.LEAFS), read(LUMP.LEAF_AMBIENT_INDEX_HDR), read(LUMP.LEAF_AMBIENT_LIGHTING_HDR), read(LUMP.WORLDLIGHTS_HDR), read(LUMP.VISIBILITY),
 	]);
+	const vis = new Visibility(planes, nodes, leaves, models, visLump);
 	const ambIndex = ambIndexHdr.byteLength ? ambIndexHdr : await read(LUMP.LEAF_AMBIENT_INDEX);
 	const ambLight = ambLightHdr.byteLength ? ambLightHdr : await read(LUMP.LEAF_AMBIENT_LIGHTING);
 	const worldLights = lightsHdr.byteLength ? lightsHdr : await read(LUMP.WORLDLIGHTS);
@@ -740,7 +744,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 	for (let o = 0; o + 16 <= cubeLump.byteLength; o += 16) cubemaps.push([cubeLump.getInt32(o, true), cubeLump.getInt32(o + 4, true), cubeLump.getInt32(o + 8, true)]);
 
 	return {
-		name, models: meshes, overlays, staticProps, lightmap, skyFaces: new Float32Array(skyTris), ambient: ambient.available ? ambient : null, cubemaps, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
+		name, models: meshes, overlays, staticProps, lightmap, skyFaces: new Float32Array(skyTris), ambient: ambient.available ? ambient : null, vis: vis.available ? vis : null, cubemaps, paintFaces, entities, materials, pak, materialsRead, faceCount, warnings,
 		bounds: {min: [b(0), b(4), b(8)], max: [b(12), b(16), b(20)]},
 	};
 }
@@ -824,7 +828,10 @@ async function readStaticProps(fs: GameFS, path: string, lump: {offset: number; 
 			const end = raw.indexOf(0);
 			dict.push(String.fromCharCode(...raw.subarray(0, end < 0 ? 128 : end)));
 		}
-		p += 4 + v.getInt32(p, true) * 2;  // leaves
+		const nLeaves = v.getInt32(p, true);
+		const leafList = new Uint16Array(nLeaves);
+		for (let k = 0; k < nLeaves; k++) leafList[k] = v.getUint16(p + 4 + k * 2, true);
+		p += 4 + nLeaves * 2;
 		const nProps = v.getInt32(p, true);
 		p += 4;
 		const size = nProps ? Math.floor((b.length - p) / nProps) : 0;
@@ -838,6 +845,7 @@ async function readStaticProps(fs: GameFS, path: string, lump: {offset: number; 
 				model: dict[v.getUint16(p + 24, true)] ?? '',
 				skin: size >= 36 ? v.getInt32(p + 32, true) : 0,
 				flags: v.getUint8(p + 31),
+				leaves: [...leafList.subarray(v.getUint16(p + 26, true), v.getUint16(p + 26, true) + v.getUint16(p + 28, true))],
 			});
 		}
 		return props;

@@ -3,6 +3,7 @@
 // View3D). Their shapes come from the entities' networked state; their looks
 // from the game's own materials (SolidEnergy, sprites), approximated here.
 import * as THREE from 'three';
+import {writeAttribute} from './dynamic.ts';
 import type {PropValue} from '../net/props.ts';
 import type {Materials} from '../game/materials.ts';
 import type {TextureCache} from './textures.ts';
@@ -278,9 +279,11 @@ export class Bridge {
 			uv.push(uvs[i][0], uvs[i][1]);
 			nrm.push(n.x, n.y, n.z);
 		}
-		this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-		this.geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-		this.geometry.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+		writeAttribute(this.geometry, 'position', pos, 3);
+		writeAttribute(this.geometry, 'uv', uv, 2);
+		writeAttribute(this.geometry, 'normal', nrm, 3);
+		this.geometry.setDrawRange(0, 6);
+		this.geometry.boundingSphere = new THREE.Sphere().setFromPoints(p);  // (culled where it is now)
 		// projected_wall's proxies: base drifts along, detail1 sweeps and
 		// races, detail2 creeps
 		const u = this.material.uniforms;
