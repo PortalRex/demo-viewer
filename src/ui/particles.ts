@@ -108,6 +108,7 @@ interface Particle {
 	pathT?: number;    // where along a control point path it was placed (0..1)
 	pathAt?: THREE.Vector3;  // that point of the path when last moved with it
 	normal?: THREE.Vector3;  // the way its card faces (renderers' orientation_type 3)
+	lockedTo?: THREE.Matrix4;  // its locked control point when last moved with it
 }
 
 // (its state kept apart, so an instance can be saved and picked up again)
@@ -124,7 +125,7 @@ function nextRandom(r: Rng) {
 
 const copyParticle = (p: Particle): Particle => ({
 	...p, pos: p.pos.clone(), vel: p.vel.clone(), color: [...p.color], baseColor: [...p.baseColor], osc: [...p.osc],
-	pathAt: p.pathAt?.clone(), normal: p.normal?.clone(),
+	pathAt: p.pathAt?.clone(), normal: p.normal?.clone(), lockedTo: p.lockedTo?.clone(),
 });
 
 // everything an instance changes as it runs, for picking it up again later
@@ -748,6 +749,27 @@ export class ParticleInstance {
 				// still facing along it as the control point turns
 				p.normal = new THREE.Vector3().setFromMatrixColumn(this.cp(num(o, 'control_point_number', 0)), 0).normalize();
 				break;
+			case 'movement lock to control point': {
+				// carried along as its control point moves (and turns, with
+				// lock rotation), fully until the start of the fade-out part of
+				// its life, then less to none at its end
+				const cur = this.cp(num(o, 'control_point_number', 0));
+				const prev = p.lockedTo;
+				p.lockedTo = cur.clone();
+				if (!prev) break;
+				const f0 = (num(o, 'start_fadeout_min', 1) + num(o, 'start_fadeout_max', 1)) / 2;
+				const f1 = (num(o, 'end_fadeout_min', 1) + num(o, 'end_fadeout_max', 1)) / 2;
+				const strength = frac <= f0 ? 1 : Math.max(0, (f1 - frac) / ((f1 - f0) || 1));
+				if (strength <= 0) break;
+				if (num(o, 'lock rotation', 0)) {
+					const moved = p.pos.clone().applyMatrix4(cur.clone().multiply(prev.clone().invert()));
+					p.pos.lerp(moved, strength);
+					if (strength >= 1) p.vel.applyMatrix3(new THREE.Matrix3().setFromMatrix4(cur).multiply(new THREE.Matrix3().setFromMatrix4(prev).invert()));
+				} else {
+					p.pos.add(new THREE.Vector3().setFromMatrixPosition(cur).sub(new THREE.Vector3().setFromMatrixPosition(prev)).multiplyScalar(strength));
+				}
+				break;
+			}
 			case 'movement lock to saved position along path': {
 				// carried along as the path's ends move (a beam between two
 				// moving points)
