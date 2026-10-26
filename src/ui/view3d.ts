@@ -586,7 +586,7 @@ class MaterialLibrary {
 			if (!bump) return;
 			mat.userData.bumpNormal = bump;
 		}
-		setWorldEnv(mat, {cube: cube.texture, tint: info.envTint, scale: cube.scale, contrast: info.envContrast, saturation: info.envSaturation, maskMap, lightScale: info.envLightScale}, info.envMask);
+		setWorldEnv(mat, {cube: cube.texture, tint: info.envTint, scale: cube.scale, contrast: info.envContrast, saturation: info.envSaturation, maskMap, lightScale: info.envLightScale, fresnelReflection: info.fresnelReflection}, info.envMask);
 		this.onChange();
 	}
 

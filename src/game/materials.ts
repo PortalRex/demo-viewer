@@ -69,6 +69,7 @@ export interface MaterialInfo {
 	envMask: 'none' | 'base' | 'bump' | 'texture';  // where the reflection's strength comes from
 	envMaskTexture: string;
 	envFresnel: number;      // $envmapfresnel: how much the phong fresnel ranges scale the reflection
+	fresnelReflection: number;  // $fresnelreflection (LightmappedGeneric): the reflection face on (1 at grazing)
 	envContrast: number;
 	envSaturation: [number, number, number];  // per channel (one number for all three)
 	refractTint: [number, number, number];  // Refract: what's behind is multiplied by this
@@ -128,7 +129,7 @@ export interface WaterParams {
 const MISSING: MaterialInfo = {
 	noPortal: false, translucent: false, liquid: false, found: false, shader: '', baseTexture: '', baseTexture2: '', blendModulate: '', alphaTest: false,
 	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1], bumpMap: '', ssbump: false,
-	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envFresnel: 0, envContrast: 0, envSaturation: [1, 1, 1],
+	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envFresnel: 0, fresnelReflection: 1, envContrast: 0, envSaturation: [1, 1, 1],
 	refractTint: [1, 1, 1], refractTintTexture: '',
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
 	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
@@ -247,6 +248,7 @@ export class Materials {
 			envMask: truthy(p.get('$basealphaenvmapmask')) ? 'base' : truthy(p.get('$normalmapalphaenvmapmask')) ? 'bump' : p.get('$envmapmask') ? 'texture' : 'none',
 			envMaskTexture: (p.get('$envmapmask') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			envFresnel: Number(p.get('$envmapfresnel') ?? 0) || 0,
+			fresnelReflection: p.has('$fresnelreflection') ? Number(p.get('$fresnelreflection')) || 0 : 1,
 			envContrast: Number(p.get('$envmapcontrast') ?? 0) || 0,
 			envSaturation: parseTint(p.get('$envmapsaturation')) ?? [1, 1, 1],
 			refractTint: parseColor(p.get('$refracttint')) ?? [1, 1, 1],

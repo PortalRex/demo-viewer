@@ -631,6 +631,7 @@ uniform vec3 envSaturation;
 uniform sampler2D envMaskMap;
 uniform float envLightScale;
 uniform float envFresnel;
+uniform float envFresnelReflection;
 varying vec3 vEnvN;
 vec3 surfaceLight = vec3(1.0);
 vec3 envAdded = vec3(0.0);
@@ -673,6 +674,10 @@ const ENV_FRAGMENT = `
 		spec *= mask * envTint;
 		spec = mix(spec, spec * spec, envContrast);
 		spec = mix(vec3(dot(spec, vec3(0.299, 0.587, 0.114))), spec, envSaturation);
+	#ifdef ENV_FRESNEL_REFLECT
+		// ($fresnelreflection: this much face on, all of it at grazing, by (1-N.V)^4)
+		spec *= mix(envFresnelReflection, 1.0, pow(1.0 - clamp(dot(n, -eye), 0.0, 1.0), 4.0));
+	#endif
 	#ifdef REFRACT_ENV
 		// (Refract's reflection: by a fresnel from 0.6 face on)
 		spec *= 0.6 + 0.4 * (1.0 - clamp(dot(n, -eye), 0.0, 1.0));
@@ -754,6 +759,7 @@ export interface EnvSettings {
 	saturation: [number, number, number];
 	maskMap: THREE.Texture | null;
 	lightScale: number;
+	fresnelReflection: number;
 }
 
 // gives a world material its $detail texture
@@ -796,7 +802,10 @@ export function setWorldEnv(material: THREE.Material, env: EnvSettings, mask: 'n
 	(u.envSaturation.value as THREE.Vector3).set(...env.saturation);
 	u.envMaskMap.value = env.maskMap;
 	u.envLightScale.value = env.lightScale;
+	u.envFresnelReflection.value = env.fresnelReflection;
 	material.defines = {...material.defines, ENVMAP_CUBE: ''};
+	if (env.fresnelReflection !== 1) material.defines.ENV_FRESNEL_REFLECT = '';
+	else delete material.defines.ENV_FRESNEL_REFLECT;
 	for (const k of ['ENVMASK_BASE', 'ENVMASK_BUMP', 'ENVMASK_TEXTURE']) delete material.defines[k];
 	if (mask === 'base') material.defines.ENVMASK_BASE = '';
 	if (mask === 'bump') material.defines.ENVMASK_BUMP = '';
@@ -816,6 +825,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			envMaskMap: {value: null},
 			envLightScale: {value: 0},
 			envFresnel: {value: 0},
+			envFresnelReflection: {value: 1},
 			detailMap: {value: null},
 			detailScale: {value: 4},
 			detailBlend: {value: 1},
