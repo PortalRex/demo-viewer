@@ -289,9 +289,10 @@ const PAINT_FRAGMENT = `
 	#endif
 `;
 
-// (in the light maps' units, a scale of 1.5 over the engine's)
+// (in the light maps' units, a scale of 1.5 over the engine's; blended
+// over the surface by its coverage stepped at 0.4-0.45, at most 85%)
 const PAINT_FINAL = `
-	if (paintAlpha > 0.0) outgoingLight = mix(outgoingLight, (paintLight * 0.82 + 0.06) * paintColor * vec3(0.8, 0.85, 1.0), paintAlpha);
+	if (paintAlpha > 0.0) outgoingLight = mix(outgoingLight, (paintLight * 0.82 + 0.06) * paintColor * vec3(0.8, 0.85, 1.0), smoothstep(0.40, 0.45, paintAlpha) * 0.85);
 `;
 
 // A projected spotlight (env_projectedtexture), as the engine's flashlight
