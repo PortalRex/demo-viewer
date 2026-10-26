@@ -267,9 +267,12 @@ class MaterialLibrary {
 				};
 			}
 			if (envMask) {
-				// (Phong's reflection has no contrast, saturation or light scale)
+				// (Phong's reflection has no contrast, saturation or light scale;
+				// without Phong the tint is taken from gamma to linear, values
+				// over 1 as they are: SetEnvMapTintPixelShaderDynamicStateGammaToLinear)
+				const tint = info.phong ? info.envTint : info.envTint.map(v => (v > 1 ? v : Math.pow(v, 2.2))) as [number, number, number];
 				mat.userData.modelEnv = {
-					tint: info.envTint, contrast: info.phong ? 0 : info.envContrast, saturation: info.phong ? [1, 1, 1] : info.envSaturation,
+					tint, contrast: info.phong ? 0 : info.envContrast, saturation: info.phong ? [1, 1, 1] : info.envSaturation,
 					lightScale: info.phong ? 0 : info.envLightScale,
 					mask: envMaskKind === 'bump' ? (maskMap ? 'alpha' : 'none') : envMaskKind === 'texture' && !maskMap ? 'none' : envMaskKind,
 					maskMap, cube: info.envMap, fresnel: info.phong ? info.envFresnel : 0,
