@@ -6,7 +6,9 @@
 // last frame; a group's forced slaves show their master's movie, each
 // through its own corner of it (custom UVs: one movie across a ring of
 // signs). Drawn as vgui is: the movie's own colours on the screen, untouched
-// by the lighting or the view's exposure.
+// by the lighting or the view's exposure. Other vgui screens that draw a
+// texture (indicator panels' checks and crosses) go the same way, with their
+// texture's alpha, and taking the exposure (matched to the game's frames).
 import * as THREE from 'three';
 import {BinkVideo, binkTablesFromDll, type BinkTables, type BinkFrame} from '../game/bink.ts';
 import type {GameFiles} from '../game/files.ts';
@@ -16,6 +18,7 @@ import {exposureUniforms} from './shaderhooks.ts';
 export interface ScreenSpec {
 	key: string;
 	file: string;          // under the game folder, e.g. media/exercises_horiz.bik
+	image?: string;        // instead of a movie: this material's texture (e.g. vgui/signage/vgui_indicator_checked)
 	start: number;         // seconds: when it started playing
 	looping: boolean;
 	corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3];  // lower left, upper left, upper right
@@ -30,7 +33,7 @@ interface Movie {
 	material: THREE.ShaderMaterial;
 }
 
-// (the frame's exposure is undone here, as the final pass applies it)
+// (the frame's exposure is undone for movies, as the final pass applies it)
 const VERTEX = `
 	varying vec2 vUv;
 	void main() {
@@ -40,9 +43,11 @@ const VERTEX = `
 const FRAGMENT = `
 	uniform sampler2D map;
 	uniform float sceneExposure;
+	uniform float image;  // an image screen: its alpha, and exposed
 	varying vec2 vUv;
 	void main() {
-		gl_FragColor = vec4(texture2D(map, vUv).rgb / max(sceneExposure, 1e-3), 1.0);
+		vec4 c = texture2D(map, vUv);
+		gl_FragColor = image > 0.5 ? c : vec4(c.rgb / max(sceneExposure, 1e-3), 1.0);
 	}`;
 
 // frames decoded at most per update (catching up after a jump is spread out)
@@ -55,10 +60,29 @@ export class MovieScreens {
 	private movies = new Map<string, Movie | null>();
 	private loading = new Set<string>();
 	private screens = new Map<string, THREE.Mesh>();
+	private images = new Map<string, THREE.ShaderMaterial | null>();
+	private imageTexture: (material: string) => Promise<THREE.Texture | null>;
 	onChange = () => {};
 
-	constructor(files: GameFiles) {
+	constructor(files: GameFiles, imageTexture: (material: string) => Promise<THREE.Texture | null>) {
 		this.files = files;
+		this.imageTexture = imageTexture;
+	}
+
+	// an image screen's material, once its texture has loaded
+	private image(name: string): THREE.ShaderMaterial | null | undefined {
+		if (this.images.has(name)) return this.images.get(name);
+		this.images.set(name, null);
+		this.imageTexture(name).then(tex => {
+			if (!tex) return;
+			this.images.set(name, new THREE.ShaderMaterial({
+				uniforms: {map: {value: tex}, image: {value: 1}, ...exposureUniforms},
+				vertexShader: VERTEX, fragmentShader: FRAGMENT, transparent: true, depthWrite: false,
+				polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
+			}));
+			this.onChange();
+		}).catch(() => {});
+		return undefined;
 	}
 
 	private loadTables(): Promise<BinkTables | null> {
@@ -78,7 +102,7 @@ export class MovieScreens {
 				}
 				const video = new BinkVideo(bytes, tables);
 				const material = new THREE.ShaderMaterial({
-					uniforms: {map: {value: null}, ...exposureUniforms},
+					uniforms: {map: {value: null}, image: {value: 0}, ...exposureUniforms},
 					vertexShader: VERTEX, fragmentShader: FRAGMENT,
 					polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
 				});
@@ -138,19 +162,27 @@ export class MovieScreens {
 	update(specs: ScreenSpec[], time: number) {
 		const seen = new Set<string>();
 		for (const s of specs) {
-			const m = this.movie(s.file);
-			if (!m) continue;
-			this.show(m, s.start, s.looping, time);
-			if (!m.texture) continue;
+			let material: THREE.ShaderMaterial;
+			if (s.image) {
+				const im = this.image(s.image);
+				if (!im) continue;
+				material = im;
+			} else {
+				const m = this.movie(s.file);
+				if (!m) continue;
+				this.show(m, s.start, s.looping, time);
+				if (!m.texture) continue;
+				material = m.material;
+			}
 			seen.add(s.key);
 			let mesh = this.screens.get(s.key);
 			if (!mesh) {
-				mesh = new THREE.Mesh(new THREE.BufferGeometry(), m.material);
+				mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
 				mesh.renderOrder = 1;
 				this.screens.set(s.key, mesh);
 				this.group.add(mesh);
 			}
-			mesh.material = m.material;
+			mesh.material = material;
 			const [ll, ul, ur] = s.corners;
 			const lr = ll.clone().add(ur).sub(ul);
 			const [u0, u1, v0, v1] = s.uv;
@@ -174,5 +206,8 @@ export class MovieScreens {
 			m?.material.dispose();
 		}
 		this.movies.clear();
+		// (the image textures are the texture library's)
+		for (const m of this.images.values()) m?.dispose();
+		this.images.clear();
 	}
 }

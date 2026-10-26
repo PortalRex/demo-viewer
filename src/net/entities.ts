@@ -65,6 +65,8 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CInfoOverlayAccessor: ['m_iOverlayID', 'm_iTextureFrameIndex'],
 	// (and a brush's: signs a texture toggle switches, co-op's team door signs)
 	CFuncBrush: ['m_iTextureFrameIndex'],
+	// indicator panels (their vgui screen shows a check, a cross or a countdown)
+	CLabIndicatorPanel: ['m_bEnabled', 'm_bIsChecked', 'm_bCountingDown', 'm_bIsCountdownTimer'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],
 	CParticleSystem: ['m_iEffectIndex', 'm_bActive', 'm_flStartTime', 'm_hControlPointEnts.000', 'm_hControlPointEnts.001', 'm_hControlPointEnts.002'],
 	// whose view model it is (co-op recordings have one per player)

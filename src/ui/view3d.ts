@@ -1177,7 +1177,10 @@ export class View3D {
 		if (this.sprites) this.scene.add(this.sprites.group);
 		this.movies?.dispose();
 		if (this.movies) this.scene.remove(this.movies.group);
-		this.movies = files ? new MovieScreens(files) : null;
+		this.movies = files ? new MovieScreens(files, async name => {
+			const info = materials ? await materials.get(name) : null;
+			return info?.found && info.baseTexture && this.library ? this.library.textures.get(info.baseTexture) : null;
+		}) : null;
 		if (this.movies) {
 			this.movies.onChange = () => this.loaded();
 			this.scene.add(this.movies.group);
@@ -2282,24 +2285,41 @@ export class View3D {
 			return c.at;
 		};
 		const specs: ScreenSpec[] = [];
+		// a screen's corners: its origin the lower left, up its left axis by
+		// its height, along its forward one by its width
+		const corners = (m: THREE.Matrix4, k: EntityKey): [THREE.Vector3, THREE.Vector3, THREE.Vector3] => {
+			const width = Number(k.extra?.m_flWidth ?? 0), height = Number(k.extra?.m_flHeight ?? 0);
+			const ll = new THREE.Vector3().setFromMatrixPosition(m);
+			const forward = new THREE.Vector3().setFromMatrixColumn(m, 0).normalize(), left = new THREE.Vector3().setFromMatrixColumn(m, 1).normalize();
+			const ul = ll.clone().addScaledVector(left, height);
+			return [ll, ul, ul.clone().addScaledVector(forward, width)];
+		};
 		for (const t of ents.tracks) {
 			if (t.className !== 'CVGuiScreen') continue;
 			const k = keyAt(t, tick);
+			// an indicator panel's: its check (or cross), or while it counts
+			// down its dial's lit background (the dial's slices aren't drawn)
+			const panel = k?.parent !== undefined ? this.entityAt(k.parent, tick, 'CLabIndicatorPanel') : undefined;
+			if (k && panel) {
+				const m = (Number(k.extra?.m_fScreenFlags ?? 0) & 1) ? this.worldMatrix(t, k, tick, 0) : null;
+				if (!m) continue;
+				const e = panel.extra ?? {};
+				const image = Number(e.m_bCountingDown) ? 'vgui/signage/vgui_countdown_background_on'
+					: Number(e.m_bIsChecked) ? 'vgui/signage/vgui_indicator_checked' : 'vgui/signage/vgui_indicator_unchecked';
+				specs.push({key: `${t.index}:${t.keys[0].tick}`, file: '', image, start: 0, looping: false, corners: corners(m, k), uv: [0, 1, 0, 1]});
+				continue;
+			}
 			const d = k?.parent !== undefined ? displays.get(k.parent) : undefined;
 			if (!k || !d || Number(d.k.extra!.m_bEnabled) !== 1) continue;
 			const src = Number(d.k.extra!.m_bForcedSlave) ? masters.get(String(d.k.extra!.m_szGroupName ?? '')) : d;
 			if (!src || !/\.bik$/.test(file(src.k))) continue;
 			const m = this.worldMatrix(t, k, tick, 0);
 			if (!m) continue;
-			const width = Number(k.extra?.m_flWidth ?? 0), height = Number(k.extra?.m_flHeight ?? 0);
-			const ll = new THREE.Vector3().setFromMatrixPosition(m);
-			const forward = new THREE.Vector3().setFromMatrixColumn(m, 0).normalize(), left = new THREE.Vector3().setFromMatrixColumn(m, 1).normalize();
-			const ul = ll.clone().addScaledVector(left, height), ur = ul.clone().addScaledVector(forward, width);
 			const e = d.k.extra!;
 			const custom = Number(e.m_bUseCustomUVs) === 1;
 			specs.push({
 				key: `${t.index}:${t.keys[0].tick}`, file: file(src.k), start: startOf(src.t) * this.interval, looping: Number(src.k.extra!.m_bLooping) === 1,
-				corners: [ll, ul, ur], uv: custom ? [Number(e.m_flUMin), Number(e.m_flUMax), Number(e.m_flVMin), Number(e.m_flVMax)] : [0, 1, 0, 1],
+				corners: corners(m, k), uv: custom ? [Number(e.m_flUMin), Number(e.m_flUMax), Number(e.m_flVMin), Number(e.m_flVMax)] : [0, 1, 0, 1],
 			});
 		}
 		this.movies.update(specs, tick * this.interval);
