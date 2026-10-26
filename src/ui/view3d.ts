@@ -4680,6 +4680,74 @@ export class View3D {
 		}
 	}
 
+	// An eye nearer a portal than the near plane (walking through it): the
+	// portal's surface is clipped away, so where the view goes through its
+	// opening the portal's view is drawn over the frame, each pixel's ray
+	// traced to the portal's plane (as the game keeps showing it then)
+	private nearPortal = new THREE.ShaderMaterial({
+		uniforms: {
+			view: {value: null}, resolution: {value: new THREE.Vector2(1, 1)},
+			camWorld: {value: new THREE.Matrix4()}, projInv: {value: new THREE.Matrix4()},
+			at: {value: new THREE.Vector3()}, normal: {value: new THREE.Vector3()},
+			right: {value: new THREE.Vector3()}, up: {value: new THREE.Vector3()}, halfSize: {value: new THREE.Vector2()},
+		},
+		depthTest: false, depthWrite: false,
+		vertexShader: `
+			varying vec2 vNdc;
+			void main() {
+				vNdc = position.xy;
+				gl_Position = vec4(position.xy, 0.0, 1.0);
+			}`,
+		fragmentShader: `
+			uniform sampler2D view;
+			uniform vec2 resolution, halfSize;
+			uniform mat4 camWorld, projInv;
+			uniform vec3 at, normal, right, up;
+			varying vec2 vNdc;
+			void main() {
+				vec4 v = projInv * vec4(vNdc, 1.0, 1.0);
+				vec3 dir = (camWorld * vec4(v.xyz / v.w, 0.0)).xyz;
+				vec3 eye = (camWorld * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+				float t = dot(at - eye, normal) / dot(dir, normal);
+				if (t <= 0.0) discard;
+				vec3 p = eye + dir * t - at;
+				// (inside the opening, short of its flames)
+				if (length(vec2(dot(p, right) / halfSize.x, dot(p, up) / halfSize.y)) > 0.95) discard;
+				gl_FragColor = linearToOutputTexel(vec4(texture2D(view, gl_FragCoord.xy / resolution).rgb, 1.0));
+			}`,
+	});
+	private nearPortalScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.nearPortal), {frustumCulled: false}));
+	private drawNearPortals(r: THREE.WebGLRenderer) {
+		if (this.mode !== 'eyes') return;
+		const eye = this.camera.position;
+		for (const p of this.portals.values()) {
+			const surface = p.obj.userData.portalSurface as THREE.Mesh | undefined;
+			const m = surface?.material as THREE.ShaderMaterial | undefined;
+			if (!m || !m.uniforms.hasView.value || !m.uniforms.view.value) continue;
+			p.obj.updateMatrixWorld();
+			const at = new THREE.Vector3().setFromMatrixPosition(p.obj.matrixWorld);
+			const n = new THREE.Vector3(1, 0, 0).transformDirection(p.obj.matrixWorld);
+			const right = new THREE.Vector3(0, 1, 0).transformDirection(p.obj.matrixWorld), up = new THREE.Vector3(0, 0, 1).transformDirection(p.obj.matrixWorld);
+			const rel = eye.clone().sub(at), d = rel.dot(n);
+			// (in front, within the near plane's reach of it, by the opening)
+			if (d <= 0 || d > VIEW_NEARZ * 1.5 || Math.abs(rel.dot(right)) > p.halfW + 16 || Math.abs(rel.dot(up)) > p.halfH + 16) continue;
+			const u = this.nearPortal.uniforms;
+			u.view.value = m.uniforms.view.value;
+			u.resolution.value.copy(m.uniforms.resolution.value);
+			u.camWorld.value.copy(this.camera.matrixWorld);
+			u.projInv.value.copy(this.camera.projectionMatrixInverse);
+			u.at.value.copy(at);
+			u.normal.value.copy(n);
+			u.right.value.copy(right);
+			u.up.value.copy(up);
+			u.halfSize.value.set(p.halfW, p.halfH);
+			const auto = r.autoClear;
+			r.autoClear = false;
+			r.render(this.nearPortalScene, this.compositeCam);
+			r.autoClear = auto;
+		}
+	}
+
 	// A taunting player's camera, as the picture in picture shows it
 	// (C_Portal_Player::CalcView): looking at their eye from the taunt
 	// camera's distance, turned by their remote view angles, pulled in where
@@ -4749,6 +4817,7 @@ export class View3D {
 		// portal views and the meter are, so each material compiles once),
 		// then exposed, clamped and encoded to the screen by a final pass
 		this.renderScene(r);
+		this.drawNearPortals(r);
 		if (this.mode === 'eyes' && this.vmShown && !this.pip?.taunt) {
 			this.vmCam.position.copy(this.camera.position);
 			this.vmCam.quaternion.copy(this.camera.quaternion);
