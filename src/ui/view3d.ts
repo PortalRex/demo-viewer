@@ -14,7 +14,7 @@ import type {StudioModel, ModelGroup} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
 import type {Gesture, Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
-import {Laser, Bridge, Funnel, fizzlerMaterial, portalMaterial, vec3, EffectAssets} from './effects.ts';
+import {Laser, Bridge, Funnel, fizzlerMaterial, setFizzlerState, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints, InstanceState} from './particles.ts';
@@ -1924,11 +1924,13 @@ export class View3D {
 			if (!m) return null;
 			const group = new THREE.Group();
 			for (const g of m.groups) {
-				// each face's own material (fizzler, fizzler_center, edges...)
-				let mat = this.fizzlers.get(g.material);
+				// each face's own material (fizzler, fizzler_center, edges...),
+				// each fizzler its own (its vortices and pulse are its own)
+				const key = `${t.index}:${t.serial ?? 0}#${g.material}`;
+				let mat = this.fizzlers.get(key);
 				if (!mat) {
 					mat = fizzlerMaterial(this.effects, g.material);
-					this.fizzlers.set(g.material, mat);
+					this.fizzlers.set(key, mat);
 				}
 				const mesh = new THREE.Mesh(geometry(g), mat);
 				mesh.renderOrder = 2;
@@ -4004,6 +4006,7 @@ export class View3D {
 				if (!o) continue;
 				o.visible = show;
 				if (show && k && t.className === 'CFuncBrush') this.brushFrame(o, Number(k.extra?.m_iTextureFrameIndex ?? 0) || 0);
+				if (show && k && t.className === 'CTriggerPortalCleanser') this.fizzlerFrame(t, k, o, tick);
 				// a doorway's fade brush: drawn by the camera's distance (a closed
 				// door's black backing; open doors fade it out)
 				if (show && k && t.className === 'CFuncAreaPortalWindow') o.visible = this.portalWindowBlend(o, k) >= 0.5;
@@ -4395,6 +4398,31 @@ export class View3D {
 		}
 		return {rgb: rgb.map(v => v / active.length / 255), alpha: alpha / 255, modulate};
 	}
+	// A fizzler's vortices (the objects in its range) and the pulse when a
+	// portal shot hits it (up to 10x over 0.1 s, back over 0.1 s:
+	// C_TriggerPortalCleanser::GetCurrentState), from when the shot time changed
+	private fizzlerFrame(t: EntityTrack, k: EntityKey, o: THREE.Object3D, tick: number) {
+		const e = k.extra ?? {};
+		const vortices = ([1, 2] as const).map(n => {
+			if (!Number(e[`m_bObject${n}InRange`])) return null;
+			const h = Number(e[`m_hObject${n}`] ?? -1);
+			const ot = h >= 0 && (h & 2047) !== 2047 ? this.trackForHandle(h, tick) : undefined;
+			return ot ? this.entityPose(ot, tick).origin : null;
+		});
+		let intensity = 1;
+		const shot = Number(e.m_flPortalShotTime ?? 0);
+		if (shot) {
+			let i = keyIndexAt(t, tick);
+			while (i > 0 && Number(t.keys[i - 1].extra?.m_flPortalShotTime ?? 0) === shot) i--;
+			const since = (tick - t.keys[Math.max(0, i)].tick) * this.interval;
+			if (since >= 0 && since <= 0.2) intensity = 1 + 9 * Math.min(1, Math.max(0, since <= 0.1 ? since / 0.1 : 1 - (since - 0.1) / 0.1));
+		}
+		o.traverse(c => {
+			const m = (c as THREE.Mesh).material as THREE.ShaderMaterial | undefined;
+			if ((c as THREE.Mesh).isMesh && m?.uniforms?.vortex1) setFizzlerState(m, {vortices, intensity});
+		});
+	}
+
 	// the partner's view into its corner of the screen: exposed by its own
 	// meter, without the main view's bloom and screen fade
 	private compositePip(r: THREE.WebGLRenderer) {

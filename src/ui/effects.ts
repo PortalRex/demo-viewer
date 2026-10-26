@@ -391,9 +391,20 @@ export class Funnel {
 }
 
 // ---- fizzlers (SolidEnergy flowmap materials on the trigger's faces) ----
-// The ripple texture, in world space, is pushed along the flow map in two
-// phases that cross-fade; its alpha tints the flow colour; the bounds
-// texture (in the face's own texture space) fades it out at the edges.
+// As SolidEnergy's flow map path: the ripple texture, in world space, is
+// pushed along the flow map in two phases that cross-fade; its alpha (plus
+// the bounds texture's green, the glow along the edges) tints the flow
+// colour, the bounds texture's blue fades it out at the edges. Near an
+// object in range (a vortex) the ripples' green tints the vortex colour
+// instead and they scroll faster; a portal shot pulses the whole field.
+// Additive, so doubled ((1 + alpha), alpha 1) and faded out right in front
+// of the camera (ComputeCameraFade: none at the 7 unit near plane, full 40
+// units on), and unfogged.
+
+export interface FizzlerState {
+	vortices: (THREE.Vector3 | null)[];  // objects in range (m_hObject1/2)
+	intensity: number;                   // 1, up to 10 in a shot's pulse
+}
 
 export function fizzlerMaterial(assets: EffectAssets | null, name: string): THREE.ShaderMaterial {
 	const m = new THREE.ShaderMaterial({
@@ -402,6 +413,8 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 			base: {value: null}, flow: {value: null}, bounds: {value: null},
 			time: {value: 0}, interval: {value: 1.2}, scroll: {value: 0.25}, worldScale: {value: 0.008},
 			flowColor: {value: new THREE.Color(0.025, 0.08, 0.1)}, intensity: {value: 2.0},
+			vortexColor: {value: new THREE.Color(1, 1, 1)}, vortexSize: {value: 35},
+			vortex1: {value: new THREE.Vector4()}, vortex2: {value: new THREE.Vector4()}, flowIntensity: {value: 1},
 		},
 		transparent: true,
 		depthWrite: false,
@@ -410,29 +423,44 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 		vertexShader: `
 			varying vec2 vUv;
 			varying vec2 vWorldUv;
+			varying vec3 vWorld;
+			varying float vDepth;
 			void main() {
 				vUv = uv;
 				vec3 w = (modelMatrix * vec4(position, 1.0)).xyz;
 				vec3 n = abs(normalize(mat3(modelMatrix) * normal));
 				// world coordinates on the plane the face mostly lies in
 				vWorldUv = n.x > n.y && n.x > n.z ? w.yz : n.y > n.z ? w.xz : w.xy;
-				gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+				vWorld = w;
+				vec4 view = viewMatrix * vec4(w, 1.0);
+				vDepth = -view.z;
+				gl_Position = projectionMatrix * view;
 			}`,
 		fragmentShader: `
 			uniform float sceneExposure;
 			uniform sampler2D base, flow, bounds;
-			uniform float time, interval, scroll, worldScale, intensity;
-			uniform vec3 flowColor;
+			uniform float time, interval, scroll, worldScale, intensity, vortexSize, flowIntensity;
+			uniform vec3 flowColor, vortexColor;
+			uniform vec4 vortex1, vortex2;  // position, and 1 when there's an object
 			varying vec2 vUv;
 			varying vec2 vWorldUv;
+			varying vec3 vWorld;
+			varying float vDepth;
 			void main() {
 				vec4 b = texture2D(bounds, vUv);
 				vec2 f = (texture2D(flow, vUv).rg * 2.0 - 1.0) * b.r;
+				float vortex = 0.0;
+				if (vortex1.w > 0.0) vortex += clamp(vortexSize / length(vortex1.xyz - vWorld) - 0.5, 0.0, 1.0);
+				if (vortex2.w > 0.0) vortex += clamp(vortexSize / length(vortex2.xyz - vWorld) - 0.5, 0.0, 1.0);
 				float t1 = fract(time / interval), t2 = fract(t1 + 0.5);
 				float w1 = 1.0 - abs(t1 * 2.0 - 1.0);
 				vec2 uv = vWorldUv * worldScale;
-				vec4 c = texture2D(base, uv + f * t1 * scroll) * w1 + texture2D(base, uv + f * t2 * scroll) * (1.0 - w1);
-				vec3 rgb = (c.a * flowColor + b.g * flowColor * 4.0) * b.b * intensity;
+				float sc = scroll * (1.0 + vortex);
+				vec4 c = texture2D(base, uv + f * t1 * sc) * w1 + texture2D(base, uv + f * t2 * sc) * (1.0 - w1);
+				c.ag += b.g;
+				vec3 rgb = c.a * flowColor;
+				if (vortex1.w + vortex2.w > 0.0) rgb = mix(rgb, c.g * vortexColor, vortex);
+				rgb *= b.b * flowIntensity * 2.0 * intensity * smoothstep(0.0, 1.0, clamp((vDepth - 7.0) * 0.025, 0.0, 1.0));
 				gl_FragColor = vec4(rgb, 1.0);
 				// SolidEnergy caps the exposure it takes at 1
 				gl_FragColor.rgb /= max(sceneExposure, 1.0);
@@ -459,10 +487,23 @@ export function fizzlerMaterial(assets: EffectAssets | null, name: string): THRE
 			u.scroll.value = num(p, '$flow_uvscrolldistance', 0.25);
 			u.worldScale.value = num(p, '$flow_worlduvscale', 0.008);
 			u.flowColor.value.setRGB(...vec(p, '$flow_color', [0.025, 0.08, 0.1]));
+			u.vortexColor.value.setRGB(...vec(p, '$flow_vortex_color', [1, 1, 1]));
+			u.vortexSize.value = num(p, '$flow_vortex_size', 1);
 			u.intensity.value = outputIntensity(p);
 		});
 	}
 	return m;
+}
+
+// a fizzler's objects in range and pulse, this frame
+export function setFizzlerState(m: THREE.ShaderMaterial, state: FizzlerState) {
+	const u = m.uniforms;
+	for (const [i, v] of [u.vortex1, u.vortex2].entries()) {
+		const at = state.vortices[i];
+		if (at) v.value.set(at.x, at.y, at.z, 1);
+		else v.value.set(0, 0, 0, 0);
+	}
+	u.flowIntensity.value = state.intensity;
 }
 
 // ---- portal surfaces ----
