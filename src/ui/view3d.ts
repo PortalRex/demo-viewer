@@ -24,6 +24,7 @@ import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
 import {PaintBlobs, type Sprayer} from './paintblobs.ts';
 import {Ropes, type RopeSpec} from './ropes.ts';
+import {Sprites, type SpriteSpec} from './sprites.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt, type ScreenFade} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
@@ -1008,6 +1009,10 @@ export class View3D {
 		if (this.ropes) this.scene.remove(this.ropes.group);
 		this.ropes = this.effects ? new Ropes(this.effects) : null;
 		if (this.ropes) this.scene.add(this.ropes.group);
+		this.sprites?.dispose();
+		if (this.sprites) this.scene.remove(this.sprites.group);
+		this.sprites = this.effects ? new Sprites(this.effects) : null;
+		if (this.sprites) this.scene.add(this.sprites.group);
 		this.loadSky(bsp, token);
 		this.worldFog = this.scene.fog as THREE.Fog | null;
 
@@ -1751,6 +1756,38 @@ export class View3D {
 			const end = start.clone().lerp(vec3(e.m_vEnd)!, Math.max(grown, 0.001));
 			(o.userData.funnel as Funnel).set(start, end, Number(e.m_flRadius) || 55, Number(e.m_bReversed) === 1, time, Number(e.m_bFromPortal) === 1, Number(e.m_bToPortal) === 1 && grown >= 1);
 		}
+	}
+
+	// Sprites (env_sprite): where each is (on its attachment, if it has one)
+	// and how it's drawn, for Sprites; a glow's proxy tested against what's
+	// in the way
+	private sprites: Sprites | null = null;
+	private updateSprites(tick: number) {
+		const ents = this.entities;
+		if (!this.sprites || !ents) return;
+		const eye = this.camera.position;
+		const list: SpriteSpec[] = [];
+		for (const t of ents.tracks) {
+			if (t.className !== 'CSprite' || !t.model.endsWith('.vmt')) continue;
+			const k = keyAt(t, tick);
+			if (!k || k.removed || k.nodraw || !k.visible) continue;
+			const e = k.extra ?? {};
+			const on = Number(e.m_hAttachedToEntity ?? -1), att = Number(e.m_nAttachment ?? 0);
+			let origin = this.entityPose(t, tick).origin.clone();
+			if (on >= 0 && (on & 2047) !== 2047 && att > 0) {
+				const m = this.attachmentAt(on & 2047, att, tick, false);
+				if (m) origin = new THREE.Vector3().setFromMatrixPosition(m);
+			}
+			const c = Number(e.m_clrRender ?? 0xffffffff) >>> 0;
+			const mode = Number(e.m_nRenderMode ?? 0);
+			list.push({
+				material: t.model.replace(/\.vmt$/i, ''), origin, scale: Number(e.m_flSpriteScale ?? 1), mode,
+				color: [(c & 255) / 255, ((c >>> 8) & 255) / 255, ((c >>> 16) & 255) / 255],
+				alpha: Number(e.m_nBrightness ?? 255) / 255, hdrScale: Number(e.m_flHDRColorScale ?? 1) || 1,
+				seen: mode === 3 || mode === 9 ? this.pointSeen(origin, eye) : 1,
+			});
+		}
+		this.sprites.update(list, this.camera);
 	}
 
 	// Monitor screens (func_monitor, _rt_Camera): the scene as the active
@@ -3715,6 +3752,7 @@ export class View3D {
 			this.updateFog();
 		}
 		this.renderMonitorCamera(r);
+		this.updateSprites(this.meterTick);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
 		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
 		// Everything is drawn linear and unexposed into one HDR frame (as the
