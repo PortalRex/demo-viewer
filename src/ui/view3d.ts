@@ -3779,18 +3779,24 @@ export class View3D {
 			const exposed = this.exposure;
 			// (the game meters the frame as shown: under the screen fade)
 			const fade = this.fadeAt(this.meterTick);
-			const reading = r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px);
-			r.setRenderTarget(frameTarget);
-			for (const o of overlays) o.visible = true;
-			this.sky.visible = skyShown;
-			reading.then(() => {
+			const take = () => {
 				const target = histogramTarget(px, w, h, exposed, fade);
 				if (target) this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
 				if (target && this.meterSnap) {
 					this.exposure = this.meterTarget!;
 					this.meterSnap = false;
 				}
-			}).catch(() => {}).finally(() => { this.meterPending = false; });
+			};
+			// (captures read it at once: a background page's async reads crawl)
+			const reading = this.syncMeter ? null : r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px);
+			if (this.syncMeter) r.readRenderTargetPixels(this.meter, 0, 0, w, h, px);
+			r.setRenderTarget(frameTarget);
+			for (const o of overlays) o.visible = true;
+			this.sky.visible = skyShown;
+			if (!reading) {
+				take();
+				this.meterPending = false;
+			} else reading.then(take).catch(() => {}).finally(() => { this.meterPending = false; });
 		}
 		// (the engine eases in by its rate x 2 x the frame time, at most 1/60 of
 		// the way a frame (1/15 of the histogram's 16 buckets, quartered): at
@@ -3820,6 +3826,8 @@ export class View3D {
 	private meterTick = 0;
 	private meterTickLast = 0;
 	private meterSnap = true;
+	// read the exposure meter synchronously (scripted captures)
+	syncMeter = false;
 	private targetHistory: number[] = [];
 
 	// the fog colour as drawn: three mixes fog in after exposure and output

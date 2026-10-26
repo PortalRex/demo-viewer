@@ -196,11 +196,20 @@ if (import.meta.env.DEV) {
 		if (preroll > 0) {
 			seekTo(Math.max(0, tick - preroll));
 			await new Promise(r => setTimeout(r, 250));
+			// (played through frame by frame; a message yield, not a frame
+			// callback or timer, as a background page gets neither in time)
+			view3d.syncMeter = true;
+			const yieldNow = () => new Promise<void>(r => {
+				const c = new MessageChannel();
+				c.port1.onmessage = () => r();
+				c.port2.postMessage(0);
+			});
 			for (let t = Math.max(0, tick - preroll); t <= tick; t += 2) {
 				seekTo(t);
-				await new Promise(r => requestAnimationFrame(r));
+				await yieldNow();
 			}
 			seekTo(tick);
+			view3d.syncMeter = false;
 		}
 		const url = view3d.snapshot(width, height, undefined, undefined, 'image/jpeg');
 		await fetch(`/__shot?name=${name}&ext=jpg`, {method: 'POST', body: url});
