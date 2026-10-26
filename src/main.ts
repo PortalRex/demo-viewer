@@ -436,6 +436,23 @@ $('titles-toggle').onclick = () => {
 	$('titles-toggle').classList.toggle('on', titlesShown);
 	render();
 };
+// the co-op partner's view in the corner of the Eyes view (autorender's
+// renders show it); remembered per browser
+let pipShown = true;
+try {
+	pipShown = localStorage.getItem('pip') !== 'off';
+} catch {}
+view3d.pipEnabled = pipShown;
+$('pip-toggle').classList.toggle('on', pipShown);
+$('pip-toggle').onclick = () => {
+	pipShown = !pipShown;
+	try {
+		localStorage.setItem('pip', pipShown ? 'on' : 'off');
+	} catch {}
+	$('pip-toggle').classList.toggle('on', pipShown);
+	view3d.pipEnabled = pipShown;
+	render();
+};
 let hudText: HudText | null = null;
 function showHudText(tick: number) {
 	const hud = viewMode === '3d' ? view3d.hudMessages() : null;
@@ -594,7 +611,7 @@ $('view-mode').onclick = e => {
 	$('path').hidden = is3d;
 	$('view3d').hidden = !is3d;
 	$('cam-mode').hidden = !is3d;
-	if (!is3d) $('view-as').hidden = true;
+	if (!is3d) $('view-as').hidden = $('pip-toggle').hidden = true;
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
 	$('path-line').hidden = !is3d;
@@ -606,7 +623,7 @@ $('view-mode').onclick = e => {
 function showViewAs() {
 	const box = $('view-as');
 	const players = view3d.players();
-	box.hidden = players.length < 2;
+	box.hidden = $('pip-toggle').hidden = players.length < 2;
 	box.innerHTML = '';
 	for (const p of players) {
 		const b = document.createElement('button');

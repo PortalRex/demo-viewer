@@ -56,7 +56,9 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 		// challenge mode: its type, and the stats its HUD shows
 		'localdata.m_iBonusChallenge', 'm_iBonusChallenge', 'm_StatsThisLevel.iNumPortalsPlaced', 'm_StatsThisLevel.fNumSecondsTaken',
 		// the funnel they're in (the recording player's only)
-		'm_PortalLocal.m_hTractorBeam'],
+		'm_PortalLocal.m_hTractorBeam',
+		// taunts (the partner view: a taunt's camera, or a team taunt)
+		'm_Shared.m_nPlayerCond', 'm_bTauntRemoteView', 'm_vecRemoteViewAngles', 'm_fTauntCameraDistance', 'm_nTeamTauntState'],
 	// Bink movie screens: the vgui screen (a panel this wide and tall at its
 	// origin) and the movie display it shows (elevator signs)
 	CVGuiScreen: ['m_flWidth', 'm_flHeight', 'm_nPanelName', 'm_fScreenFlags', 'm_nAttachmentIndex', 'm_nOverlayMaterial'],

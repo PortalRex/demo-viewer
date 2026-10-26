@@ -39,6 +39,7 @@ export type CameraMode = 'eyes' | 'orbit' | 'free';
 // Portal 2's 90° horizontal FOV at 4:3, as a vertical FOV (widescreen keeps it)
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
+const PIP_SCALE = 0.3, PIP_INSET = 25 / 720;  // ss_pipscale, ss_pip_right/bottom_offset (at autorender's 720p)
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 // The view model's field of view: Portal's client mode takes cl_viewmodelfov
 // (50 by default, read from client.dll; viewmodel_fov is the unused generic
@@ -771,6 +772,19 @@ export class View3D {
 	private eyeAngles: number[] = [0, 0, 0];
 	// the player the camera follows (co-op: either one); null = the recording player
 	private followed: EntityTrack | null = null;
+	// The partner's view in the corner (co-op in Eyes view): autorender's
+	// renders hold remote_view with cl_enable_remote_splitscreen, which shows
+	// the other player as picture in picture, 0.3 of the screen and 25
+	// pixels (of 720) in from the bottom right. A taunting partner is shown
+	// from their taunt camera; none while they taunt for the remote view or
+	// the recording player has a team taunt partner (C_Portal_Player::CreateMove)
+	pipEnabled = true;
+	private pip: {taunt: boolean} | null = null;
+	private pipShown = false;
+	private pipFrame: THREE.WebGLRenderTarget | null = null;
+	private pipParticles = new Set<string>();
+	// (each view meters its own exposure)
+	private pipMeter = {exposure: 1, meterTarget: null as number | null, meterPending: false, meterTickLast: 0, meterSnap: true, targetHistory: [] as number[], lastRender: 0, meterCount: 0};
 	// free camera: held movement keys, view angles (degrees), drag state
 	private freeKeys = new Set<string>();
 	private freeAngles = [0, 0];  // pitch, yaw
@@ -3051,7 +3065,14 @@ export class View3D {
 				return new Map([[0, cp ?? new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1))]]);
 			}, {fp, size: fp ? VM_PARTICLE_SCALE : 1, live: follow});
 		});
-		for (const key of this.particleRuns.keys()) if (!seen.has(key)) this.particleRuns.delete(key);
+		// (the partner's view keeps what it shows too: dropped and started over
+		// every frame otherwise)
+		if (this.pip) {
+			this.pipParticles = seen;
+			return;
+		}
+		const pip = this.pipShown ? this.pipParticles : null;
+		for (const key of this.particleRuns.keys()) if (!seen.has(key) && !pip?.has(key)) this.particleRuns.delete(key);
 	}
 
 	// portal colours for particles: single player blue/orange, co-op by team
@@ -3946,6 +3967,8 @@ export class View3D {
 
 	private frameNumber = 0;
 	update(view: ViewState | null, tick: number) {
+		// (the partner's view first, so what's left set up is the main view's)
+		if (!this.pip) this.pipShown = this.updatePip(view, tick);
 		this.meterTick = tick;
 		this.frameNumber++;
 		this.seenCache.clear();
@@ -3990,7 +4013,7 @@ export class View3D {
 				}
 				// the recording player (and their gun) are the camera in Eyes view
 				const fp = this.followTrack;
-				if (show && this.mode === 'eyes' && (t === fp || (t.className === 'CWeaponPortalgun' && fp && k?.parent === fp.index))) o.visible = false;
+				if (show && this.mode === 'eyes' && !this.pip?.taunt && (t === fp || (t.className === 'CWeaponPortalgun' && fp && k?.parent === fp.index))) o.visible = false;
 				if (show && k) {
 					const anim = o.userData.anim as AnimatedModel | undefined;
 					if (anim && k.anim) {
@@ -4071,6 +4094,7 @@ export class View3D {
 				const fwd = new THREE.Vector3(1, 0, 0).applyQuaternion(q), up = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
 				const right = fwd.clone().cross(up);
 				this.camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, fwd.negate()));
+				if (this.pip?.taunt && pk) this.tauntCamera(eye, ang as Vec3, pk);
 			} else if (this.mode === 'free') {
 				// the free camera goes where the user takes it
 			} else if (this.controls) {
@@ -4371,6 +4395,73 @@ export class View3D {
 		}
 		return {rgb: rgb.map(v => v / active.length / 255), alpha: alpha / 255, modulate};
 	}
+	// the partner's view into its corner of the screen: exposed by its own
+	// meter, without the main view's bloom and screen fade
+	private compositePip(r: THREE.WebGLRenderer) {
+		const css = r.getSize(new THREE.Vector2());
+		const w = css.x * PIP_SCALE, h = css.y * PIP_SCALE, inset = css.y * PIP_INSET;
+		const u = this.composite.uniforms;
+		u.frame.value = this.pipFrame!.texture;
+		u.exposure.value = this.pipMeter.exposure;
+		u.bloomAmount.value = 0;
+		u.fade.value.set(0, 0, 0, 0);
+		const auto = r.autoClear;
+		r.autoClear = false;
+		r.setViewport(css.x - w - inset, inset, w, h);
+		r.render(this.compositeScene, this.compositeCam);
+		r.setViewport(0, 0, css.x, css.y);
+		r.autoClear = auto;
+	}
+
+	// Draws the partner's view (see pipEnabled) when it's due; true if it was
+	private updatePip(view: ViewState | null, tick: number): boolean {
+		const ents = this.entities, me = ents?.player;
+		if (!this.pipEnabled || this.mode !== 'eyes' || this.followed || !ents || !me) return false;
+		const mk = keyAt(me, tick);
+		const partner = ents.tracks.find(t => {
+			const k = t.className === 'CPortal_Player' && t.index !== me.index ? keyAt(t, tick) : undefined;
+			return !!k && !k.removed && k.visible;
+		});
+		const pk = partner && keyAt(partner, tick);
+		if (!mk || !pk) return false;
+		const taunting = (Number(pk.extra?.['m_Shared.m_nPlayerCond'] ?? 0) & 1) !== 0;
+		if (Number(mk.extra?.m_nTeamTauntState ?? 0) >= 2 || (taunting && Number(pk.extra?.m_bTauntRemoteView ?? 0))) return false;
+		this.swapMeter();
+		// (read at once: a later read would land in the main view's meter)
+		const sync = this.syncMeter;
+		this.syncMeter = true;
+		this.followed = partner!;
+		this.pip = {taunt: taunting};
+		try {
+			this.update(view, tick);
+		} finally {
+			this.pip = null;
+			this.followed = null;
+			this.syncMeter = sync;
+			this.swapMeter();
+		}
+		return true;
+	}
+	private swapMeter() {
+		const self = this as unknown as Record<string, unknown>, m = this.pipMeter as Record<string, unknown>;
+		for (const k of Object.keys(m)) [self[k], m[k]] = [m[k], self[k]];
+	}
+
+	// A taunting player's camera, as the picture in picture shows it
+	// (C_Portal_Player::CalcView): looking at their eye from the taunt
+	// camera's distance, turned by their remote view angles, pulled in where
+	// the world's in the way (by a 9 unit hull, here a ray 9 units short)
+	private tauntCamera(eye: THREE.Vector3, ang: Vec3, k: EntityKey) {
+		const rv = (k.extra?.m_vecRemoteViewAngles as number[] | undefined) ?? [0, 0, 0];
+		const dist = Number(k.extra?.m_fTauntCameraDistance ?? 0) || 0;
+		const q = new THREE.Quaternion().setFromEuler(toEuler([-rv[0], ang[1] + rv[1], 0]));
+		const fwd = new THREE.Vector3(1, 0, 0).applyQuaternion(q), up = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+		let reach = dist;
+		const hit = dist > 0 ? this.collision?.raycastFirst(new THREE.Ray(eye.clone(), fwd.clone().negate()), THREE.DoubleSide) : null;
+		if (hit) reach = Math.max(0, Math.min(dist, hit.distance - 9));
+		this.camera.position.copy(eye).addScaledVector(fwd, -reach);
+		this.camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(fwd.clone().cross(up), up, fwd.clone().negate()));
+	}
 	private compositeScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.composite), {frustumCulled: false}));
 	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
@@ -4386,10 +4477,15 @@ export class View3D {
 		// is still compiling sits this frame out (the meter's too), rather
 		// than the page stalling until the driver has built it
 		const size = r.getDrawingBufferSize(new THREE.Vector2());
-		if (!this.frame) {
-			this.frame = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 4});
-		} else if (this.frame.width !== size.x || this.frame.height !== size.y) this.frame.setSize(size.x, size.y);
-		r.setRenderTarget(this.frame);
+		// (the partner's view: drawn small, into a frame of its own)
+		if (this.pip) size.set(Math.max(1, Math.round(size.x * PIP_SCALE)), Math.max(1, Math.round(size.y * PIP_SCALE)));
+		let frame = this.pip ? this.pipFrame : this.frame;
+		if (!frame) {
+			frame = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 4});
+			if (this.pip) this.pipFrame = frame;
+			else this.frame = frame;
+		} else if (frame.width !== size.x || frame.height !== size.y) frame.setSize(size.x, size.y);
+		r.setRenderTarget(frame);
 		if (this.compileNeeded) {
 			this.compileNeeded = false;
 			for (const m of r.compile(this.scene, this.camera)) this.compiling.add(m);
@@ -4404,7 +4500,7 @@ export class View3D {
 			this.meterExposure(r, waiting.length === 0);
 			this.updateFog();
 		}
-		this.renderMonitorCamera(r);
+		if (!this.pip) this.renderMonitorCamera(r);
 		this.updateSprites(this.meterTick);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
 		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
@@ -4413,7 +4509,7 @@ export class View3D {
 		// portal views and the meter are, so each material compiles once),
 		// then exposed, clamped and encoded to the screen by a final pass
 		this.renderScene(r);
-		if (this.mode === 'eyes' && this.vmShown) {
+		if (this.mode === 'eyes' && this.vmShown && !this.pip?.taunt) {
 			this.vmCam.position.copy(this.camera.position);
 			this.vmCam.quaternion.copy(this.camera.quaternion);
 			this.vmCam.aspect = this.camera.aspect;
@@ -4433,14 +4529,20 @@ export class View3D {
 			this.recheck = undefined;
 			this.onLoaded();
 		}, 30);
+		if (this.pip) {
+			// (put on screen with the main view's, below)
+			r.setRenderTarget(null);
+			return;
+		}
 		r.setRenderTarget(null);
-		this.composite.uniforms.bloom.value = this.bloom.render(r, this.frame, this.exposure);
+		this.composite.uniforms.bloom.value = this.bloom.render(r, frame, this.exposure);
 		this.composite.uniforms.bloomAmount.value = this.bloomOverride ?? this.bloomScale;
 		r.setRenderTarget(null);
-		this.composite.uniforms.frame.value = this.frame.texture;
+		this.composite.uniforms.frame.value = frame.texture;
 		this.composite.uniforms.exposure.value = this.exposure;
 		this.screenFade(this.meterTick);
 		r.render(this.compositeScene, this.compositeCam);
+		if (this.pipShown && this.pipFrame && this.mode === 'eyes') this.compositePip(r);
 		if (saved) {
 			this.camera.position.copy(saved);
 			this.camera.updateMatrixWorld();
