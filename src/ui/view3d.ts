@@ -490,7 +490,7 @@ class MaterialLibrary {
 			mat.blendEquation = THREE.AddEquation;
 			mat.blendSrc = THREE.DstColorFactor;
 			mat.blendDst = THREE.SrcColorFactor;
-			mat.defines = {...mat.defines, REFRACT_TINT: '', REFRACT_UNSCALED: ''};
+			mat.defines = {...mat.defines, REFRACT_TINT: '', DECAL_MODULATE: ''};
 			mat.needsUpdate = true;
 			this.onChange();
 		});

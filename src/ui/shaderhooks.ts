@@ -706,6 +706,16 @@ const REFRACT_FRAGMENT = `
 #elif defined(REFRACT_TINT)
 	outgoingLight = diffuseColor.rgb;
 #endif
+#ifdef DECAL_MODULATE
+	{
+		// (DecalModulate: the game multiplies its gamma-space frame by twice
+		// the texture, mid grey leaving it be; in this linear frame that's
+		// (2 x texture)^2.2, halved for the blend's own x2)
+		vec3 lin = outgoingLight;
+		vec3 raw = mix(lin * 12.92, 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, lin));
+		outgoingLight = 0.5 * pow(2.0 * raw, vec3(2.2));
+	}
+#endif
 #ifdef REFRACT_UNSCALED
 	outgoingLight /= sceneExposure;
 #endif
@@ -907,7 +917,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + WATER_ALBEDO + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.WORLD_SELFILLUM !== undefined ? '+wglow' : '') + (material.defines?.BLEND2 !== undefined ? '+blend2' + (material.defines.BLEND2_MODULATE !== undefined ? 'm' : '') : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DECAL_MODULATE !== undefined ? '+modulate' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.WORLD_SELFILLUM !== undefined ? '+wglow' : '') + (material.defines?.BLEND2 !== undefined ? '+blend2' + (material.defines.BLEND2_MODULATE !== undefined ? 'm' : '') : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);
