@@ -57,6 +57,10 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 		'localdata.m_iBonusChallenge', 'm_iBonusChallenge', 'm_StatsThisLevel.iNumPortalsPlaced', 'm_StatsThisLevel.fNumSecondsTaken',
 		// the funnel they're in (the recording player's only)
 		'm_PortalLocal.m_hTractorBeam'],
+	// Bink movie screens: the vgui screen (a panel this wide and tall at its
+	// origin) and the movie display it shows (elevator signs)
+	CVGuiScreen: ['m_flWidth', 'm_flHeight', 'm_nPanelName', 'm_fScreenFlags', 'm_nAttachmentIndex', 'm_nOverlayMaterial'],
+	CMovieDisplay: ['m_bEnabled', 'm_bLooping', 'm_szMovieFilename', 'm_szGroupName', 'm_bStretchToFill', 'm_bForcedSlave', 'm_bUseCustomUVs', 'm_flUMin', 'm_flUMax', 'm_flVMin', 'm_flVMax'],
 	// which frame an overlay's texture shows (indicator lights' two colours)
 	CInfoOverlayAccessor: ['m_iOverlayID', 'm_iTextureFrameIndex'],
 	CFogController: ['m_fog.enable', 'm_fog.colorPrimary', 'm_fog.start', 'm_fog.end', 'm_fog.maxdensity', 'm_fog.HDRColorScale'],

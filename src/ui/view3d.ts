@@ -25,6 +25,7 @@ import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
 import {PaintBlobs, type Sprayer, type BlobShape} from './paintblobs.ts';
 import {Ropes, type RopeSpec} from './ropes.ts';
+import {MovieScreens, type ScreenSpec} from './movies.ts';
 import {Sprites, type SpriteSpec} from './sprites.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt, type ScreenFade} from '../net/entities.ts';
@@ -1119,6 +1120,13 @@ export class View3D {
 		if (this.sprites) this.scene.remove(this.sprites.group);
 		this.sprites = this.effects ? new Sprites(this.effects) : null;
 		if (this.sprites) this.scene.add(this.sprites.group);
+		this.movies?.dispose();
+		if (this.movies) this.scene.remove(this.movies.group);
+		this.movies = files ? new MovieScreens(files) : null;
+		if (this.movies) {
+			this.movies.onChange = () => this.loaded();
+			this.scene.add(this.movies.group);
+		}
 		this.loadSky(bsp, token);
 		this.worldFog = this.scene.fog as THREE.Fog | null;
 
@@ -2185,6 +2193,61 @@ export class View3D {
 			});
 		}
 		this.paintBlobs.update(sprayers, tick * this.interval);
+	}
+
+	// Bink movie screens: each vgui screen on a movie display that's on, its
+	// movie (or its group master's) from when that started playing
+	private movies: MovieScreens | null = null;
+	private movieStarts = new WeakMap<EntityTrack, {tick: number; at: number}>();
+	private updateMovies(tick: number) {
+		if (!this.movies) return;
+		const ents = this.entities!;
+		const displays = new Map<number, {t: EntityTrack; k: EntityKey}>();
+		for (const t of ents.tracks) {
+			if (t.className !== 'CMovieDisplay') continue;
+			const k = keyAt(t, tick);
+			if (k && !k.removed && k.extra) displays.set(t.index, {t, k});
+		}
+		const file = (k: EntityKey) => String(k.extra?.m_szMovieFilename ?? '').replace(/\\/g, '/').toLowerCase();
+		const masters = new Map<string, {t: EntityTrack; k: EntityKey}>();
+		for (const d of displays.values()) if (!Number(d.k.extra!.m_bForcedSlave) && /\.bik$/.test(file(d.k))) masters.set(String(d.k.extra!.m_szGroupName ?? ''), d);
+		// (a movie starts over when its display is turned on or given another movie)
+		const startOf = (t: EntityTrack) => {
+			let c = this.movieStarts.get(t);
+			if (c?.tick === tick) return c.at;
+			let at = 0, on = false, name = '';
+			for (const k of t.keys) {
+				if (k.tick > tick) break;
+				const now = Number(k.extra?.m_bEnabled) === 1, f = file(k);
+				if ((now && !on) || (now && f !== name)) at = k.tick;
+				on = now;
+				name = f;
+			}
+			this.movieStarts.set(t, c = {tick, at});
+			return c.at;
+		};
+		const specs: ScreenSpec[] = [];
+		for (const t of ents.tracks) {
+			if (t.className !== 'CVGuiScreen') continue;
+			const k = keyAt(t, tick);
+			const d = k?.parent !== undefined ? displays.get(k.parent) : undefined;
+			if (!k || !d || Number(d.k.extra!.m_bEnabled) !== 1) continue;
+			const src = Number(d.k.extra!.m_bForcedSlave) ? masters.get(String(d.k.extra!.m_szGroupName ?? '')) : d;
+			if (!src || !/\.bik$/.test(file(src.k))) continue;
+			const m = this.worldMatrix(t, k, tick, 0);
+			if (!m) continue;
+			const width = Number(k.extra?.m_flWidth ?? 0), height = Number(k.extra?.m_flHeight ?? 0);
+			const ll = new THREE.Vector3().setFromMatrixPosition(m);
+			const forward = new THREE.Vector3().setFromMatrixColumn(m, 0).normalize(), left = new THREE.Vector3().setFromMatrixColumn(m, 1).normalize();
+			const ul = ll.clone().addScaledVector(left, height), ur = ul.clone().addScaledVector(forward, width);
+			const e = d.k.extra!;
+			const custom = Number(e.m_bUseCustomUVs) === 1;
+			specs.push({
+				key: `${t.index}:${t.keys[0].tick}`, file: file(src.k), start: startOf(src.t) * this.interval, looping: Number(src.k.extra!.m_bLooping) === 1,
+				corners: [ll, ul, ur], uv: custom ? [Number(e.m_flUMin), Number(e.m_flUMax), Number(e.m_flVMin), Number(e.m_flVMax)] : [0, 1, 0, 1],
+			});
+		}
+		this.movies.update(specs, tick * this.interval);
 	}
 
 	// particle systems drawn as blobs (render_blobs: gel flowing through the
@@ -3819,6 +3882,7 @@ export class View3D {
 		if (ents) this.updateTurretLasers(tick);
 		if (ents) this.updatePaintBlobs(tick);
 		if (ents) this.updateRopes(tick);
+		if (ents) this.updateMovies(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
