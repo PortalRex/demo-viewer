@@ -784,8 +784,12 @@ export class View3D {
 	private pipShown = false;
 	private pipFrame: THREE.WebGLRenderTarget | null = null;
 	private pipParticles = new Set<string>();
-	// (each view meters its own exposure)
-	private pipMeter = {exposure: 1, meterTarget: null as number | null, meterPending: false, meterTickLast: 0, meterSnap: true, targetHistory: [] as number[], lastRender: 0, meterCount: 0};
+	// (each view meters its own exposure, and has its own portal and water
+	// views: drawn at its size, and not reallocated every frame between them)
+	private pipMeter = {
+		exposure: 1, meterTarget: null as number | null, meterPending: false, meterTickLast: 0, meterSnap: true, targetHistory: [] as number[], lastRender: 0, meterCount: 0,
+		portalTargets: new Map<THREE.Object3D, THREE.WebGLRenderTarget>(), waterTargets: new Map<number, THREE.WebGLRenderTarget>(), refractTargets: new Map<number, THREE.WebGLRenderTarget>(),
+	};
 	// free camera: held movement keys, view angles (degrees), drag state
 	private freeKeys = new Set<string>();
 	private freeAngles = [0, 0];  // pitch, yaw
@@ -1042,15 +1046,17 @@ export class View3D {
 		this.library?.dispose();
 		this.lightTex?.dispose();
 		for (const t of this.bumpTex) t.dispose();
-		for (const rt of this.portalTargets.values()) rt.dispose();
-		this.portalTargets.clear();
-		for (const rt of this.waterTargets.values()) rt.dispose();
-		for (const rt of this.refractTargets.values()) {
-			rt.depthTexture?.dispose();
-			rt.dispose();
+		for (const owner of [{portalTargets: this.portalTargets, waterTargets: this.waterTargets, refractTargets: this.refractTargets}, this.pipMeter]) {
+			for (const rt of owner.portalTargets.values()) rt.dispose();
+			owner.portalTargets.clear();
+			for (const rt of owner.waterTargets.values()) rt.dispose();
+			for (const rt of owner.refractTargets.values()) {
+				rt.depthTexture?.dispose();
+				rt.dispose();
+			}
+			owner.refractTargets.clear();
+			owner.waterTargets.clear();
 		}
-		this.refractTargets.clear();
-		this.waterTargets.clear();
 		this.waterMeshes = [];
 		this.accessedOverlays.clear();
 		this.particleRenderer?.dispose();
@@ -2612,11 +2618,17 @@ export class View3D {
 		return w > 0 && h > 0 ? {x, y, w, h} : null;
 	}
 
+	// the size of what's being drawn: the frame (the partner's is smaller)
+	private viewSize(r: THREE.WebGLRenderer): THREE.Vector2 {
+		const t = r.getRenderTarget();
+		return t ? new THREE.Vector2(t.width, t.height) : r.getDrawingBufferSize(new THREE.Vector2());
+	}
+
 	// what each visible, linked portal shows: the scene from the camera moved
 	// through the portal pair, clipped at the exit portal
 	private renderPortalViews(r: THREE.WebGLRenderer) {
 		const frameTarget = r.getRenderTarget();
-		const size = r.getDrawingBufferSize(new THREE.Vector2());
+		const size = this.viewSize(r);
 		const dither = ditherUniforms.ditherOn.value;
 		ditherUniforms.ditherOn.value = 0;
 		const seen = new Set<THREE.Object3D>();
@@ -4505,6 +4517,12 @@ export class View3D {
 		this.syncMeter = true;
 		this.followed = partner!;
 		this.pip = {taunt: taunting};
+		// (what's placed before the camera in an update (doorway fade brushes,
+		// beams turned to it) takes the camera where it is: the partner's eye
+		// for theirs, and the main view's own back for it)
+		const saved = [this.camera.position.clone(), this.camera.quaternion.clone()] as const;
+		this.camera.position.copy(this.entityPose(partner!, tick).origin);
+		this.camera.position.z += pk.eyeZ ?? DEFAULT_EYE;
 		try {
 			this.update(view, tick);
 		} finally {
@@ -4512,6 +4530,8 @@ export class View3D {
 			this.followed = null;
 			this.syncMeter = sync;
 			this.swapMeter();
+			this.camera.position.copy(saved[0]);
+			this.camera.quaternion.copy(saved[1]);
 		}
 		return true;
 	}
@@ -4749,7 +4769,7 @@ export class View3D {
 		if (!planes.size) return;
 
 		const frameTarget = r.getRenderTarget();
-		const size = r.getDrawingBufferSize(new THREE.Vector2()).multiplyScalar(0.5).floor();
+		const size = this.viewSize(r).multiplyScalar(0.5).floor();
 		const hidden = ([this.player, this.pathLine, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
 			.filter((o): o is THREE.Object3D => !!o && o.visible);
 		for (const o of hidden) o.visible = false;
@@ -4827,7 +4847,7 @@ export class View3D {
 		if (!planes.size) return;
 
 		const frameTarget = r.getRenderTarget();
-		const size = r.getDrawingBufferSize(new THREE.Vector2()).multiplyScalar(0.5).floor();
+		const size = this.viewSize(r).multiplyScalar(0.5).floor();
 		const hidden = ([this.player, this.pathLine, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
 			.filter((o): o is THREE.Object3D => !!o && o.visible);
 		for (const o of hidden) o.visible = false;
