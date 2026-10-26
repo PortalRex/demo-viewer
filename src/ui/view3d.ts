@@ -37,13 +37,16 @@ export type CameraMode = 'eyes' | 'orbit' | 'free';
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
-// viewmodel_fov 54 (Portal 2's default, read from client.dll; horizontal at 4:3), as a vertical angle
-const VIEWMODEL_FOV = 2 * Math.atan(Math.tan(27 * Math.PI / 180) * 3 / 4) * 180 / Math.PI;
+// The view model's field of view: Portal's client mode takes cl_viewmodelfov
+// (50 by default, read from client.dll; viewmodel_fov is the unused generic
+// one), horizontal at 4:3; as a vertical angle
+const VIEWMODEL_HALF_FOV = 25 * Math.PI / 180;
+const VIEWMODEL_FOV = 2 * Math.atan(Math.tan(VIEWMODEL_HALF_FOV) * 3 / 4) * 180 / Math.PI;
 // First-person particles: the engine draws them in the world's view (fov
 // 90), only moving the view model's attachments to where they show in its
 // narrower view (FormatViewModelAttachment); drawn here with the view
 // model's camera, so their sprites are scaled by the ratio of the two
-const VM_PARTICLE_SCALE = Math.tan(27 * Math.PI / 180) / Math.tan(45 * Math.PI / 180);
+const VM_PARTICLE_SCALE = Math.tan(VIEWMODEL_HALF_FOV) / Math.tan(45 * Math.PI / 180);
 
 // entity classes that aren't worth a box
 const HIDDEN_CLASSES = new Set([
