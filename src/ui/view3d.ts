@@ -1014,7 +1014,7 @@ export class View3D {
 		this.pointLight.clear();
 		this.particleLib.lightAt = point => this.lightForPoint(point);
 		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
-		this.particleRenderer.visibility = (point, eye) => this.pointSeen(point, eye);
+		this.particleRenderer.visibility = (point, eye, radius) => this.pointSeen(point, eye, radius);
 		this.scene.add(this.particleRenderer.group);
 		if (this.vmParticleRenderer) {
 			this.vmParticleRenderer.clear();
@@ -1958,7 +1958,7 @@ export class View3D {
 				material: t.model.replace(/\.vmt$/i, ''), origin, scale: Number(e.m_flSpriteScale ?? 1), mode,
 				color: [(c & 255) / 255, ((c >>> 8) & 255) / 255, ((c >>> 16) & 255) / 255],
 				alpha: Number(e.m_nBrightness ?? 255) / 255, hdrScale: Number(e.m_flHDRColorScale ?? 1) || 1,
-				seen: mode === 3 || mode === 9 ? this.pointSeen(origin, eye) : 1,
+				seen: mode === 3 || mode === 9 ? this.pointSeen(origin, eye, Number(e.m_flGlowProxySize ?? 2) || 2) : 1,
 			});
 		}
 		this.sprites.update(list, this.camera);
@@ -2063,32 +2063,54 @@ export class View3D {
 	// (asked again within a frame for the same point: particles are drawn
 	// again for each portal view)
 	private seenCache = new Map<string, number>();
-	private pointSeen(point: THREE.Vector3, eye: THREE.Vector3): number {
-		const key = `${point.x.toFixed(1)},${point.y.toFixed(1)},${point.z.toFixed(1)}|${eye.x.toFixed(1)},${eye.y.toFixed(1)},${eye.z.toFixed(1)}`;
+	// How much of a glow's proxy the eye sees, as the engine's pixel
+	// visibility queries measure it: a disc `radius` across at the point,
+	// facing the eye, the fraction of it nothing's in front of (sampled: its
+	// centre and a ring)
+	private pointSeen(point: THREE.Vector3, eye: THREE.Vector3, radius: number): number {
+		const key = `${point.x.toFixed(1)},${point.y.toFixed(1)},${point.z.toFixed(1)}|${eye.x.toFixed(1)},${eye.y.toFixed(1)},${eye.z.toFixed(1)}|${radius}`;
 		let seen = this.seenCache.get(key);
 		if (seen === undefined) {
-			seen = this.pointSeenNow(point, eye);
+			seen = this.discSeen(point, eye, radius);
 			this.seenCache.set(key, seen);
 		}
 		return seen;
 	}
-	private pointSeenNow(point: THREE.Vector3, eye: THREE.Vector3): number {
+	private discSeen(point: THREE.Vector3, eye: THREE.Vector3, radius: number): number {
 		const d = point.distanceTo(eye);
 		if (d < 2) return 1;
+		const dir = point.clone().sub(eye).divideScalar(d);
+		const side = new THREE.Vector3(0, 0, 1).cross(dir);
+		if (side.lengthSq() < 1e-6) side.set(1, 0, 0);
+		side.normalize();
+		const up = dir.clone().cross(side);
+		const RING = 8;
+		let seen = 0;
+		for (let i = 0; i <= RING; i++) {
+			const a = i / RING * Math.PI * 2;
+			const r = i === 0 ? 0 : radius * 0.7;
+			const p = point.clone().addScaledVector(side, Math.cos(a) * r).addScaledVector(up, Math.sin(a) * r);
+			if (this.pointSeenNow(p, eye)) seen++;
+		}
+		return seen / (RING + 1);
+	}
+	private pointSeenNow(point: THREE.Vector3, eye: THREE.Vector3): boolean {
+		const d = point.distanceTo(eye);
+		if (d < 1) return true;
 		const dir = point.clone().sub(eye).divideScalar(d);
 		const ray = this.seenRay;
 		ray.set(eye, dir);
 		ray.near = 0;
-		ray.far = d - 1;  // (the proxy's own size)
+		ray.far = d - 0.1;
 		const world = this.collision?.raycastFirst(ray.ray, THREE.DoubleSide);
-		if (world && world.distance < d - 1) return 0;
+		if (world && world.distance < ray.far) return false;
 		// (only what's drawn: shown entities, and their shown parts)
 		const shown = (o: THREE.Object3D) => {
 			for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false;
 			return true;
 		};
 		const candidates = [this.propGroup, ...this.entityGroup.children.filter(o => o.visible)];
-		return ray.intersectObjects(candidates, true).some(h => shown(h.object)) ? 0 : 1;
+		return !ray.intersectObjects(candidates, true).some(h => shown(h.object));
 	}
 
 	// the matrix taking things in front of portal `from` to the same place
@@ -2783,10 +2805,20 @@ export class View3D {
 			if (!fp && eyes && owner === me && owner !== undefined) return;
 			// runs until the server stops that entity's effects
 			const stop = ents.effects.find(s => s.name === 'ParticleEffectStop' && s.entity === fx.entity && s.tick > fx.tick)?.tick ?? Infinity;
+			// where it's attached (m_nDamageType holds the attach type): at an
+			// attachment, or following the entity's origin (a lasered cube's
+			// glow), these taken afresh each frame; else where it was sent from
+			const attach = fx.damageType;
+			const follow = attach === 1 || attach === 4;
 			run(`fx:${n}`, name, fx.tick, stop, () => {
-				const cp = this.attachmentAt(fx.entity, fx.attachment, tick, fp) ?? new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1));
-				return new Map([[0, cp]]);
-			}, {fp, size: fp ? VM_PARTICLE_SCALE : 1});
+				let cp = this.attachmentAt(fx.entity, fx.attachment, tick, fp);
+				if (!cp && attach === 1) {
+					const t = (this.tracksByIndex.get(fx.entity) ?? []).find(c => keyAt(c, tick));
+					const k = t && keyAt(t, tick);
+					cp = t && k ? this.worldMatrix(t, k, tick, 0) : null;
+				}
+				return new Map([[0, cp ?? new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1))]]);
+			}, {fp, size: fp ? VM_PARTICLE_SCALE : 1, live: follow});
 		});
 		for (const key of this.particleRuns.keys()) if (!seen.has(key)) this.particleRuns.delete(key);
 	}

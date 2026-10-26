@@ -955,7 +955,7 @@ export class ParticleRenderer {
 	private meshes = new Map<string, THREE.Mesh>();
 	// how much of a point the camera sees (0..1), for renderers with a
 	// visibility proxy; everything counts as seen without it
-	visibility: ((point: THREE.Vector3, camera: THREE.Vector3) => number) | null = null;
+	visibility: ((point: THREE.Vector3, camera: THREE.Vector3, radius: number) => number) | null = null;
 
 	constructor(files: GameFiles, materials: Materials, textures: TextureCache) {
 		this.files = files;
@@ -1064,7 +1064,7 @@ export class ParticleRenderer {
 				let visRadius = 1, visAlpha = 1;
 				const proxy = num(r, 'Visibility Proxy Input Control Point Number', -1);
 				if (proxy >= 0 && this.visibility) {
-					const seen = this.visibility(inst.cpPos(proxy), camPos);
+					const seen = this.visibility(inst.cpPos(proxy), camPos, num(r, 'Visibility Proxy Radius', 1));
 					const i0 = num(r, 'Visibility input minimum', 0), i1 = num(r, 'Visibility input maximum', 1);
 					const t = Math.min(1, Math.max(0, (seen - i0) / ((i1 - i0) || 1)));
 					const lerp = (a: string, da: number, b: string, db: number) => num(r, a, da) + (num(r, b, db) - num(r, a, da)) * t;
