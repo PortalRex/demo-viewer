@@ -27,6 +27,7 @@ import {readVhv} from '../game/vhv.ts';
 import {PaintBlobs, type Sprayer, type BlobShape} from './paintblobs.ts';
 import {Ropes, type RopeSpec} from './ropes.ts';
 import {MovieScreens, type ScreenSpec} from './movies.ts';
+import {ProgressSigns} from './signs.ts';
 import {Sprites, type SpriteSpec} from './sprites.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt, type ScreenFade, type HudMessage} from '../net/entities.ts';
@@ -1231,6 +1232,8 @@ export class View3D {
 			this.movies.onChange = () => this.loaded();
 			this.scene.add(this.movies.group);
 		}
+		this.signs = files ? new ProgressSigns(files) : null;
+		if (this.signs) this.signs.onChange = () => this.loaded();
 		this.loadSky(bsp, token);
 		this.worldFog = this.scene.fog as THREE.Fog | null;
 
@@ -2334,6 +2337,7 @@ export class View3D {
 	// Bink movie screens: each vgui screen on a movie display that's on, its
 	// movie (or its group master's) from when that started playing
 	private movies: MovieScreens | null = null;
+	private signs: ProgressSigns | null = null;
 	private movieStarts = new WeakMap<EntityTrack, {tick: number; at: number}>();
 	private updateMovies(tick: number) {
 		if (!this.movies) return;
@@ -2377,6 +2381,13 @@ export class View3D {
 			const k = keyAt(t, tick);
 			// an indicator panel's: its check (or cross), or while it counts
 			// down its dial's lit background (the dial's slices aren't drawn)
+			// a chamber sign (sp_progress_sign), while it's active
+			if (k && ents.panelNames[Number(k.extra?.m_nPanelName ?? -1)] === 'sp_progress_sign') {
+				const m = (Number(k.extra?.m_fScreenFlags ?? 0) & 1) && this.bsp ? this.worldMatrix(t, k, tick, 0) : null;
+				const canvas = m ? this.signs?.sign(this.bsp!.name) : null;
+				if (m && canvas) specs.push({key: `${t.index}:${t.keys[0].tick}`, file: '', canvas, start: 0, looping: false, corners: corners(m, k), uv: [0, 1, 0, 1]});
+				continue;
+			}
 			// finale 4's neurotoxin clock: the time left on the screen
 			const clock = k?.parent !== undefined ? this.entityAt(k.parent, tick, 'CNeurotoxinCountdown') : undefined;
 			if (k && clock) {

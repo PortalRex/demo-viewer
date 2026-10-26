@@ -132,6 +132,7 @@ export interface EntityTimeline {
 	paint: PaintEvent[];
 	lightStyles: LightStyleChange[];  // in tick order
 	particleNames: string[];          // "ParticleEffectNames" (info_particle_system's m_iEffectIndex)
+	panelNames: string[];             // "VguiScreen" (vgui screens' m_nPanelName: sp_progress_sign, ...)
 	effects: EffectEvent[];           // dispatched effects (temp entities), in tick order
 	fades: ScreenFade[];              // screen fades sent to the recording player, in tick order
 	hudMessages: HudMessage[];        // on-screen text (game_text: chapter titles), in tick order
@@ -617,7 +618,8 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	}
 	const particleNames = (tableByName.get('ParticleEffectNames')?.entries ?? []).map(e => e?.name ?? '');
-	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, effects, fades, hudMessages};
+	const panelNames = (tableByName.get('VguiScreen')?.entries ?? []).map(e => e?.name ?? '');
+	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, panelNames, effects, fades, hudMessages};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];

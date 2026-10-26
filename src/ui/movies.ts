@@ -24,6 +24,7 @@ export interface ScreenSpec {
 	image?: string;        // instead of a movie: this material's texture (e.g. vgui/signage/vgui_indicator_checked)
 	dial?: number;         // a countdown dial over it: the eighths of its time left (0..8)
 	text?: string;         // a label over the image (its own material per screen)
+	canvas?: HTMLCanvasElement;  // instead: this painted panel (a chamber sign)
 	start: number;         // seconds: when it started playing
 	looping: boolean;
 	corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3];  // lower left, upper left, upper right
@@ -157,6 +158,28 @@ export class MovieScreens {
 		}
 		return l.material;
 	}
+	// a painted panel's material (its own texture, on the canvas it's given)
+	private panels = new Map<string, THREE.ShaderMaterial>();
+	private painted(key: string, canvas: HTMLCanvasElement): THREE.ShaderMaterial {
+		let m = this.panels.get(key);
+		if (!m) {
+			const texture = new THREE.CanvasTexture(canvas);
+			texture.flipY = false;
+			texture.colorSpace = THREE.SRGBColorSpace;
+			m = new THREE.ShaderMaterial({
+				uniforms: {map: {value: texture}, image: {value: 1}, dial: {value: -1}, label: {value: null}, hasLabel: {value: 0}, ...exposureUniforms},
+				vertexShader: VERTEX, fragmentShader: FRAGMENT, transparent: true, depthWrite: false,
+				polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
+			});
+			this.panels.set(key, m);
+		}
+		const tex = m.uniforms.map.value as THREE.CanvasTexture;
+		if (tex.image !== canvas) {
+			tex.image = canvas;
+			tex.needsUpdate = true;
+		}
+		return m;
+	}
 	private labels = new Map<string, {material: THREE.ShaderMaterial; canvas: HTMLCanvasElement; texture: THREE.CanvasTexture; text: string | null; ready: boolean}>();
 	private fontLoad: Promise<void> | null = null;
 	private labelFont(): Promise<void> {
@@ -248,7 +271,9 @@ export class MovieScreens {
 		const seen = new Set<string>();
 		for (const s of specs) {
 			let material: THREE.ShaderMaterial;
-			if (s.image && s.text !== undefined) {
+			if (s.canvas) {
+				material = this.painted(s.key, s.canvas);
+			} else if (s.image && s.text !== undefined) {
 				const im = this.labelled(s.key, s.image, s.text);
 				if (!im) continue;
 				material = im;
@@ -307,6 +332,11 @@ export class MovieScreens {
 		// (the image textures are the texture library's)
 		for (const m of this.images.values()) m?.dispose();
 		this.images.clear();
+		for (const m of this.panels.values()) {
+			(m.uniforms.map.value as THREE.Texture).dispose();
+			m.dispose();
+		}
+		this.panels.clear();
 		for (const l of this.labels.values()) {
 			l.material.dispose();
 			l.texture.dispose();

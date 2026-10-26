@@ -4,9 +4,9 @@
 // followed to the material they include.
 import type {GameFiles} from './files.ts';
 
-type KV = {key: string; value: string | KV}[];
+export type KV = {key: string; value: string | KV}[];
 
-function parseKeyValues(text: string): KV {
+export function parseKeyValues(text: string): KV {
 	let p = 0;
 	const token = (): string | null => {
 		for (;;) {
