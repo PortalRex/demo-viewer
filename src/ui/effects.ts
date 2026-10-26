@@ -188,29 +188,72 @@ async function loadSolidEnergy(assets: EffectAssets, name: string, m: THREE.Shad
 }
 
 // ---- lasers ----
+// A beam (C_Beam) of an UnlitTwoTexture material: its texture times the
+// second texture, added. The laser's own (sprites/purplelaser1, 32 wide:
+// C_PortalLaser::Spawn) drifts its second texture (laserplane_atmosphere,
+// at 0.4 scale and turned 27.5 degrees) along at 0.02 a second (its
+// LinearRamp and TextureTransform proxies). Beams' v runs 1 per 100 units.
 
 export class Laser {
 	readonly group = new THREE.Group();
 	private segments: THREE.Mesh[] = [];
-	private material: THREE.MeshBasicMaterial;
+	private material: THREE.ShaderMaterial;
 
 	// (`width`: the beam's; `tint`: its render colour, 0..1)
 	private width: number;
 
-	constructor(assets: EffectAssets | null, width = 12, tint: [number, number, number] = [1, 1, 1]) {
+	constructor(assets: EffectAssets | null, width = 32, tint: [number, number, number] = [1, 1, 1], name = 'sprites/purplelaser1') {
 		this.width = width;
-		this.material = new THREE.MeshBasicMaterial({color: 0xff4020, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false});
+		this.material = new THREE.ShaderMaterial({
+			uniforms: {
+				base: {value: null}, second: {value: null}, color: {value: new THREE.Color(...tint)},
+				t2: {value: new THREE.Matrix3()}, ramp: {value: 0}, time: {value: 0},
+			},
+			transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+			vertexShader: `
+				varying vec2 vUv;
+				void main() {
+					vUv = uv;
+					gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+				}`,
+			fragmentShader: `
+				uniform sampler2D base, second;
+				uniform vec3 color;
+				uniform mat3 t2;
+				uniform float ramp, time;
+				varying vec2 vUv;
+				void main() {
+					vec2 uv2 = (t2 * vec3(vUv, 1.0)).xy + vec2(ramp * time, 0.0);
+					vec3 c = texture2D(base, vUv).rgb * texture2D(second, uv2).rgb * color;
+					gl_FragColor = vec4(c, 1.0);
+					#include <colorspace_fragment>
+				}`,
+		});
 		this.material.userData.effect = true;  // (freed with its object)
-		assets?.texture('effects/redlaser1').then(t => {
-			if (t === assets.white) return;
-			const tex = t.clone();
-			tex.userData.owned = true;  // (freed with its material)
-			// the texture's u runs across the beam (hot core, red edges), v along it
-			tex.wrapS = THREE.ClampToEdgeWrapping;
-			tex.wrapT = THREE.RepeatWrapping;
-			tex.needsUpdate = true;
-			this.material.map = tex;
-			this.material.color.setRGB(...tint);
+		this.material.visible = false;
+		if (!assets) return;
+		assets.materials.raw(name).then(async raw => {
+			const p = raw?.params;
+			if (!p) return;
+			const own = (t: THREE.Texture, wrapS: THREE.Wrapping) => {
+				const c = t.clone();
+				c.userData.owned = true;  // (freed with its material)
+				c.wrapS = wrapS;
+				c.wrapT = THREE.RepeatWrapping;
+				c.needsUpdate = true;
+				return c;
+			};
+			// (the texture's u runs across the beam, v along it)
+			const [base, second] = await Promise.all([assets.texture(p.get('$basetexture')), assets.texture(p.get('$texture2'))]);
+			if (base === assets.white) return;
+			const u = this.material.uniforms;
+			u.base.value = own(base, THREE.ClampToEdgeWrapping);
+			u.second.value = own(second, THREE.RepeatWrapping);
+			// $texture2transform from its scale and rotation, about the centre
+			const scale = num(p, '$t2scale', 1), rot = num(p, '$t2rot', 0) * Math.PI / 180;
+			u.t2.value.setUvTransform(0, 0, scale, scale, rot, 0.5, 0.5);
+			u.ramp.value = p.has('$t2offset') ? 0.02 : 0;
+			this.material.visible = true;
 			this.material.needsUpdate = true;
 		});
 	}
@@ -229,6 +272,7 @@ export class Laser {
 			this.segments.push(mesh);
 		}
 		const width = this.width;
+		this.material.uniforms.time.value = performance.now() / 1000;
 		this.segments.forEach((mesh, i) => {
 			const p = points[i];
 			mesh.visible = !!p;
@@ -241,7 +285,7 @@ export class Laser {
 			const q = [a.clone().sub(side), a.clone().add(side), b.clone().add(side), b.clone().sub(side)];
 			const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
 			const uv = mesh.geometry.getAttribute('uv') as THREE.BufferAttribute;
-			const uvs = [[0, 0], [1, 0], [1, len / 128], [0, len / 128]];
+			const uvs = [[0, 0], [1, 0], [1, len * 0.01], [0, len * 0.01]];
 			[0, 1, 2, 0, 2, 3].forEach((k, j) => {
 				pos.setXYZ(j, q[k].x, q[k].y, q[k].z);
 				uv.setXY(j, uvs[k][0], uvs[k][1]);
