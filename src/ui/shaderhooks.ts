@@ -697,7 +697,12 @@ const REFRACT_FRAGMENT = `
 #endif
 #if defined(REFRACT_TINT) && defined(REFRACT_ENV)
 	diffuseColor.a = dot(diffuseColor.rgb, vec3(1.0 / 3.0));
+	#ifdef ENVMAP_CUBE
 	outgoingLight = envAdded;
+	#else
+	// (compiled before its reflection was set up: none yet)
+	outgoingLight = vec3(0.0);
+	#endif
 #elif defined(REFRACT_TINT)
 	outgoingLight = diffuseColor.rgb;
 #endif
