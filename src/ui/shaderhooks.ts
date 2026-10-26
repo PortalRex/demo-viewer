@@ -360,7 +360,6 @@ const AMBIENT_FRAGMENT_HEAD = `
 uniform vec3 ambCube[6];
 uniform vec3 ambLightPos[3];
 uniform vec3 ambLightColor[3];
-uniform vec3 ambLightAtten[3];  // constant, linear, quadratic falloff
 uniform float ambScale;
 uniform vec3 selfIllumTint;
 uniform float phongExponent;
@@ -371,6 +370,27 @@ uniform sampler2D phongMaskMap;
 uniform sampler2D phongExpMap;
 uniform sampler2D selfIllumMask;
 varying vec3 vAmbN;
+varying vec3 vAmbAtten;
+`;
+
+// each local light's falloff, worked out per vertex as the engine's vertex
+// shaders do (GetVertexAttenForLight) and interpolated across the faces: a
+// light right by a big flat model makes no hot spot in its middle, and
+// lights by the camera don't blow the gun out
+const AMBIENT_VERTEX_HEAD = `
+uniform vec3 ambLightPos[3];
+uniform vec3 ambLightAtten[3];  // constant, linear, quadratic falloff
+varying vec3 vAmbAtten;
+`;
+const AMBIENT_VERTEX = `
+	{
+		vec3 world = (modelMatrix * vec4(transformed, 1.0)).xyz;
+		for (int i = 0; i < 3; i++) {
+			float d = length(ambLightPos[i] - world);
+			vec3 a = ambLightAtten[i];
+			vAmbAtten[i] = 1.0 / max(a.x + a.y * d + a.z * d * d, 1e-3);
+		}
+	}
 `;
 
 const AMBIENT_FRAGMENT = `
@@ -380,14 +400,13 @@ const AMBIENT_FRAGMENT = `
 		vec3 amb = n2.x * (n.x >= 0.0 ? ambCube[0] : ambCube[1])
 			+ n2.y * (n.y >= 0.0 ? ambCube[2] : ambCube[3])
 			+ n2.z * (n.z >= 0.0 ? ambCube[4] : ambCube[5]) + modelAmbient;
-		// (each local light falling off to this point, as the engine's vertex
-		// shader does: lights right by the camera don't blow the gun out)
+		// (each local light by its falloff at the vertices, see AMBIENT_VERTEX;
+		// its direction per point)
 		vec3 lightAt[3];
 		for (int i = 0; i < 3; i++) {
 			vec3 l = ambLightPos[i] - vDitherWorld;
 			float d = length(l);
-			vec3 a = ambLightAtten[i];
-			lightAt[i] = ambLightColor[i] / max(a.x + a.y * d + a.z * d * d, 1e-3);
+			lightAt[i] = ambLightColor[i] * vAmbAtten[i];
 			amb += lightAt[i] * max(dot(n, l / max(d, 1e-3)), 0.0);
 		}
 		amb += flashLight(vDitherWorld, n);
@@ -893,10 +912,10 @@ function hook(material: THREE.Material, paint: boolean) {
 		}
 		if (lit) {
 			Object.assign(shader.uniforms, material.userData.ambUniforms);
-			shader.vertexShader = 'varying vec3 vAmbN;\n' + shader.vertexShader.replace(
+			shader.vertexShader = 'varying vec3 vAmbN;\n' + AMBIENT_VERTEX_HEAD + shader.vertexShader.replace(
 				'#include <defaultnormal_vertex>',
 				'#include <defaultnormal_vertex>\n\tvAmbN = normalize(mat3(modelMatrix) * objectNormal);',
-			);
+			).replace('#include <project_vertex>', '#include <project_vertex>\n' + AMBIENT_VERTEX);
 			shader.fragmentShader = AMBIENT_FRAGMENT_HEAD + shader.fragmentShader.replace(
 				'#include <lights_fragment_end>',
 				'#include <lights_fragment_end>\n' + AMBIENT_FRAGMENT,

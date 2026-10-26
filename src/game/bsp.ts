@@ -93,10 +93,12 @@ export function composeLightmap(lm: Lightmap, value: (style: number) => number, 
 						g += rgb[i * 3 + 1] * s;
 						bl += rgb[i * 3 + 2] * s;
 					}
+					// (clamped to 16, as the engine fills its RGBA16161616 lightmap
+					// pages: a light right by a face blows out no further)
 					const out = layer < 0 ? lm.data : lm.bump[layer];
-					out[o] = r;
-					out[o + 1] = g;
-					out[o + 2] = bl;
+					out[o] = Math.min(r, 16);
+					out[o + 1] = Math.min(g, 16);
+					out[o + 2] = Math.min(bl, 16);
 					out[o + 3] = 1;
 				}
 			}
