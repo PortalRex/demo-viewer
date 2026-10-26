@@ -40,6 +40,7 @@ export type CameraMode = 'eyes' | 'orbit' | 'free';
 // Portal 2's 90° horizontal FOV at 4:3, as a vertical FOV (widescreen keeps it)
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
+const VIEW_NEARZ = 7;
 const PIP_SCALE = 0.3, PIP_INSET = 25 / 720;  // ss_pipscale, ss_pip_right/bottom_offset (at autorender's 720p)
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 // The view model's field of view: Portal's client mode takes cl_viewmodelfov
@@ -4140,6 +4141,7 @@ export class View3D {
 				const right = fwd.clone().cross(up);
 				this.camera.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, fwd.negate()));
 				if (this.pip?.taunt && pk) this.tauntCamera(eye, ang as Vec3, pk);
+				else this.portalledEye(feet);
 			} else if (this.mode === 'free') {
 				// the free camera goes where the user takes it
 			} else if (this.controls) {
@@ -4540,6 +4542,35 @@ export class View3D {
 		for (const k of Object.keys(m)) [self[k], m[k]] = [m[k], self[k]];
 	}
 
+	// An eye that's gone through a portal its body hasn't (the eye behind a
+	// linked portal's plane, the body in front, the line between them through
+	// the opening) sees from the other side: the view moved through the pair
+	// (C_Portal_Player::CalcView)
+	private portalledEye(feet: THREE.Vector3) {
+		const eye = this.camera.position;
+		for (const p of this.portals.values()) {
+			const linked = this.portals.get(p.link);
+			if (!linked) continue;
+			p.obj.updateMatrixWorld(true);
+			const at = new THREE.Vector3().setFromMatrixPosition(p.obj.matrixWorld);
+			const n = new THREE.Vector3(1, 0, 0).transformDirection(p.obj.matrixWorld);
+			const eyeDist = n.dot(eye) - n.dot(at), bodyDist = n.dot(feet) - n.dot(at);
+			if (!(eyeDist < 0 && bodyDist >= 0)) continue;
+			const k = 1 / (bodyDist - eyeDist);
+			const cross = eye.clone().multiplyScalar(bodyDist * k).addScaledVector(feet, -eyeDist * k).sub(at);
+			const right = new THREE.Vector3(0, 1, 0).transformDirection(p.obj.matrixWorld), up = new THREE.Vector3(0, 0, 1).transformDirection(p.obj.matrixWorld);
+			if (Math.abs(cross.dot(right)) > p.halfW || Math.abs(cross.dot(up)) > p.halfH) continue;
+			const through = this.portalTransform(p.obj, linked.obj);
+			const m = through.clone().multiply(new THREE.Matrix4().compose(eye, this.camera.quaternion, new THREE.Vector3(1, 1, 1)));
+			m.decompose(this.camera.position, this.camera.quaternion, new THREE.Vector3());
+			// (and the eye's angles, which the view model and what's held follow)
+			const turn = new THREE.Quaternion().setFromRotationMatrix(through);
+			const e = new THREE.Euler().setFromQuaternion(turn.multiply(new THREE.Quaternion().setFromEuler(toEuler(this.eyeAngles as Vec3))), 'ZYX');
+			this.eyeAngles = [e.y * 180 / Math.PI, e.z * 180 / Math.PI, e.x * 180 / Math.PI];
+			return;
+		}
+	}
+
 	// A taunting player's camera, as the picture in picture shows it
 	// (C_Portal_Player::CalcView): looking at their eye from the taunt
 	// camera's distance, turned by their remote view angles, pulled in where
@@ -4565,6 +4596,13 @@ export class View3D {
 		// third-person camera does (the user's distance is kept for later);
 		// before metering, which must see what's drawn
 		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
+		// (through the player's eyes, the game's near plane: VIEW_NEARZ, 7
+		// units, so what's right against the eye isn't drawn)
+		const near = this.mode === 'eyes' ? VIEW_NEARZ : 1;
+		if (this.camera.near !== near) {
+			this.camera.near = near;
+			this.camera.updateProjectionMatrix();
+		}
 		this.camera.updateMatrixWorld();
 		// shaders compile in the background (parallel compile) and whatever
 		// is still compiling sits this frame out (the meter's too), rather
