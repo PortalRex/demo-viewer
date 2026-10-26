@@ -3414,15 +3414,19 @@ export class View3D {
 				r.render(this.vmScene, this.vmCam);
 				r.autoClear = auto;
 			}
+			// read back without waiting for the GPU (it lands a frame or two
+			// later); started while the meter is the target, as the read puts
+			// back the target's single-sampled buffer, not the multisampled one
+			// the frame is drawn into
+			const px = new Uint16Array(w * h * 4);
+			this.meterPending = true;
+			const exposed = this.exposure;
+			const reading = r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px);
 			r.setRenderTarget(frameTarget);
 			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
 			this.scene.fog = fog;
-			// read back without waiting for the GPU (it lands a frame or two later)
-			const px = new Uint16Array(w * h * 4);
-			this.meterPending = true;
-			const exposed = this.exposure;
-			r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px).then(() => {
+			reading.then(() => {
 				const target = histogramTarget(px, w, h, exposed);
 				if (target) this.meterTarget = Math.min(this.exposureRange[1], Math.max(this.exposureRange[0], target));
 				if (target && this.meterSnap) {
