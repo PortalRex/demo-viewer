@@ -11,12 +11,17 @@ import type {SheetSequence} from '../game/vtf.ts';
 import type {GameFiles} from '../game/files.ts';
 import type {Materials} from '../game/materials.ts';
 import type {TextureCache} from './textures.ts';
+import {exposureUniforms} from './shaderhooks.ts';
 
 const STEP = 1 / 30;
 
 export class ParticleLibrary {
 	private systems = new Map<string, ParticleSystemDef>();
 	readonly ready: Promise<void>;
+	// the world's light at a point (0..1 per channel, as the engine's
+	// GetLightForPoint), for colours tinted by where they're made; white
+	// without it
+	lightAt: ((point: THREE.Vector3) => [number, number, number]) | null = null;
 
 	constructor(files: GameFiles, map: string) {
 		this.ready = this.load(files, map);
@@ -154,6 +159,8 @@ export class ParticleInstance {
 	// moves control point 0 over time (a blast in flight); called each step
 	cpAt: ((t: number) => THREE.Matrix4) | null = null;
 	private rand: () => number;
+	private lib: ParticleLibrary;
+	private lighting: {cp: number; at: THREE.Vector3; color: [number, number, number]} | null = null;
 	private emitted = new Map<ParticleOperator, number>();
 	private children: {inst: ParticleInstance; delay: number}[] = [];
 	private parent: ParticleInstance | null = null;
@@ -169,6 +176,7 @@ export class ParticleInstance {
 	constructor(def: ParticleSystemDef, lib: ParticleLibrary, cps: ControlPoints, seed: number, depth = 0) {
 		this.def = def;
 		this.cps = cps;
+		this.lib = lib;
 		this.rand = mulberry(seed);
 		const late = (o: ParticleOperator) => o.fn.startsWith('position modify') || o.fn === 'remap initial distance to control point to scalar';
 		this.initOrder = [...def.initializers.filter(o => !late(o)), ...def.initializers.filter(late)];
@@ -255,6 +263,18 @@ export class ParticleInstance {
 
 	private cp(n: number): THREE.Matrix4 {
 		return this.cps.get(n) ?? this.cps.get(0) ?? new THREE.Matrix4();
+	}
+
+	// the light at a control point (a system's parent's, when it took it at
+	// the same point), looked up again once the point moves
+	private lightingAt(cp: number): [number, number, number] {
+		const parent = this.parent?.lighting;
+		if (parent && parent.cp === cp) return parent.color;
+		const at = this.cpPos(cp);
+		if (!this.lighting || this.lighting.cp !== cp || this.lighting.at.distanceToSquared(at) > 1) {
+			this.lighting = {cp, at: at.clone(), color: this.lib.lightAt?.(at) ?? [1, 1, 1]};
+		}
+		return this.lighting.color;
 	}
 
 	cpPos(n: number): THREE.Vector3 {
@@ -525,6 +545,21 @@ export class ParticleInstance {
 			case 'color random': {
 				const a = vec(o, 'color1', [255, 255, 255, 255]), b = vec(o, 'color2', [255, 255, 255, 255]), k = this.rand();
 				p.color = [0, 1, 2].map(i => (a[i] + (b[i] - a[i]) * k) / 255);
+				// tinted towards the light where it's made (ComputeLitParticleColor):
+				// the light clamped to the tint range, amplified, blended in a mode
+				const tint = num(o, 'tint_perc', 0);
+				if (tint) {
+					const light = this.lightingAt(num(o, 'tint control point', 0));
+					const lo = vec(o, 'tint clamp min', [0, 0, 0, 0]), hi = vec(o, 'tint clamp max', [255, 255, 255, 255]);
+					const amp = num(o, 'light amplification amount', 1) / 255;
+					const mode = num(o, 'tint blend mode', 0);
+					p.color = p.color.map((c, i) => {
+						const l = Math.max(lo[i], Math.min(Math.floor(light[i] * 255), hi[i])) * amp;
+						const t = mode === 1 ? (l < 0.5 ? 2 * c * l : 1 - 2 * (1 - c) * (1 - l))  // overlay
+							: mode === 2 ? Math.min(c, l) : mode === 3 ? Math.max(c, l) : mode === 4 ? c * l : l;
+						return Math.min(1, c + (t - c) * tint);
+					});
+				}
 				break;
 			}
 			case 'alpha random':
@@ -799,14 +834,24 @@ const VERTEX = `
 		gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 	}`;
 
+// SpriteCard's: $addself sprites are drawn premultiplied, brightened by
+// that much of themselves; every sprite is at most white once exposed (the
+// shader saturates its output)
 const FRAGMENT = `
 	uniform sampler2D map;
 	uniform float overbright;
+	uniform float addSelf;
+	uniform float sceneExposure;
 	varying vec2 vUv;
 	varying vec4 vColor;
 	void main() {
 		vec4 t = texture2D(map, vUv);
-		gl_FragColor = vec4(t.rgb * vColor.rgb * overbright, t.a * vColor.a);
+		vec3 rgb = t.rgb * overbright;
+		float a = t.a * vColor.a;
+	#ifdef ADDSELF
+		rgb *= a * (1.0 + addSelf);
+	#endif
+		gl_FragColor = vec4(min(rgb * vColor.rgb, vec3(1.0 / max(sceneExposure, 1e-3))), min(a, 1.0));
 		#include <tonemapping_fragment>
 		#include <colorspace_fragment>
 	}`;
@@ -861,15 +906,21 @@ export class ParticleRenderer {
 			const v = m.params.get(k);
 			return v !== undefined && v !== '0';
 		};
-		const additive = on('$additive') || on('$addself');
+		const addSelf = Number(m.params.get('$addself') ?? 0) || 0;
 		const material = new THREE.ShaderMaterial({
-			uniforms: {map: {value: t}, overbright: {value: Number(m.params.get('$overbrightfactor') ?? 1) || 1}},
+			uniforms: {
+				map: {value: t}, overbright: {value: Number(m.params.get('$overbrightfactor') ?? 1) || 1}, addSelf: {value: addSelf},
+				...exposureUniforms,
+			},
+			defines: addSelf ? {ADDSELF: ''} : {},
 			vertexShader: VERTEX,
 			fragmentShader: FRAGMENT,
 			transparent: true,
 			depthWrite: false,
 			depthTest: !on('$ignorez'),
-			blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+			blending: addSelf ? THREE.CustomBlending : on('$additive') ? THREE.AdditiveBlending : THREE.NormalBlending,
+			blendSrc: THREE.OneFactor,
+			blendDst: THREE.OneMinusSrcAlphaFactor,
 			side: THREE.DoubleSide,
 		});
 		const param = (k: string, d: number) => {

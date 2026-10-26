@@ -941,6 +941,8 @@ export class View3D {
 			this.scene.remove(this.particleRenderer.group);
 		}
 		this.particleLib = new ParticleLibrary(files, bsp.name);
+		this.pointLight.clear();
+		this.particleLib.lightAt = point => this.lightForPoint(point);
 		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
 		this.particleRenderer.visibility = (point, eye) => this.pointSeen(point, eye);
 		this.scene.add(this.particleRenderer.group);
@@ -1843,6 +1845,34 @@ export class View3D {
 		this.scene.fog = fog;
 		fogUniforms.fogMaxDensity.value = density;
 		for (const m of screens) m.visible = true;
+	}
+
+	// The world's light at a point as the engine's GetLightForPoint gives it:
+	// the lighting cube there with its local lights added by direction,
+	// averaged over the six sides, at most 1 (kept by place, as effects are
+	// simulated again and again)
+	private pointLight = new Map<string, [number, number, number]>();
+	private lightForPoint(point: THREE.Vector3): [number, number, number] {
+		const amb = this.bsp?.ambient;
+		if (!amb) return [1, 1, 1];
+		const key = `${Math.round(point.x / 4)},${Math.round(point.y / 4)},${Math.round(point.z / 4)},${this.styleGen}`;
+		const known = this.pointLight.get(key);
+		if (known) return known;
+		if (this.pointLight.size > 4096) this.pointLight.clear();
+		const {cube, lights} = amb.at([point.x, point.y, point.z], this.lightReaches, this.styleNow);
+		const box = cube.slice();
+		for (const l of lights) {
+			const d = new THREE.Vector3(l.pos[0], l.pos[1], l.pos[2]).sub(point).normalize();
+			for (let axis = 0; axis < 3; axis++) {
+				const c = d.getComponent(axis), side = axis * 2 + (c >= 0 ? 0 : 1);
+				for (let ch = 0; ch < 3; ch++) box[side * 3 + ch] += l.color[ch] * Math.abs(c);
+			}
+		}
+		const out: [number, number, number] = [0, 0, 0];
+		for (let side = 0; side < 6; side++) for (let ch = 0; ch < 3; ch++) out[ch] += box[side * 3 + ch] / 6;
+		const light: [number, number, number] = [Math.min(out[0], 1), Math.min(out[1], 1), Math.min(out[2], 1)];
+		this.pointLight.set(key, light);
+		return light;
 	}
 
 	// Whether a point shows from the eye (for particles' visibility proxies):
