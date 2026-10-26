@@ -1,6 +1,6 @@
 // Particle systems in the manifest's .pcf files: counts of each operator
 // function, or one system's full definition:
-//   node --experimental-strip-types tools/pcfprobe.ts [system name]
+//   node --experimental-strip-types tools/pcfprobe.ts [system name | ~name regex]
 import {nodeFS} from './nodefs.ts';
 import {GameFiles} from '../src/game/files.ts';
 import {readParticleSystems} from '../src/game/pcf.ts';
@@ -21,7 +21,10 @@ for (const path of paths) {
 	}
 }
 const want = process.argv[2];
-if (want) {
+if (want?.startsWith('~')) {
+	const re = new RegExp(want.slice(1), 'i');
+	console.log([...systems.keys()].filter(n => re.test(n)).sort().join('\n'));
+} else if (want) {
 	const s = systems.get(want);
 	if (!s) console.log('no such system');
 	else {

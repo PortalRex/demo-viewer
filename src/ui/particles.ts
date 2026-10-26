@@ -100,6 +100,7 @@ interface Particle {
 	osc: number[];     // per-particle oscillation rates/frequencies
 	pathT?: number;    // where along a control point path it was placed (0..1)
 	pathAt?: THREE.Vector3;  // that point of the path when last moved with it
+	normal?: THREE.Vector3;  // the way its card faces (renderers' orientation_type 3)
 }
 
 function mulberry(seed: number) {
@@ -542,6 +543,14 @@ export class ParticleInstance {
 			case 'sequence random':
 				p.seq = Math.floor(this.r(num(o, 'sequence_min', 0), num(o, 'sequence_max', 0) + 0.999));
 				break;
+			case 'velocity set from control point':
+				// a control point holding a velocity (a funnel's flow), scaled
+				p.vel.copy(this.cpPos(num(o, 'control point number', 1))).multiplyScalar(num(o, 'velocity scale', 1));
+				break;
+			case 'normal align to cp':
+				// facing along its control point's forward axis
+				p.normal = new THREE.Vector3().setFromMatrixColumn(this.cp(num(o, 'control_point_number', 0)), 0).normalize();
+				break;
 			case 'lifetime from sequence': {
 				// as long as its sheet sequence's frames take at the rate given
 				// (until the sheet has loaded, the default)
@@ -621,6 +630,7 @@ export class ParticleInstance {
 		const age = this.time - p.born;
 		const frac = p.life > 0 ? Math.min(1, age / p.life) : 1;
 		let alpha = 1, radiusScale = 1, osc = 0;
+		let interpolated: number | null = null;  // the radius scale operators' (see 'radius scale')
 		let moves = false;
 		for (const o of this.def.operators) {
 			if (!endCapOk(o, ending)) continue;
@@ -635,6 +645,10 @@ export class ParticleInstance {
 				if (drag > 0) p.vel.multiplyScalar(Math.pow(Math.max(0, 1 - drag), dt * 30));
 				break;
 			}
+			case 'normal lock to control point':
+				// still facing along it as the control point turns
+				p.normal = new THREE.Vector3().setFromMatrixColumn(this.cp(num(o, 'control_point_number', 0)), 0).normalize();
+				break;
 			case 'movement lock to saved position along path': {
 				// carried along as the path's ends move (a beam between two
 				// moving points)
@@ -679,15 +693,14 @@ export class ParticleInstance {
 				break;
 			}
 			case 'radius scale': {
+				// (C_OP_InterpolateRadius: only within its part of the life, and
+				// setting the scale: the last one that applies wins)
 				const s0 = num(o, 'start_time', 0), s1 = num(o, 'end_time', 1);
-				if (frac < s0 && s0 > 0) {
-					radiusScale *= num(o, 'radius_start_scale', 1);
-					break;
-				}
+				if (frac < s0 || frac > s1) break;
 				let k = Math.min(1, Math.max(0, (frac - s0) / ((s1 - s0) || 1)));
 				const b = num(o, 'scale_bias', 0.5);
 				if (b !== 0.5) k = Math.pow(k, Math.log(b) / Math.log(0.5));
-				radiusScale *= num(o, 'radius_start_scale', 1) + (num(o, 'radius_end_scale', 1) - num(o, 'radius_start_scale', 1)) * k;
+				interpolated = num(o, 'radius_start_scale', 1) + (num(o, 'radius_end_scale', 1) - num(o, 'radius_start_scale', 1)) * k;
 				break;
 			}
 			case 'color fade': {
@@ -750,12 +763,12 @@ export class ParticleInstance {
 				if (age > STEP && p.vel.length() < num(o, 'minimum velocity', 1)) p.life = -2;
 				break;
 			case 'lifespan minimum radius decay':
-				if (p.radius * radiusScale < num(o, 'minimum radius', 1)) p.life = -2;
+				if (p.radius * radiusScale * (interpolated ?? 1) < num(o, 'minimum radius', 1)) p.life = -2;
 				break;
 			}
 		}
 		p.drawAlpha = Math.max(0, p.alpha) * alpha * Math.max(0, p.alpha2);
-		p.drawRadius = Math.max(0, p.radius * radiusScale) * this.sizeScale;
+		p.drawRadius = Math.max(0, p.radius * radiusScale * (interpolated ?? 1)) * this.sizeScale;
 		if (moves) p.pos.addScaledVector(p.vel, dt);
 	}
 }
@@ -806,6 +819,9 @@ export class ParticleRenderer {
 	private sprites = new Map<string, Promise<SpriteMaterial | null>>();
 	private loaded = new Map<string, SpriteMaterial | null>();
 	private meshes = new Map<string, THREE.Mesh>();
+	// how much of a point the camera sees (0..1), for renderers with a
+	// visibility proxy; everything counts as seen without it
+	visibility: ((point: THREE.Vector3, camera: THREE.Vector3) => number) | null = null;
 
 	constructor(files: GameFiles, materials: Materials, textures: TextureCache) {
 		this.files = files;
@@ -895,12 +911,26 @@ export class ParticleRenderer {
 			const trail = r.fn === 'render_sprite_trail';
 			const rate = num(r, 'animation rate', 0.1);
 			const fit = num(r, 'animation_fit_lifetime', 0);
-			const flat = num(r, 'orientation_type', 0) === 2;
+			const orientation = num(r, 'orientation_type', 0);
+			const flat = orientation === 2;
+			// a visibility proxy (a light's flare): how much of a control point
+			// shows, remapped onto radius and alpha scales
+			let visRadius = 1, visAlpha = 1;
+			const proxy = num(r, 'Visibility Proxy Input Control Point Number', -1);
+			if (proxy >= 0 && this.visibility) {
+				const seen = this.visibility(inst.cpPos(proxy), camPos);
+				const i0 = num(r, 'Visibility input minimum', 0), i1 = num(r, 'Visibility input maximum', 1);
+				const t = Math.min(1, Math.max(0, (seen - i0) / ((i1 - i0) || 1)));
+				const lerp = (a: string, da: number, b: string, db: number) => num(r, a, da) + (num(r, b, db) - num(r, a, da)) * t;
+				visRadius = lerp('Visibility Radius Scale minimum', 1, 'Visibility Radius Scale maximum', 1);
+				visAlpha = lerp('Visibility Alpha Scale minimum', 0, 'Visibility Alpha Scale maximum', 1);
+				if (visAlpha <= 0) continue;
+			}
 			const [minSize, maxSize, startFade, endFade] = sprite.size;
 			for (const p of inst.particles) {
 				if (p.drawAlpha <= 0.002 || p.drawRadius <= 0) continue;
 				// (the sprite shader's size limits, by distance from the eye)
-				let radius = p.drawRadius, alpha = p.drawAlpha;
+				let radius = p.drawRadius * visRadius, alpha = p.drawAlpha * visAlpha;
 				if (!trail) {
 					const l = p.pos.distanceTo(camPos);
 					radius = Math.max(radius, minSize * l);
@@ -927,6 +957,14 @@ export class ParticleRenderer {
 					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
 					ax = new THREE.Vector3(c, s, 0).multiplyScalar(radius);
 					ay = new THREE.Vector3(-s, c, 0).multiplyScalar(radius);
+				} else if (orientation === 3 && p.normal) {
+					// in the plane across its normal, turned by its rotation
+					const n = p.normal;
+					const u0 = new THREE.Vector3(...(Math.abs(n.z) < 0.99 ? [0, 0, 1] : [1, 0, 0]) as [number, number, number]).cross(n).normalize();
+					const v0 = n.clone().cross(u0);
+					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
+					ax = u0.clone().multiplyScalar(c).addScaledVector(v0, s).multiplyScalar(radius);
+					ay = v0.clone().multiplyScalar(c).addScaledVector(u0, -s).multiplyScalar(radius);
 				} else {
 					const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
 					ax = right.clone().multiplyScalar(c).addScaledVector(up, s).multiplyScalar(radius);

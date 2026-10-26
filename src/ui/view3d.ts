@@ -922,6 +922,7 @@ export class View3D {
 		}
 		this.particleLib = new ParticleLibrary(files, bsp.name);
 		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
+		this.particleRenderer.visibility = (point, eye) => this.pointSeen(point, eye);
 		this.scene.add(this.particleRenderer.group);
 		if (this.vmParticleRenderer) {
 			this.vmParticleRenderer.clear();
@@ -1738,6 +1739,22 @@ export class View3D {
 		}
 	}
 
+	// Whether a point shows from the eye (for particles' visibility proxies):
+	// nothing of the world, props or entities' models in between
+	private seenRay = new THREE.Raycaster();
+	private pointSeen(point: THREE.Vector3, eye: THREE.Vector3): number {
+		const d = point.distanceTo(eye);
+		if (d < 2) return 1;
+		const dir = point.clone().sub(eye).divideScalar(d);
+		const ray = this.seenRay;
+		ray.set(eye, dir);
+		ray.near = 0;
+		ray.far = d - 1;  // (the proxy's own size)
+		const world = this.collision?.raycastFirst(ray.ray, THREE.DoubleSide);
+		if (world && world.distance < d - 1) return 0;
+		return ray.intersectObjects([this.propGroup, this.entityGroup], true).some(h => h.object.visible) ? 0 : 1;
+	}
+
 	// the matrix taking things in front of portal `from` to the same place
 	// relative to its linked portal (entering one, leaving the other)
 	private portalTransform(from: THREE.Object3D, to: THREE.Object3D): THREE.Matrix4 {
@@ -2215,6 +2232,34 @@ export class View3D {
 					const color = reversed ? [255, 56, 8] : [0, 49, 189];
 					return new Map([[0, cp0], [1, cp1], [2, new THREE.Matrix4().setPosition(vel)], [3, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]);
 				});
+			} else if (t.className === 'CPropTractorBeamProjector') {
+				// its three arms' particles (C_PropTractorBeamProjector::
+				// CreateEffect): tractor_beam_arm on each emitter attachment,
+				// coloured by the funnel's direction, flowing along it; from
+				// when it was last switched on
+				const i = keyIndexAt(t, tick);
+				if (i < 0) continue;
+				const k = t.keys[i], e = k.extra ?? {};
+				if (k.removed || Number(e.m_bEnabled) !== 1 || Number(e.m_bNoEmitterParticles) === 1) continue;
+				const sk = this.objects.get(t)?.userData.skeleton as Skeleton | undefined;
+				if (!sk) continue;
+				const on = (j: number) => Number(t.keys[j].extra?.m_bEnabled) === 1 && !t.keys[j].removed;
+				let s0 = i;
+				while (s0 > 0 && on(s0 - 1)) s0--;
+				let e0 = i + 1;
+				while (e0 < t.keys.length && on(e0)) e0++;
+				const force = Number(e.m_flLinearForce) || 0;
+				const color = force >= 0 ? [32, 70, 255] : [255, 60, 10];
+				for (let n = 1; n <= 3; n++) {
+					const att = sk.attachments.findIndex(a => a.name.toLowerCase() === `emitter${n}`) + 1;
+					if (!att) continue;
+					run(`arm:${t.index}:${t.keys[s0].tick}:${n}`, 'tractor_beam_arm', t.keys[s0].tick, e0 < t.keys.length ? t.keys[e0].tick : Infinity, () => {
+						const m = this.attachmentAt(t.index, att, tick, false);
+						if (!m) return null;
+						const fwd = new THREE.Vector3(1, 0, 0).applyEuler(toEuler(this.entityPose(t, tick).angles)).multiplyScalar(force);
+						return new Map([[0, m], [1, new THREE.Matrix4().setPosition(color[0], color[1], color[2])], [2, new THREE.Matrix4().setPosition(fwd)]]);
+					}, {live: true});
+				}
 			} else if (t.className === 'CEntityFlame') {
 				// fire on something: burning_character (burning_gib_01 when
 				// cheap), both its control points on what's burning, followed
