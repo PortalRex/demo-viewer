@@ -115,7 +115,11 @@ export interface WaterParams {
 	reflectAmount: number;   // how far the normal bends the reflection
 	reflectTint: [number, number, number];
 	refract: boolean;        // what's below shows through ($refracttexture)
+	refractTint: [number, number, number];
+	refractAmount: number;   // how far the normal bends what's seen through
 	fogColor: [number, number, number];
+	fogStart: number;        // through how much water the fog starts, and covers
+	fogEnd: number;
 	lightmapFog: boolean;    // the fog colour lit by the light map
 	aboveWater: boolean;     // the top side (the other is the view from under the surface)
 }
@@ -295,7 +299,11 @@ function waterParams(p: Map<string, string>): WaterParams {
 		reflectAmount: num('$reflectamount', 0.8),
 		reflectTint: parseColor(p.get('$reflecttint')) ?? [1, 1, 1],
 		refract: p.has('$refracttexture'),
+		refractTint: parseColor(p.get('$refracttint')) ?? [1, 1, 1],
+		refractAmount: num('$refractamount', 0),
 		fogColor: parseColor(p.get('$fogcolor')) ?? [1, 0, 0],
+		fogStart: num('$fogstart', 0),
+		fogEnd: num('$fogend', 0),
 		lightmapFog: truthy(p.get('$lightmapwaterfog')),
 		aboveWater: truthy(p.get('$abovewater')),
 	};

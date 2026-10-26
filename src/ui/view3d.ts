@@ -290,6 +290,8 @@ class MaterialLibrary {
 		const lin = (c: number[]) => c.map(v => Math.pow(v, 2.2)) as [number, number, number];
 		u.waterReflectTint.value.set(...(w.reflect === 'none' ? [0, 0, 0] as [number, number, number] : lin(w.reflectTint)));
 		u.waterFogColor.value.set(...lin(w.fogColor));
+		u.waterRefractTint.value.set(...lin(w.refractTint));
+		u.waterRefractParams.value.set(w.fogStart, w.fogEnd, w.refractAmount, 0);
 		mat.userData.waterUniforms = u;
 		mat.userData.water = w;
 		const defines: Record<string, string> = {WATER: ''};
@@ -998,6 +1000,11 @@ export class View3D {
 		for (const rt of this.portalTargets.values()) rt.dispose();
 		this.portalTargets.clear();
 		for (const rt of this.waterTargets.values()) rt.dispose();
+		for (const rt of this.refractTargets.values()) {
+			rt.depthTexture?.dispose();
+			rt.dispose();
+		}
+		this.refractTargets.clear();
 		this.waterTargets.clear();
 		this.waterMeshes = [];
 		this.accessedOverlays.clear();
@@ -4495,9 +4502,82 @@ export class View3D {
 		for (const o of hidden) o.visible = true;
 	}
 
+	// what's below the water surfaces in view that show it ($refracttexture):
+	// the view clipped to under each one's plane, at half size, with its
+	// depth (the shader fogs it by how much water the view goes through)
+	private refractTargets = new Map<number, THREE.WebGLRenderTarget>();
+	private renderWaterRefractions(r: THREE.WebGLRenderer) {
+		const cam = this.camera;
+		const at = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+		const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+		const vis = this.bsp?.vis;
+		const set = vis?.visibleFrom(vis.clusterAt([at.x, at.y, at.z]));
+		const planes = new Map<number, THREE.Mesh[]>();
+		for (const m of this.waterMeshes) {
+			const w = (m.material as THREE.Material).userData.water as WaterParams | undefined;
+			const u = (m.material as THREE.Material).userData.waterUniforms as ReturnType<typeof waterMaterialUniforms> | undefined;
+			if (u) u.waterRefractParams.value.w = 0;
+			const h = m.userData.waterHeight as number;
+			if (!w?.refract || !w.aboveWater || at.z <= h || !frustum.intersectsObject(m)) continue;
+			if (set && !anyVisible(set, m.userData.clusters as number[])) continue;
+			let list = planes.get(h);
+			if (!list) planes.set(h, list = []);
+			list.push(m);
+		}
+		for (const [h, rt] of this.refractTargets) {
+			if (planes.has(h)) continue;
+			rt.depthTexture?.dispose();
+			rt.dispose();
+			this.refractTargets.delete(h);
+		}
+		if (!planes.size) return;
+
+		const frameTarget = r.getRenderTarget();
+		const size = r.getDrawingBufferSize(new THREE.Vector2()).multiplyScalar(0.5).floor();
+		const hidden = ([this.player, this.pathLine, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
+			.filter((o): o is THREE.Object3D => !!o && o.visible);
+		for (const o of hidden) o.visible = false;
+		const dither = ditherUniforms.ditherOn.value;
+		ditherUniforms.ditherOn.value = 0;
+		this.sky.position.copy(at);
+		// (where a point lands in the texture, and back: the view's own)
+		const viewProj = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+		const project = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1).multiply(viewProj);
+		const inverse = viewProj.clone().invert();
+		for (const [h, meshes] of planes) {
+			let rt = this.refractTargets.get(h);
+			if (!rt) {
+				const depth = new THREE.DepthTexture(size.x, size.y, THREE.UnsignedInt248Type);
+				depth.format = THREE.DepthStencilFormat;
+				rt = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, stencilBuffer: true, depthTexture: depth});
+				this.refractTargets.set(h, rt);
+			}
+			if (rt.width !== size.x || rt.height !== size.y) rt.setSize(size.x, size.y);
+			// (a little above the surface too, as the engine's, so its edge has no gap)
+			r.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, -1), h + 2)];
+			r.setRenderTarget(rt);
+			this.cullFrom(at);
+			r.render(this.scene, cam);
+			this.uncull();
+			r.clippingPlanes = [];
+			for (const m of meshes) {
+				const u = (m.material as THREE.Material).userData.waterUniforms as ReturnType<typeof waterMaterialUniforms>;
+				u.waterRefract.value = rt.texture;
+				u.waterRefractDepth.value = rt.depthTexture;
+				u.waterRefractMatrix.value.copy(project);
+				u.waterRefractInverse.value.copy(inverse);
+				u.waterRefractParams.value.w = 1;
+			}
+		}
+		r.setRenderTarget(frameTarget);
+		ditherUniforms.ditherOn.value = dither;
+		for (const o of hidden) o.visible = true;
+	}
+
 	private renderScene(r: THREE.WebGLRenderer) {
 		if (this.portals.size) this.renderPortalViews(r);
 		this.renderWaterReflections(r);
+		if (this.waterMeshes.length) this.renderWaterRefractions(r);
 		// the sky stays centred on the camera, inside the far plane
 		this.sky.scale.setScalar(this.camera.far * 0.5);
 		const sc = this.skyCamera;

@@ -85,6 +85,13 @@ export function waterMaterialUniforms() {
 		waterColor: {value: new THREE.Vector4()},  // sludge: 1 / scale, interval, scroll distance, cross-fade exponent
 		waterReflectTint: {value: new THREE.Vector3()},
 		waterFogColor: {value: new THREE.Vector3()},
+		// what's below the surface, drawn each frame (View3D.renderWaterRefractions)
+		waterRefract: {value: null as THREE.Texture | null},
+		waterRefractDepth: {value: null as THREE.Texture | null},
+		waterRefractMatrix: {value: new THREE.Matrix4()},   // world to its texture coordinates
+		waterRefractInverse: {value: new THREE.Matrix4()},  // its clip space to world
+		waterRefractTint: {value: new THREE.Vector3(1, 1, 1)},
+		waterRefractParams: {value: new THREE.Vector4()},   // fog start, fog end, bend, drawn (0/1)
 	};
 }
 
@@ -105,6 +112,25 @@ uniform vec4 waterFlowB;
 uniform vec4 waterColor;
 uniform vec3 waterReflectTint;
 uniform vec3 waterFogColor;
+#ifdef WATER_REFRACT
+uniform sampler2D waterRefract;
+uniform sampler2D waterRefractDepth;
+uniform mat4 waterRefractMatrix;
+uniform mat4 waterRefractInverse;
+uniform vec3 waterRefractTint;
+uniform vec4 waterRefractParams;
+// the world point the refraction drew at texture coordinates uv
+vec3 waterBehind(vec2 uv) {
+	float depth = texture2D(waterRefractDepth, uv).x;
+	vec4 p = waterRefractInverse * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+	return p.xyz / p.w;
+}
+// how fogged what's seen there is: by how far the view goes through water to it
+float waterFogAt(vec2 uv) {
+	float through = distance(waterBehind(uv), vDitherWorld);
+	return clamp((through - waterRefractParams.x) / max(waterRefractParams.y - waterRefractParams.x, 1e-3), 0.0, 1.0);
+}
+#endif
 #endif
 `;
 
@@ -167,7 +193,26 @@ const WATER_FRAGMENT = `
 		vec3 under = mix(fog, flowColor.rgb * sludgeLight, clamp(flowColor.a * 2.0, 0.0, 1.0));
 		outgoingLight = mix(under, reflection, clamp(fresnel * (1.0 - smoothstep(0.5, 0.7, flowColor.a)), 0.0, 1.0));
 	#elif defined(WATER_REFRACT)
-		outgoingLight = fog + fresnel * reflection;
+		// what's below, bent by the normal and tinted, fogged by how far the
+		// view goes through the water to it (all fog where it isn't drawn)
+		// (as the engine's: the bend, the tint and the reflection come in
+		// with the fog, so the water's edge shows the bottom plainly)
+		vec3 under = fog;
+		if (waterRefractParams.w > 0.5) {
+			vec4 rp = waterRefractMatrix * vec4(vDitherWorld, 1.0);
+			vec2 straight = rp.xy / rp.w;
+			float fogged = waterFogAt(straight);
+			vec2 bent = straight + vec2(dot(waterRight, n), dot(waterForward, n)) * waterRefractParams.z * fogged;
+			// (not what's in front of the surface: then straight through)
+			if (waterBehind(bent).z <= vDitherWorld.z + 1.0) fogged = waterFogAt(bent);
+			else bent = straight;
+			vec3 seen = texture2D(waterRefract, bent).rgb;
+			seen = mix(seen, seen * waterRefractTint, clamp(3.5 * fogged, 0.0, 1.0));
+			under = mix(seen, fog, fogged);
+			reflection *= clamp(2.0 * fogged, 0.0, 1.0);
+			fresnel *= clamp((fogged - 0.05) * 20.0, 0.0, 1.0);
+		}
+		outgoingLight = under + fresnel * reflection;
 	#else
 		outgoingLight = mix(fog, reflection, fresnel);
 	#endif
