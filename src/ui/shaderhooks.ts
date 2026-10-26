@@ -441,6 +441,33 @@ uniform float detailBlend;
 vec4 detailTexel = vec4(1.0);
 `;
 
+// WorldVertexTransition: displacements blend to $basetexture2 by the alpha
+// painted on their vertices, the blend's edge sharpened by the modulate
+// texture (green its middle, red its softness) where there is one
+const BLEND2_HEAD = `
+#ifdef BLEND2
+uniform sampler2D map2;
+varying float vBlend;
+#ifdef BLEND2_MODULATE
+uniform sampler2D blendModulate;
+#endif
+#endif
+`;
+const BLEND2_FRAGMENT = `
+#if defined(BLEND2) && defined(USE_MAP)
+	{
+		float blendFactor = vBlend;
+	#ifdef BLEND2_MODULATE
+		vec2 modt = texture2D(blendModulate, vMapUv).rg;
+		float minb = clamp(modt.g - modt.r, 0.0, 1.0), maxb = clamp(modt.g + modt.r, 0.0, 1.0);
+		blendFactor = maxb - minb > 1e-4 ? smoothstep(minb, maxb, blendFactor) : step(minb, blendFactor);
+	#endif
+		vec4 base1 = texture2D(map, vMapUv), base2 = texture2D(map2, vMapUv);
+		diffuseColor = vec4(diffuse, opacity) * mix(base1, base2, blendFactor);
+	}
+#endif
+`;
+
 const DETAIL_FRAGMENT = `
 #if defined(DETAIL_MODE) && defined(USE_MAP)
 	{
@@ -736,7 +763,15 @@ function hook(material: THREE.Material, paint: boolean) {
 		if (paint) {
 			Object.assign(shader.uniforms, paintUniforms, bumpLightUniforms, material.userData.envUniforms);
 			shader.uniforms.bumpNormal = {value: material.userData.bumpNormal ?? null};
-			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + DETAIL_HEAD + shader.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' + DETAIL_FRAGMENT).replace(
+			const blend2 = material.userData.blend2 as {map2: THREE.IUniform; modulate: THREE.IUniform} | undefined;
+			if (blend2) {
+				Object.assign(shader.uniforms, {map2: blend2.map2, blendModulate: blend2.modulate});
+				shader.vertexShader = '#ifdef BLEND2\nattribute float blend;\nvarying float vBlend;\n#endif\n' + shader.vertexShader.replace(
+					'#include <project_vertex>',
+					'#include <project_vertex>\n#ifdef BLEND2\n\tvBlend = blend;\n#endif',
+				);
+			}
+			shader.fragmentShader = BUMP_FRAGMENT_HEAD + ENV_FRAGMENT_HEAD + DETAIL_HEAD + BLEND2_HEAD + shader.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' + BLEND2_FRAGMENT + DETAIL_FRAGMENT).replace(
 				'reflectedLight.indirectDiffuse += lightMapTexel.rgb * lightMapIntensity * RECIPROCAL_PI;',
 				BUMP_FRAGMENT,
 			).replace('#include <envmap_fragment>', '#include <envmap_fragment>\n' + DETAIL_POST_FRAGMENT + ENV_FRAGMENT).replace('#include <opaque_fragment>', PAINT_FINAL + '#include <opaque_fragment>');
@@ -786,7 +821,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + WATER_ALBEDO + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.BLEND2 !== undefined ? '+blend2' + (material.defines.BLEND2_MODULATE !== undefined ? 'm' : '') : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

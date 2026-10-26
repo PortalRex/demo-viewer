@@ -82,6 +82,7 @@ function geometry(m: MeshData) {
 	g.setAttribute('color', new THREE.BufferAttribute(m.colors, 3));
 	if (m.uv) g.setAttribute('uv', new THREE.BufferAttribute(m.uv, 2));
 	if (m.lightUv) g.setAttribute('uv1', new THREE.BufferAttribute(m.lightUv, 2));
+	if (m.blend) g.setAttribute('blend', new THREE.BufferAttribute(m.blend, 1));
 	return g;
 }
 
@@ -506,6 +507,20 @@ class MaterialLibrary {
 				}
 			}
 			if (info.water) mat.userData.texSize = group.texSize;
+			// a displacement's second texture, blended in by its painted alpha
+			if (info.baseTexture2) {
+				const blend2 = {map2: {value: null as THREE.Texture | null}, modulate: {value: null as THREE.Texture | null}};
+				mat.userData.blend2 = blend2;
+				Promise.all([this.textures.get(info.baseTexture2), info.blendModulate ? this.textures.get(info.blendModulate, true) : null]).then(([tex, modulate]) => {
+					if (!tex) return;
+					blend2.map2.value = tex;
+					blend2.modulate.value = modulate;
+					mat.defines = {...mat.defines, BLEND2: ''};
+					if (modulate) mat.defines.BLEND2_MODULATE = '';
+					mat.needsUpdate = true;
+					this.onChange();
+				});
+			}
 			this.apply(mat, info, frame);
 			this.applyBackFaces(mat);
 			mat.needsUpdate = true;

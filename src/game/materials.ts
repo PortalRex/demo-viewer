@@ -54,6 +54,8 @@ export interface MaterialInfo {
 	found: boolean;
 	shader: string;
 	baseTexture: string;    // under materials/, without .vtf
+	baseTexture2: string;   // WorldVertexTransition: blended in by the displacement's painted alpha
+	blendModulate: string;  // its $blendmodulatetexture: the blend's edge (green its middle, red its softness)
 	alphaTest: boolean;
 	additive: boolean;
 	noCull: boolean;
@@ -119,7 +121,7 @@ export interface WaterParams {
 }
 
 const MISSING: MaterialInfo = {
-	noPortal: false, translucent: false, liquid: false, found: false, shader: '', baseTexture: '', alphaTest: false,
+	noPortal: false, translucent: false, liquid: false, found: false, shader: '', baseTexture: '', baseTexture2: '', blendModulate: '', alphaTest: false,
 	additive: false, noCull: false, unlit: false, alpha: 1, color: [1, 1, 1], bumpMap: '', ssbump: false,
 	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envContrast: 0, envSaturation: [1, 1, 1],
 	refractTint: [1, 1, 1], refractTintTexture: '',
@@ -225,6 +227,8 @@ export class Materials {
 			liquid: shader === 'water' || /water|goo/.test(name.slice(name.lastIndexOf('/') + 1)) && shader !== 'lightmappedgeneric',
 			// (eyes: the iris texture, projected by the model loader)
 			baseTexture: (p.get('$basetexture') ?? (/^eye/.test(shader) ? p.get('$iris') : undefined) ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
+			baseTexture2: shader === 'worldvertextransition' ? texturePath(p.get('$basetexture2')) : '',
+			blendModulate: shader === 'worldvertextransition' ? texturePath(p.get('$blendmodulatetexture')) : '',
 			alphaTest,
 			additive: truthy(p.get('$additive')),
 			noCull: truthy(p.get('$nocull')),

@@ -28,6 +28,7 @@ export interface MeshData {
 	colors: Float32Array;
 	uv?: Float32Array;
 	lightUv?: Float32Array;
+	blend?: Float32Array;  // displacements': how far each vertex is $basetexture2 (0..1)
 }
 
 export interface MaterialGroup extends MeshData {
@@ -197,6 +198,7 @@ interface Vert {
 	p: number[];
 	uv: [number, number];
 	lm: [number, number];
+	blend?: number;
 }
 
 // Sutherland-Hodgman: a 2D polygon clipped to a convex one (counter-clockwise)
@@ -249,6 +251,8 @@ class Builder {
 	col: number[] = [];
 	uv: number[] = [];
 	lm: number[] = [];
+	blend: number[] = [];
+	blended = false;
 
 	// wound counter-clockwise around `facing` (the face's front), so back
 	// faces can be culled
@@ -269,6 +273,8 @@ class Builder {
 			this.col.push(...color);
 			this.uv.push(v.uv[0], v.uv[1]);
 			this.lm.push(v.lm[0], v.lm[1]);
+			this.blend.push(v.blend ?? 0);
+			if (v.blend) this.blended = true;
 		}
 	}
 
@@ -637,7 +643,12 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 			const facing = facingOf(f, vs).normal;
 			for (let i = 0; i < vs.length; i++) edgeList.push(...vs[i], ...vs[(i + 1) % vs.length]);
 			if (disp >= 0 && vs.length === 4) {
-				buildDisplacement(g.b, vs, dispinfo, dispverts, disp, tex.color, facing, (p, base) => vertexFor(p, tex, f, base));
+				// (a displacement's lightmap is laid over its grid evenly, from
+				// its start corner: not projected as a flat face's)
+				const b = blocks.get(f);
+				const luxel = b && lightmap ? (tx: number, ty: number): [number, number] =>
+					[(b.x + 0.5 + (b.w - 1) * tx) / lightmap!.width, (b.y + 0.5 + (b.h - 1) * ty) / lightmap!.height] : null;
+				buildDisplacement(g.b, vs, dispinfo, dispverts, disp, tex.color, facing, (p, base) => vertexFor(p, tex, f, base), luxel);
 			} else {
 				const vv = vs.map(p => vertexFor(p, tex, f));
 				for (let i = 1; i + 1 < vv.length; i++) g.b.tri(vv[0], vv[i], vv[i + 1], tex.color, facing);
@@ -651,6 +662,7 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 				material, surface: tex.surface,
 				positions: new Float32Array(b.pos), normals: new Float32Array(b.nrm), colors: new Float32Array(b.col),
 				uv: new Float32Array(b.uv), lightUv: new Float32Array(b.lm), texSize: tex.size as [number, number],
+				blend: b.blended ? new Float32Array(b.blend) : undefined,
 			});
 		}
 		meshes.push({groups: out, edges: new Float32Array(edgeList)});
@@ -756,7 +768,8 @@ export async function loadBsp(fs: GameFS, path: string, name: string, options: B
 }
 
 function buildDisplacement(out: Builder, corners: number[][], info: DataView, dverts: DataView, index: number,
-	color: [number, number, number], facing: number[], vertex: (p: number[], base: number[]) => Vert) {
+	color: [number, number, number], facing: number[], vertex: (p: number[], base: number[]) => Vert,
+	luxel: ((tx: number, ty: number) => [number, number]) | null) {
 	const o = index * 176;
 	const start = [info.getFloat32(o, true), info.getFloat32(o + 4, true), info.getFloat32(o + 8, true)];
 	const vertStart = info.getInt32(o + 12, true);
@@ -784,11 +797,16 @@ function buildDisplacement(out: Builder, corners: number[][], info: DataView, dv
 			const base = lerp(left, right, x / (size - 1));
 			const vo = (vertStart + y * size + x) * 20;
 			const dist = dverts.getFloat32(vo + 12, true);
-			grid.push(vertex([
+			const v = vertex([
 				base[0] + dverts.getFloat32(vo, true) * dist,
 				base[1] + dverts.getFloat32(vo + 4, true) * dist,
 				base[2] + dverts.getFloat32(vo + 8, true) * dist,
-			], base));
+			], base);
+			// (the alpha painted on it, 0..255: towards $basetexture2)
+			v.blend = dverts.getFloat32(vo + 16, true) / 255;
+			// (rows run from the start corner to the next, columns to the last)
+			if (luxel) v.lm = luxel(x / (size - 1), y / (size - 1));
+			grid.push(v);
 		}
 	}
 	for (let y = 0; y < size - 1; y++) {
