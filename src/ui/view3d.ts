@@ -1362,8 +1362,12 @@ export class View3D {
 						const cube = light.cube;
 						let v = n.x * n.x * cube[(n.x >= 0 ? 0 : 3) + c] + n.y * n.y * cube[(n.y >= 0 ? 6 : 9) + c] + n.z * n.z * cube[(n.z >= 0 ? 12 : 15) + c];
 						for (const li of light.lights.slice(0, 2)) {
-							l.set(li.pos[0] - p.x, li.pos[1] - p.y, li.pos[2] - p.z).normalize();
-							v += li.color[c] * Math.max(0, n.dot(l));
+							l.set(li.pos[0] - p.x, li.pos[1] - p.y, li.pos[2] - p.z);
+							const d = l.length(), a = li.atten;
+							l.divideScalar(Math.max(d, 1e-3));
+							// (falling off to each vertex, as the shader does)
+							const at = a ? (li.base ?? li.color)[c] / Math.max(a[0] + a[1] * d + a[2] * d * d, 1e-3) : li.color[c];
+							v += at * Math.max(0, n.dot(l));
 						}
 						colors[i * 3 + c] = v * k2;
 					}
