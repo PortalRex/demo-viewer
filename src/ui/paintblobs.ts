@@ -16,18 +16,15 @@ const MAX_LIFE = 5;         // seconds a blob is followed (it lands well before)
 // The game's blob renderer, in its units of 10 (its grid, 0.8, is
 // paintblob_isosurface_box_width's 8): a blob's surface 1.3 out, its field
 // reaching 5.5 (r_paintblob_blr_render_radius, _cutoff_radius); times the
-// blob's 0.7..1 radius scale
-const RADIUS = 13;
-const CUTOFF_RATIO = 5.5 / 1.3;
-const GRID = 8;
+// blob's 0.7..1 radius scale. (Particle systems' blob renderers set their own.)
+export interface BlobShape {
+	radius: number;       // a lone blob's surface, in world units
+	cutoffRatio: number;  // its field's reach, as a multiple of that
+	grid: number;         // the isosurface grid's step
+}
+const PAINT_SHAPE: BlobShape = {radius: 13, cutoffRatio: 5.5 / 1.3, grid: 8};
 const CAPACITY = 4096;
 const CELL = 160;           // the patches of space a surface is built in
-// each cell's grid reaches a blob's field (and a step) past it, in whole
-// steps so neighbouring cells' grids share their points and the surfaces
-// they both build meet exactly
-const PAD = (Math.ceil(RADIUS * CUTOFF_RATIO / GRID) + 1) * GRID;
-// the field's level at the surface: a lone ball's (1 - d^2/R^2)^3 at its radius
-const ISO = (1 - 1 / (CUTOFF_RATIO * CUTOFF_RATIO)) ** 3;
 const MAX_CELLS = 32;
 
 export interface Sprayer {
@@ -71,10 +68,22 @@ export class PaintBlobs {
 	private paths = new Map<string, Path>();
 	private used = new Set<string>();
 	private trace: (from: THREE.Vector3, to: THREE.Vector3) => number;
+	private shape: BlobShape;
+	// each cell's grid reaches a blob's field (and a step) past it, in whole
+	// steps so neighbouring cells' grids share their points and the surfaces
+	// they both build meet exactly
+	private pad: number;
+	// the field's level at the surface: a lone ball's (1 - d^2/R^2)^3 at its radius
+	private iso: number;
 
 	// `trace`: how far along a segment the world is (Infinity when clear)
-	constructor(trace: (from: THREE.Vector3, to: THREE.Vector3) => number) {
+	constructor(trace: (from: THREE.Vector3, to: THREE.Vector3) => number, shape = PAINT_SHAPE) {
 		this.trace = trace;
+		// (a grid step that divides the cells, so their grids line up)
+		this.shape = {...shape, grid: CELL / Math.max(1, Math.round(CELL / shape.grid))};
+		shape = this.shape;
+		this.pad = (Math.ceil(shape.radius * shape.cutoffRatio / shape.grid) + 1) * shape.grid;
+		this.iso = (1 - 1 / (shape.cutoffRatio * shape.cutoffRatio)) ** 3;
 		this.material = new THREE.ShaderMaterial({
 			vertexColors: true,
 			vertexShader: `
@@ -129,7 +138,7 @@ export class PaintBlobs {
 					if (age >= path.life) continue;
 					const f = age / STEP, k = Math.min(Math.floor(f), path.points.length / 3 - 2), t = f - k;
 					p.set(path.points[k * 3], path.points[k * 3 + 1], path.points[k * 3 + 2]).lerp(s.set(path.points[k * 3 + 3], path.points[k * 3 + 4], path.points[k * 3 + 5]), t);
-					blobs.push({pos: p.clone(), radius: RADIUS * path.scale, color: new THREE.Color(sp.color[0] * sp.light, sp.color[1] * sp.light, sp.color[2] * sp.light)});
+					blobs.push({pos: p.clone(), radius: this.shape.radius * path.scale, color: new THREE.Color(sp.color[0] * sp.light, sp.color[1] * sp.light, sp.color[2] * sp.light)});
 				}
 			}
 		}
@@ -138,12 +147,19 @@ export class PaintBlobs {
 		if (this.paths.size > this.used.size + 512) for (const key of this.paths.keys()) if (!this.used.has(key)) this.paths.delete(key);
 	}
 
+	// blobs placed by someone else (a particle system's), drawn merged as
+	// the sprayers' are, each at the shape's radius
+	show(points: {pos: THREE.Vector3; color: THREE.Color}[]) {
+		this.draw(points.slice(0, CAPACITY).map(p => ({pos: p.pos, radius: this.shape.radius, color: p.color})));
+	}
+
 	// The blobs as merged surfaces: space cut into cells, each built from the
 	// blobs in it and those reaching into it from next door (so neighbours'
 	// surfaces meet); a lone blob's surface at its radius
 	private draw(blobs: Blob[]) {
+		const {grid: GRID, cutoffRatio} = this.shape, PAD = this.pad;
 		const byCell = new Map<string, {key: number[]; list: Blob[]}>();
-		const reach = RADIUS * CUTOFF_RATIO;
+		const reach = this.shape.radius * cutoffRatio;
 		// the cells blobs reach into, each with every blob whose field reaches
 		// its padded grid (so cells build the same surface where they overlap)
 		const cells = (b: Blob, r: number, each: (id: string, key: number[]) => void) => {
@@ -167,7 +183,7 @@ export class PaintBlobs {
 			const min = new THREE.Vector3(key[0] * CELL - PAD, key[1] * CELL - PAD, key[2] * CELL - PAD);
 			grid.clear();
 			this.fill(grid, list, min);
-			grid.polygonize(ISO, min, GRID);
+			grid.polygonize(this.iso, min, GRID);
 			// (its bounds: each view leaves out the cells it can't see)
 			grid.mesh.geometry.boundingSphere = new THREE.Sphere(min.clone().addScalar(size / 2), size * Math.sqrt(3) / 2);
 			grid.mesh.visible = true;
@@ -181,6 +197,7 @@ export class PaintBlobs {
 	// together into one stream; the colour is the blobs' own, weighted by
 	// their field
 	private fill(grid: IsoGrid, blobs: Blob[], min: THREE.Vector3) {
+		const {grid: GRID, cutoffRatio: CUTOFF_RATIO} = this.shape;
 		const n = grid.n, n2 = n * n;
 		const {field, palette, weight} = grid;
 		for (const b of blobs) {

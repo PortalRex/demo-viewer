@@ -23,7 +23,7 @@ import {TextureCache, compressedSupport} from './textures.ts';
 import {anyVisible} from '../game/vis.ts';
 import {Zip} from '../game/zip.ts';
 import {readVhv} from '../game/vhv.ts';
-import {PaintBlobs, type Sprayer} from './paintblobs.ts';
+import {PaintBlobs, type Sprayer, type BlobShape} from './paintblobs.ts';
 import {Ropes, type RopeSpec} from './ropes.ts';
 import {Sprites, type SpriteSpec} from './sprites.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
@@ -1089,6 +1089,11 @@ export class View3D {
 		this.glassCollision = worldCollision(bsp.models[0], true);
 		this.paintBlobs?.dispose();
 		if (this.paintBlobs) this.scene.remove(this.paintBlobs.group);
+		for (const pb of this.particleBlobs.values()) {
+			pb.dispose();
+			this.scene.remove(pb.group);
+		}
+		this.particleBlobs.clear();
 		const collision = this.collision;
 		this.paintBlobs = new PaintBlobs((from, to) => {
 			const d = to.clone().sub(from);
@@ -2172,6 +2177,38 @@ export class View3D {
 			});
 		}
 		this.paintBlobs.update(sprayers, tick * this.interval);
+	}
+
+	// particle systems drawn as blobs (render_blobs: gel flowing through the
+	// finale's tubes), merged into surfaces as the paint is, one renderer per
+	// blob shape; in their gel's colour, lit as the sprayers' streams are
+	private particleBlobs = new Map<string, PaintBlobs>();
+	private updateParticleBlobs() {
+		const shapes = new Map<string, {shape: BlobShape; points: {pos: THREE.Vector3; color: THREE.Color}[]}>();
+		const amb = this.bsp?.ambient;
+		for (const s of this.particleRenderer?.blobs ?? []) {
+			if (!s.points.length) continue;
+			const key = `${s.radius}|${s.cutoffRatio}|${s.grid}`;
+			let entry = shapes.get(key);
+			if (!entry) shapes.set(key, entry = {shape: {radius: s.radius, cutoffRatio: s.cutoffRatio, grid: s.grid}, points: []});
+			const power = /bounce/.test(s.material) ? 0 : /reflect/.test(s.material) ? 1 : /speed/.test(s.material) ? 2 : /erase|clean/.test(s.material) ? 4 : 3;
+			const at = s.points[0];
+			const cube = amb?.at([at.x, at.y, at.z]).cube;
+			const light = cube ? cube.reduce((a, b) => a + b, 0) / 18 * AMBIENT_SCALE : 0.3;
+			const c = PAINT_COLORS[power].map(v => Math.pow(v / 255, 2.2) * light);
+			const color = new THREE.Color(c[0], c[1], c[2]);
+			for (const pos of s.points) entry.points.push({pos, color});
+		}
+		for (const [key, {shape, points}] of shapes) {
+			let pb = this.particleBlobs.get(key);
+			if (!pb) {
+				pb = new PaintBlobs(() => Infinity, shape);
+				this.particleBlobs.set(key, pb);
+				this.scene.add(pb.group);
+			}
+			pb.show(points);
+		}
+		for (const [key, pb] of this.particleBlobs) if (!shapes.has(key)) pb.show([]);
 	}
 
 	// ropes and cables: each from its start entity (or attachment) to its
@@ -4136,6 +4173,7 @@ export class View3D {
 		this.updateSprites(this.meterTick);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
 		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
+		this.updateParticleBlobs();
 		// Everything is drawn linear and unexposed into one HDR frame (as the
 		// portal views and the meter are, so each material compiles once),
 		// then exposed, clamped and encoded to the screen by a final pass

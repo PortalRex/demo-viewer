@@ -889,6 +889,15 @@ interface SpriteMaterial {
 	size: [number, number, number, number];
 }
 
+// a blob-rendered system's particles this frame, and the blob shape
+export interface BlobSet {
+	material: string;
+	radius: number;
+	cutoffRatio: number;
+	grid: number;
+	points: THREE.Vector3[];
+}
+
 // one material's quads, as they're written to its mesh
 interface Batch {
 	pos: number[];
@@ -953,6 +962,9 @@ export class ParticleRenderer {
 	private sprites = new Map<string, Promise<SpriteMaterial | null>>();
 	private loaded = new Map<string, SpriteMaterial | null>();
 	private meshes = new Map<string, THREE.Mesh>();
+	// systems drawn as blobs (render_blobs: gel, as the paint renderer
+	// draws it), gathered by draw for the view to merge into surfaces
+	readonly blobs: BlobSet[] = [];
 	// how much of a point the camera sees (0..1), for renderers with a
 	// visibility proxy; everything counts as seen without it
 	visibility: ((point: THREE.Vector3, camera: THREE.Vector3, radius: number) => number) | null = null;
@@ -1040,9 +1052,20 @@ export class ParticleRenderer {
 				b.col.push(...col[k]);
 			}
 		};
+		this.blobs.length = 0;
 		for (const inst of instances) {
 			const def = inst.def;
 			if (!def.material || !inst.particles.length) continue;
+			const blob = def.renderers.find(o => o.fn === 'render_blobs');
+			if (blob) {
+				// (in the blob renderer's units of 10, as the paint's)
+				const render = num(blob, 'render_radius', 1.3), cutoff = num(blob, 'cutoff_radius', 3.3);
+				this.blobs.push({
+					material: def.material, radius: render * 10, cutoffRatio: cutoff / Math.max(render, 1e-3), grid: Math.max(2, num(blob, 'cube_width', 1)),
+					points: inst.particles.map(p => inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos.clone()),
+				});
+				continue;
+			}
 			const sprite = this.sprite(def.material);
 			if (!sprite) continue;
 			let b = batches.get(def.material);
