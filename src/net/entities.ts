@@ -170,6 +170,22 @@ export interface HudMessage {
 	text: string;     // may be a localization token (#portal2_Chapter3_Title)
 }
 const MSG_HUDMSG = 6;
+// a portal shot's fizzle at the surface (PortalFX_Surface: the portal, its
+// shooter, team, which portal, the fizzle type, where and facing which way);
+// kept as an EffectEvent named "PortalFX_Surface" (color: which portal,
+// damageType: the fizzle type, hitbox: the team)
+const MSG_PORTALFX_SURFACE = 48;
+const bitCoord = (b: BitReader) => {
+	const hasInt = b.bit(), hasFrac = b.bit();
+	if (!hasInt && !hasFrac) return 0;
+	const sign = b.bit();
+	const v = (hasInt ? b.u(14) + 1 : 0) + (hasFrac ? b.u(5) : 0) / 32;
+	return sign ? -v : v;
+};
+const bitVec3Coord = (b: BitReader): Vec3 => {
+	const has = [b.bit(), b.bit(), b.bit()];
+	return [has[0] ? bitCoord(b) : 0, has[1] ? bitCoord(b) : 0, has[2] ? bitCoord(b) : 0];
+};
 
 // A DispatchEffect from the server (CTEEffectDispatch): "PortalBlast" for a
 // portal shot (origin: where it left the gun, start: where the portal
@@ -546,6 +562,17 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 							// (times in 1/512 s: SCREENFADE_FRACBITS 9)
 							const duration = data.u(16) / 512, hold = data.u(16) / 512, flags = data.u(16);
 							fades.push({tick: r.tick, duration, hold, flags, color: [data.u(8), data.u(8), data.u(8), data.u(8)]});
+						} catch {
+							// a short message: ignore it
+						}
+						return;
+					}
+					if (type === MSG_PORTALFX_SURFACE) {
+						try {
+							data.u(16);
+							const owner = data.u(16), team = data.u(8), portal = data.u(8), fizzle = data.u(8);
+							const origin = bitVec3Coord(data), angles = bitVec3Coord(data);
+							effects.push({tick: r.tick, name: 'PortalFX_Surface', origin, start: origin, angles, normal: [0, 0, 0], scale: 0, color: portal, entity: owner, attachment: 0, hitbox: team, damageType: fizzle});
 						} catch {
 							// a short message: ignore it
 						}

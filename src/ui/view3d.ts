@@ -3099,6 +3099,17 @@ export class View3D {
 					new Map([[0, at(0)], [1, at(0)], [2, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]), {cpAt: at});
 				return;
 			}
+			if (fx.name === 'PortalFX_Surface') {
+				// a portal shot's end (C_Prop_Portal::CreateFizzleEffect): placed,
+				// a bad surface's sparks, or too close; at the hit, turned by its
+				// angles, in the portal's colour (control point 2)
+				const system = fx.damageType === 0 ? 'portal_success' : fx.damageType === 4 ? 'portal_badsurface' : fx.damageType === 7 ? 'portal_close' : '';
+				if (!system) return;
+				const color = this.portalColor(fx.color === 2, fx.hitbox || this.teamOf(fx.entity, tick));
+				const at = new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1));
+				run(`pfx:${n}`, system, fx.tick, fx.tick + 2, () => new Map([[0, at], [2, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]));
+				return;
+			}
 			if (fx.name !== 'ParticleEffect') return;
 			const name = ents.particleNames[fx.hitbox] ?? '';
 			const owner = this.ownerOf(fx.entity, tick);
