@@ -3,7 +3,9 @@
 # viewer at 25/50/75% of the demo), the frame of fixtures/shots/ref/ar/<id>.mp4
 # at that tick, game on the left. The video ends with the demo, so a tick is at
 # about (tick - (demo end tick - video frames)) / 60 s, refined by matching
-# the frames against the video's nearby ones. The demos' first and last
+# the frames against the video's nearby ones: a shift for the whole run, then
+# each row its own within LOCAL of it (the video drifts against the demo's
+# ticks over a run). The demos' first and last
 # ticks come from fixtures/shots/bcmp/demos.json ({id: [start, length]}).
 #   python tools/boardcmp.py
 import collections
@@ -23,6 +25,7 @@ W, H = 480, 270
 FPS = 30            # the video sampled this often for lining up
 SW, SH = 64, 36     # at this size
 WINDOW = 6          # seconds either side of the estimate searched
+LOCAL = 1.0         # and either side of the run's shift, per row
 
 
 def signature(img):
@@ -40,21 +43,26 @@ def video_signatures(video):
     return (frames - m) / (s + 1e-3)
 
 
-def align(items, start, video):
+def best_time(frames, path, est, window, floor):
+    # the video time (seconds) whose frame best matches ours within `window`
+    # of `est`, if it matches at least `floor`
+    lo, hi = max(0, int((est - window) * FPS)), min(len(frames), int((est + window) * FPS) + 1)
+    if hi <= lo:
+        return None
+    score = (frames[lo:hi] * signature(Image.open(path))).mean(axis=(1, 2))
+    best = int(score.argmax())
+    return (lo + best) / FPS if score[best] > floor else None
+
+
+def align(items, start, frames):
     # the shift (in seconds) that best matches our frames to the video's
     # around where the estimate puts them: their median, once they agree
-    frames = video_signatures(video)
     shifts = []
     for tick, path in items:
         est = (tick - start) / 60
-        lo, hi = max(0, int((est - WINDOW) * FPS)), min(len(frames), int((est + WINDOW) * FPS) + 1)
-        if hi <= lo:
-            continue
-        ours = signature(Image.open(path))
-        score = (frames[lo:hi] * ours).mean(axis=(1, 2))
-        best = int(score.argmax())
-        if score[best] > 0.35:
-            shifts.append((lo + best) / FPS - est)
+        t = best_time(frames, path, est, WINDOW, 0.35)
+        if t is not None:
+            shifts.append(t - est)
     return float(np.median(shifts)) if shifts else 0.0
 
 os.makedirs(OUT, exist_ok=True)
@@ -78,11 +86,16 @@ for run, items in sorted(shots.items()):
     items = [i for i in items if i[0] >= start]
     if not items:
         continue
-    shift = align(items, start, video)
+    frames = video_signatures(video)
+    shift = align(items, start, frames)
     sheet = Image.new('RGB', (W * 2, H * len(items)))
     for row, (tick, path) in enumerate(items):
         frame = os.path.join(OUT, f'{run}_{tick}_game.jpg')
-        subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', '%.3f' % max(0, (tick - start) / 60 + shift), '-i', video,
+        est = (tick - start) / 60 + shift
+        at = best_time(frames, path, est, LOCAL, 0.5)
+        if at is None:
+            at = est
+        subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-ss', '%.3f' % max(0, at), '-i', video,
                         '-frames:v', '1', '-vf', 'scale=in_range=full:out_range=full', frame], check=True)
         sheet.paste(Image.open(frame).convert('RGB').resize((W, H)), (0, row * H))
         sheet.paste(Image.open(path).convert('RGB').resize((W, H)), (W, row * H))
