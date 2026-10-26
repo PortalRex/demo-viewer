@@ -101,6 +101,9 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	CPhysicsPropMultiplayer: ['m_qPreferredPlayerCarryAngles'],
 	// ropes: their ends and how they hang (see Ropes)
 	CRopeKeyframe: ['m_hStartPoint', 'm_hEndPoint', 'm_iStartAttachment', 'm_iEndAttachment', 'm_Slack', 'm_RopeLength', 'm_fLockedPoints', 'm_RopeFlags', 'm_nSegments', 'm_Subdiv', 'm_TextureScale', 'm_Width'],
+	// beam_spotlight: its beam and halo (C_BeamSpotLight; m_nHaloIndex is
+	// given as the halo's material, "haloModel")
+	CBeamSpotlight: ['m_nHaloIndex', 'm_bSpotlightOn', 'm_flSpotlightMaxLength', 'm_flSpotlightGoalWidth', 'm_flHDRColorScale', 'm_nRotationAxis', 'm_flRotationSpeed'],
 	CEnvTonemapController: ['m_bUseCustomAutoExposureMin', 'm_bUseCustomAutoExposureMax', 'm_flCustomAutoExposureMin', 'm_flCustomAutoExposureMax', 'm_bUseCustomBloomScale', 'm_flCustomBloomScale'],
 };
 
@@ -392,6 +395,7 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		if (f.extra.length) {
 			extra = {};
 			for (const [n, i] of f.extra) if (s[i] !== undefined) extra[n] = s[i];
+			if (extra.m_nHaloIndex !== undefined) extra.haloModel = modelName(num(extra.m_nHaloIndex));
 		}
 		const anim: AnimState | undefined = f.sequence < 0 ? undefined : {
 			sequence: num(s[f.sequence]),

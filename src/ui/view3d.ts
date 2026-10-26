@@ -28,7 +28,7 @@ import {PaintBlobs, type Sprayer, type BlobShape} from './paintblobs.ts';
 import {Ropes, type RopeSpec} from './ropes.ts';
 import {MovieScreens, type ScreenSpec} from './movies.ts';
 import {ProgressSigns} from './signs.ts';
-import {Sprites, type SpriteSpec} from './sprites.ts';
+import {Sprites, type SpriteSpec, type BeamSpec} from './sprites.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt, type ScreenFade, type HudMessage} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
@@ -251,7 +251,8 @@ class MaterialLibrary {
 		const envMask = !mat.userData.vertexLit && mat.userData.ambientLit && info.envMap
 			? (envMaskName ? this.textures.get(envMaskName, true) : Promise.resolve(null))
 			: null;
-		const glowMask = mat.userData.ambientLit && info.selfIllum && info.selfIllumMask ? this.textures.get(info.selfIllumMask, true) : Promise.resolve(null);
+		const modelLit = mat.userData.ambientLit || mat.userData.vertexLit;
+		const glowMask = modelLit && info.selfIllum && info.selfIllumMask ? this.textures.get(info.selfIllumMask, true) : Promise.resolve(null);
 		// $phong's mask (the bump map's alpha, unless it's the base's) and exponents
 		const phong = mat.userData.ambientLit && info.phong;
 		const phongMask = phong && !info.phongBaseMask && info.bumpMap ? this.textures.get(info.bumpMap, true) : Promise.resolve(null);
@@ -259,7 +260,15 @@ class MaterialLibrary {
 		Promise.all([this.textures.get(info.baseTexture, false, frame), envMask, glowMask, phongMask, phongExp]).then(([tex, maskMap, glow, phMask, phExp]) => {
 			if (!tex) return;
 			// (with neither a mask nor alpha in the base texture, the engine drops it)
-			if (mat.userData.ambientLit && info.selfIllum && (glow || tex.userData.hasAlpha)) mat.userData.selfIllum = {tint: info.selfIllumTint, mask: glow};
+			if (modelLit && info.selfIllum && (glow || tex.userData.hasAlpha)) {
+				mat.userData.selfIllum = {tint: info.selfIllumTint, mask: glow};
+				// (static props' shared material: hooked already, it takes it
+				// at its next compile)
+				if (mat.userData.vertexLit) {
+					mat.defines = {...mat.defines, SELFILLUM: ''};
+					if (glow) mat.defines.SELFILLUM_MASK = '';
+				}
+			}
 			if (mat.userData.ambientLit && info.phong) {
 				mat.userData.phong = {
 					exponent: info.phongExponent, boost: info.phongBoost, fresnel: info.phongFresnel, tint: info.phongTint,
@@ -2093,10 +2102,11 @@ export class View3D {
 	// and how it's drawn, for Sprites; a glow's proxy tested against what's
 	// in the way
 	private sprites: Sprites | null = null;
-	private updateSprites(tick: number) {
+	// (`camera`: a portal's view, its sprites and glows as seen from there)
+	private updateSprites(tick: number, camera: THREE.Camera = this.camera) {
 		const ents = this.entities;
 		if (!this.sprites || !ents) return;
-		const eye = this.camera.position;
+		const eye = camera.position;
 		// (the world's fog at a point, as its shader mixes it in)
 		const fog = this.fog;
 		const fogAt = (p: THREE.Vector3) => {
@@ -2127,7 +2137,47 @@ export class View3D {
 				fog: fogAt(origin),
 			});
 		}
-		this.sprites.update(list, this.camera);
+		// beam_spotlight (C_BeamSpotLight): a beam of sprites/glow_test02 its
+		// goal width wide, from it along its forward axis to the first brush in
+		// the way (up to twice its max length), shading out, at brightness 64
+		// in its render colour; and its halo where it starts, the more seen the
+		// more it points at the eye (CViewRenderBeams::DrawBeamWithHalo)
+		const beams: BeamSpec[] = [];
+		for (const t of ents.tracks) {
+			if (t.className !== 'CBeamSpotlight') continue;
+			const k = keyAt(t, tick);
+			const e = k?.extra ?? {};
+			if (!k || k.removed || Number(e.m_bSpotlightOn ?? 0) !== 1) continue;
+			const pose = this.entityPose(t, tick);
+			const angles = [...pose.angles] as Vec3;
+			const spin = Number(e.m_flRotationSpeed ?? 0);
+			if (spin) angles[Number(e.m_nRotationAxis ?? 0) % 3] += spin * (tick - t.keys[0].tick) * this.interval;
+			const start = pose.origin.clone();
+			const dir = new THREE.Vector3(1, 0, 0).applyEuler(toEuler(angles));
+			const reach = 2 * Number(e.m_flSpotlightMaxLength ?? 500);
+			const hit = this.collision?.raycastFirst(new THREE.Ray(start.clone(), dir.clone()), THREE.DoubleSide);
+			const end = start.clone().addScaledVector(dir, hit && hit.distance < reach ? hit.distance : reach);
+			const width = Number(e.m_flSpotlightGoalWidth ?? 50);
+			const c = Number(e.m_clrRender ?? 0xffffffff) >>> 0;
+			const color: [number, number, number] = [(c & 255) / 255 * 64 / 255, ((c >>> 8) & 255) / 255 * 64 / 255, ((c >>> 16) & 255) / 255 * 64 / 255];
+			const hdrScale = Number(e.m_flHDRColorScale ?? 1) || 1;
+			// (dimmed as the eye nears its line: gone within its width)
+			const along = eye.clone().sub(start).dot(dir);
+			const toLine = eye.clone().sub(start.clone().addScaledVector(dir, along)).length();
+			const near = width * 4;
+			const dotScale = toLine < near ? Math.min(1, Math.max(0, (toLine - width) / (near - width))) : 1;
+			beams.push({material: 'sprites/glow_test02', start, end, width, color: color.map(v => v * dotScale) as [number, number, number], hdrScale, fog: fogAt(start.clone().lerp(end, 0.5))});
+			const halo = String(e.haloModel ?? '').replace(/\.(vmt|spr)$/i, '');
+			const facing = dir.dot(eye.clone().sub(start).normalize());
+			if (!halo || facing <= 0) continue;
+			const fade = Math.min(1, (2 * facing) ** 2);
+			const haloScale = 60 * Math.min(2, Math.max(1, 1 + (toLine - near) / (width * 0.5 - near)));
+			list.push({
+				material: halo, origin: start, scale: 1, mode: 3, color: color.map(v => v * fade) as [number, number, number], alpha: 1, hdrScale,
+				seen: this.pointSeen(start, eye, 2), fog: fogAt(start), halfSize: haloScale,
+			});
+		}
+		this.sprites.update(list, camera, beams);
 	}
 
 	// Monitor screens (func_monitor, _rt_Camera): the scene as the active
@@ -2233,6 +2283,7 @@ export class View3D {
 	// visibility queries measure it: a disc `radius` across at the point,
 	// facing the eye, the fraction of it nothing's in front of (sampled: its
 	// centre and a ring)
+	private seenPlane: THREE.Plane | null = null;
 	private pointSeen(point: THREE.Vector3, eye: THREE.Vector3, radius: number): number {
 		const key = `${point.x.toFixed(1)},${point.y.toFixed(1)},${point.z.toFixed(1)}|${eye.x.toFixed(1)},${eye.y.toFixed(1)},${eye.z.toFixed(1)}|${radius}`;
 		let seen = this.seenCache.get(key);
@@ -2274,8 +2325,16 @@ export class View3D {
 		ray.set(eye, dir);
 		ray.near = 0;
 		ray.far = d - 0.1;
-		const world = this.collision?.raycastFirst(ray.ray, THREE.DoubleSide);
-		if (world && world.distance < ray.far) return false;
+		// (seen through a portal: from where the view leaves the exit portal,
+		// the eye standing behind its wall)
+		const plane = this.seenPlane;
+		if (plane) {
+			const t = -plane.distanceToPoint(eye) / plane.normal.dot(dir);
+			if (t > 0 && t < d) ray.near = t + 0.5;
+		}
+		const from = ray.near ? new THREE.Ray(eye.clone().addScaledVector(dir, ray.near), dir) : ray.ray;
+		const world = this.collision?.raycastFirst(from, THREE.DoubleSide);
+		if (world && world.distance + ray.near < ray.far) return false;
 		// (only what's drawn into the depth buffer, which the engine's
 		// occlusion query tests against: shown entities and their shown
 		// parts, not translucent or hidden materials (a relay's lens))
@@ -2658,7 +2717,7 @@ export class View3D {
 		const dither = ditherUniforms.ditherOn.value;
 		ditherUniforms.ditherOn.value = 0;
 		const seen = new Set<THREE.Object3D>();
-		let redrawn = false;
+		let redrawn = false, spritesRedrawn = false;
 		// (only portals the camera can see get their view drawn: each is
 		// another whole scene)
 		this.camera.updateMatrixWorld();
@@ -2727,6 +2786,12 @@ export class View3D {
 				this.particleRenderer?.draw(shown, cam);
 				redrawn = true;
 			}
+			// (its sprites and glows as seen from there: turned to its camera,
+			// their proxies tested from the exit portal)
+			this.seenPlane = new THREE.Plane(normal.clone(), -normal.dot(at));
+			this.updateSprites(this.meterTick, cam);
+			this.seenPlane = null;
+			spritesRedrawn = true;
 			r.setRenderTarget(rt);
 			// (what shows through is what can be seen from the exit portal)
 			this.cullFrom(at.clone().addScaledVector(normal, 8));
@@ -2742,6 +2807,7 @@ export class View3D {
 		}
 		ditherUniforms.ditherOn.value = dither;
 		if (redrawn) this.particleRenderer?.draw(this.particlesShown, this.camera);
+		if (spritesRedrawn) this.updateSprites(this.meterTick);
 		// targets of portals that are gone
 		for (const [obj, rt] of this.portalTargets) {
 			if (!seen.has(obj)) {

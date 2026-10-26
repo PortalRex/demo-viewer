@@ -17,7 +17,23 @@ export interface SpriteSpec {
 	hdrScale: number;        // m_flHDRColorScale
 	seen: number;            // how much of its glow proxy shows (0..1)
 	fog: number;             // how fogged it is where it stands (0..1)
+	halfSize?: number;       // a beam's halo: this many units each way, as drawn (BeamDrawHalo)
 }
+
+// A beam (C_Beam) between two points: its texture across it (u) and once
+// along it (v, FBEAM_NOTILE), turned to the camera, added; FBEAM_SHADEOUT
+// fades it from its colour at the start to nothing at the end
+export interface BeamSpec {
+	material: string;
+	start: THREE.Vector3;
+	end: THREE.Vector3;
+	width: number;
+	color: [number, number, number];  // 0..1, brightness in
+	hdrScale: number;
+	fog: number;
+}
+
+const kRenderTransAdd = 5;
 
 const kRenderNormal = 0, kRenderGlow = 3, kRenderTransAlpha = 4, kRenderWorldGlow = 9;
 
@@ -38,7 +54,7 @@ export class Sprites {
 		this.assets = assets;
 	}
 
-	update(sprites: SpriteSpec[], camera: THREE.Camera) {
+	update(sprites: SpriteSpec[], camera: THREE.Camera, beams: BeamSpec[] = []) {
 		const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
 		const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
 		const eye = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
@@ -49,7 +65,11 @@ export class Sprites {
 			if (!m) continue;
 			let scale = s.scale > 0 ? s.scale : 1;
 			let blend = 1;
-			if (s.mode === kRenderGlow || s.mode === kRenderWorldGlow) {
+			if (s.halfSize !== undefined) {
+				// (a halo: its size as given, its fade in its colour)
+				if (s.seen <= 0) continue;
+				blend = s.seen;
+			} else if (s.mode === kRenderGlow || s.mode === kRenderWorldGlow) {
 				const dist = s.origin.distanceTo(eye);
 				if (s.seen <= 0 || dist <= 0) continue;
 				const reach = s.mode === kRenderWorldGlow ? 2400 : 1200;
@@ -67,7 +87,7 @@ export class Sprites {
 			const rgb = s.mode === kRenderNormal ? [1, 1, 1] : s.color.map(v => linear(v * blend));
 			const k = linear(s.hdrScale) * (additive ? 1 - s.fog : 1);
 			const c = [rgb[0] * k, rgb[1] * k, rgb[2] * k, s.mode === kRenderNormal ? 1 : s.alpha];
-			const ax = right.clone().multiplyScalar(m.width / 2 * scale), ay = up.clone().multiplyScalar(m.height / 2 * scale);
+			const ax = right.clone().multiplyScalar(s.halfSize ?? m.width / 2 * scale), ay = up.clone().multiplyScalar(s.halfSize ?? m.height / 2 * scale);
 			const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([x, y]) => s.origin.clone().addScaledVector(ax, x).addScaledVector(ay, y));
 			const uvs = [[0, 1], [1, 1], [1, 0], [0, 0]];
 			let b = batches.get(key);
@@ -76,6 +96,26 @@ export class Sprites {
 				b.pos.push(corners[i].x, corners[i].y, corners[i].z);
 				b.uv.push(uvs[i][0], uvs[i][1]);
 				b.col.push(...c);
+			}
+		}
+		for (const beam of beams) {
+			const key = `${beam.material}#${kRenderTransAdd}`;
+			if (!this.material(beam.material, kRenderTransAdd)) continue;
+			const mid = beam.start.clone().add(beam.end).multiplyScalar(0.5);
+			const side = beam.end.clone().sub(beam.start).cross(eye.clone().sub(mid)).normalize().multiplyScalar(beam.width / 2);
+			if (!isFinite(side.x)) continue;
+			const corners = [beam.start.clone().sub(side), beam.start.clone().add(side), beam.end.clone().add(side), beam.end.clone().sub(side)];
+			const uvs = [[0, 0], [1, 0], [1, 1], [0, 1]];
+			// (as the sprites: the colour from gamma to linear, fogging to black)
+			const k = Math.pow(Math.max(0, beam.hdrScale), 2.2) * (1 - beam.fog);
+			const c = beam.color.map(v => Math.pow(Math.max(0, v), 2.2) * k);
+			const shade = [1, 1, 0, 0];
+			let b = batches.get(key);
+			if (!b) batches.set(key, b = {pos: [], uv: [], col: []});
+			for (const i of [0, 1, 2, 0, 2, 3]) {
+				b.pos.push(corners[i].x, corners[i].y, corners[i].z);
+				b.uv.push(uvs[i][0], uvs[i][1]);
+				b.col.push(c[0] * shade[i], c[1] * shade[i], c[2] * shade[i], 1);
 			}
 		}
 		for (const [key, mesh] of this.meshes) if (!batches.has(key)) mesh.visible = false;

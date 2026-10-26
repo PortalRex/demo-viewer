@@ -907,8 +907,25 @@ function hook(material: THREE.Material, paint: boolean) {
 				`vec3 outgoingLight = reflectedLight.indirectDiffuse;
 	#ifdef USE_MAP
 		outgoingLight += texture2D(map, vMapUv).rgb * diffuse * (flashLight(vDitherWorld, normalize(vFlashN)) + modelAmbient);
+	#endif
+	#if defined(SELFILLUM) && defined(USE_MAP)
+		{
+			// ($selfillum: glowing in its own colour where its mask is, as the
+			// lit models' do)
+		#ifdef SELFILLUM_MASK
+			vec3 glow = texture2D(selfIllumMask, vMapUv).rgb;
+		#else
+			vec3 glow = vec3(texture2D(map, vMapUv).a);
+		#endif
+			outgoingLight = mix(outgoingLight, texture2D(map, vMapUv).rgb * selfIllumTint, glow);
+		}
 	#endif`,
 			);
+			const si = material.userData.selfIllum as {tint: [number, number, number]; mask: THREE.Texture | null} | undefined;
+			if (si) {
+				Object.assign(shader.uniforms, {selfIllumTint: {value: new THREE.Vector3(...si.tint)}, selfIllumMask: {value: si.mask}});
+				shader.fragmentShader = 'uniform vec3 selfIllumTint;\nuniform sampler2D selfIllumMask;\n' + shader.fragmentShader;
+			}
 		}
 		if (lit) {
 			Object.assign(shader.uniforms, material.userData.ambUniforms);
