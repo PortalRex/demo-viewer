@@ -1030,8 +1030,8 @@ export class ParticleRenderer {
 		const [tex, bytes] = await Promise.all([this.textures.get(base), this.files.read(`materials/${base}.vtf`)]);
 		if (!tex) return null;
 		const t = tex.clone();
-		t.wrapS = THREE.RepeatWrapping;  // ropes repeat along their length
-		t.wrapT = THREE.ClampToEdgeWrapping;
+		t.wrapS = THREE.ClampToEdgeWrapping;
+		t.wrapT = THREE.RepeatWrapping;  // ropes repeat along their length
 		t.needsUpdate = true;
 		const on = (k: string) => {
 			const v = m.params.get(k);
@@ -1273,7 +1273,9 @@ export class ParticleRenderer {
 			dist += len;
 			quad(b,
 				[a.p.clone().addScaledVector(sideA, -a.w), a.p.clone().addScaledVector(sideA, a.w), z.p.clone().addScaledVector(sideZ, z.w), z.p.clone().addScaledVector(sideZ, -z.w)],
-				[[u0, 1], [u0, 0], [u1, 0], [u1, 1]],
+				// (the texture's x across the rope, its y along: rope textures
+				// are a cross-section repeated down the image)
+				[[1, u0], [0, u0], [0, u1], [1, u1]],
 				[a.c, a.c, z.c, z.c]);
 		}
 	}

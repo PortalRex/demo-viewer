@@ -95,11 +95,12 @@ const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 // one), horizontal at 4:3; as a vertical angle
 const VIEWMODEL_HALF_FOV = 25 * Math.PI / 180;
 const VIEWMODEL_FOV = 2 * Math.atan(Math.tan(VIEWMODEL_HALF_FOV) * 3 / 4) * 180 / Math.PI;
-// First-person particles: the engine draws them in the world's view (fov
-// 90), only moving the view model's attachments to where they show in its
-// narrower view (FormatViewModelAttachment); drawn here with the view
-// model's camera, so their sprites are scaled by the ratio of the two
-const VM_PARTICLE_SCALE = Math.tan(VIEWMODEL_HALF_FOV) / Math.tan(45 * Math.PI / 180);
+// First-person particles: the engine runs and draws them in the world's
+// view (fov 90), the view model's attachments moved to where they show in
+// its narrower view (FormatViewModelAttachment: across and up the view
+// spread by this), so what they do in world units (drift, spread) is as
+// big against the gun as the game's; the gun is drawn over them
+const VM_ATTACHMENT_SPREAD = Math.tan(45 * Math.PI / 180) / Math.tan(VIEWMODEL_HALF_FOV);
 
 // entity classes that aren't worth a box
 const HIDDEN_CLASSES = new Set([
@@ -831,8 +832,6 @@ export class View3D {
 	private particlesShown: ParticleInstance[] = [];
 	// portal edge effects, by portal (not drawn in the view through it)
 	private edgeParticles = new Map<ParticleInstance, number>();
-	private vmParticlesShown: ParticleInstance[] = [];  // first-person effects, drawn with the view model
-	private vmParticleRenderer: ParticleRenderer | null = null;
 	// first-person view model (the portal gun), drawn over the world in
 	// Eyes view with its own field of view, as the game does
 	private vmScene = new THREE.Scene();
@@ -1129,7 +1128,6 @@ export class View3D {
 		this.waterMeshes = [];
 		this.accessedOverlays.clear();
 		this.particleRenderer?.dispose();
-		this.vmParticleRenderer?.dispose();
 		const token = ++this.mapToken;
 		if (!bsp || !files || !materials) {
 			// (no map: nothing to carry over)
@@ -1194,12 +1192,6 @@ export class View3D {
 			return near <= far ? near : Infinity;
 		};
 		this.scene.add(this.particleRenderer.group);
-		if (this.vmParticleRenderer) {
-			this.vmParticleRenderer.clear();
-			this.vmScene.remove(this.vmParticleRenderer.group);
-		}
-		this.vmParticleRenderer = new ParticleRenderer(files, materials, this.library.textures);
-		this.vmScene.add(this.vmParticleRenderer.group);
 		this.particleRuns.clear();
 		this.fizzlers.clear();
 		this.paint = null;
@@ -2961,12 +2953,18 @@ export class View3D {
 		const ents = this.entities, lib = this.particleLib;
 		this.particlesShown = [];
 		this.edgeParticles.clear();
-		this.vmParticlesShown = [];
 		if (!ents || !lib) return;
 		const LINGER = 5 / this.interval;
 		const seen = new Set<string>();
 		const run = (key: string, name: string, start: number, end: number, cps: () => ControlPoints | null, opts: {cpAt?: (t: number) => THREE.Matrix4; fp?: boolean; live?: boolean; size?: number} = {}) => {
 			const def = lib.get(name);
+			if (opts.fp) {
+				const raw = cps;
+				cps = () => {
+					const c = raw();
+					return c && new Map([...c].map(([i, m]) => [i, this.formatViewModelAttachment(m)]));
+				};
+			}
 			if (!def || tick < start || tick > end + LINGER) return;
 			const time = (tick - start) * this.interval;
 			// a burst from long ago is over (no need to simulate it from the start)
@@ -3019,7 +3017,7 @@ export class View3D {
 					if (hit && hit.distance < dist - 8) return;
 				}
 			}
-			(opts.fp ? this.vmParticlesShown : this.particlesShown).push(...r.inst.all);
+			this.particlesShown.push(...r.inst.all);
 			if (key.startsWith('edge:')) for (const i of r.inst.all) this.edgeParticles.set(i, Number(key.split(':')[1]));
 		};
 
@@ -3163,7 +3161,7 @@ export class View3D {
 				const core = this.attachmentAt(fp ? p.index : gun.index, beamPoint, tick, fp);
 				if (!light || !core) return null;
 				return new Map([[0, light], [1, new THREE.Matrix4().setPosition(color[0], color[1], color[2])], [3, core]]);
-			}, {fp, live: true, size: fp ? VM_PARTICLE_SCALE : 1});
+			}, {fp, live: true});
 		}
 
 		// the arcs the gun draws while holding something (DoEffectHolding):
@@ -3201,9 +3199,7 @@ export class View3D {
 				// (on this side of a portal it's held through)
 				if (held) cps.set(5, new THREE.Matrix4().setPosition(held.userData.heldApparent ?? new THREE.Vector3().setFromMatrixPosition(held.matrixWorld)));
 				return cps;
-			// (first person: the client shrinks these arcs (cl_portalgun_beam_size);
-			// the scale here is matched to its frames, not taken from its code)
-			}, {fp, live: true, size: fp ? 0.4 : 1});
+			}, {fp, live: true});
 		}
 
 		// dispatched effects
@@ -3266,7 +3262,7 @@ export class View3D {
 					cp = t && k ? this.worldMatrix(t, k, tick, 0) : null;
 				}
 				return new Map([[0, cp ?? new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1))]]);
-			}, {fp, size: fp ? VM_PARTICLE_SCALE : 1, live: follow});
+			}, {fp, live: follow});
 		});
 		// (the partner's view keeps what it shows too: dropped and started over
 		// every frame otherwise)
@@ -3308,6 +3304,19 @@ export class View3D {
 
 	// an entity's model attachment (1-based) in the world: the held gun's
 	// muzzle, or the view model's
+	// a view model attachment where the world's view shows it as the view
+	// model's narrower one does (see VM_ATTACHMENT_SPREAD), turned as it is
+	private formatViewModelAttachment(m: THREE.Matrix4): THREE.Matrix4 {
+		const cam = this.camera.matrixWorld, eye = new THREE.Vector3().setFromMatrixPosition(cam);
+		const right = new THREE.Vector3().setFromMatrixColumn(cam, 0), up = new THREE.Vector3().setFromMatrixColumn(cam, 1), back = new THREE.Vector3().setFromMatrixColumn(cam, 2);
+		const rel = new THREE.Vector3().setFromMatrixPosition(m).sub(eye);
+		const at = eye.clone()
+			.addScaledVector(right, rel.dot(right) * VM_ATTACHMENT_SPREAD)
+			.addScaledVector(up, rel.dot(up) * VM_ATTACHMENT_SPREAD)
+			.addScaledVector(back, rel.dot(back));
+		return m.clone().setPosition(at);
+	}
+
 	private attachmentAt(index: number, attachment: number, tick: number, viewModel: boolean): THREE.Matrix4 | null {
 		const t = (this.tracksByIndex.get(index) ?? []).find(c => keyAt(c, tick));
 		if (!t || attachment < 1) return null;
@@ -4833,7 +4842,6 @@ export class View3D {
 		};
 		hide(this.sky);
 		hide(this.particleRenderer?.group);
-		hide(this.vmParticleRenderer?.group);
 		hide(this.sprites?.group);
 		this.ownMaterial.length = 0;
 		for (const root of [this.scene, this.vmScene]) {
@@ -4923,7 +4931,6 @@ export class View3D {
 		if (!this.pip) this.renderMonitorCamera(r);
 		this.updateSprites(this.meterTick);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
-		this.vmParticleRenderer?.draw(this.vmParticlesShown, this.camera);
 		this.updateParticleBlobs();
 		// Everything is drawn linear and unexposed into one HDR frame (as the
 		// portal views and the meter are, so each material compiles once),
