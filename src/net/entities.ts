@@ -71,7 +71,6 @@ export const EXTRA_PROPS: Record<string, string[]> = {
 	// a doorway's fade brush, drawn by distance (see View3D)
 	CFuncAreaPortalWindow: ['m_flFadeStartDist', 'm_flFadeDist', 'm_flTranslucencyLimit', 'm_iBackgroundModelIndex'],
 	// the projected spotlights (test chambers' key light for models and the world)
-	CNPC_PersonalityCore: ['m_bFlashlightEnabled'],
 	CEnvProjectedTexture: ['m_hTargetEntity', 'm_bCameraSpace', 'm_bState', 'm_flLightFOV', 'm_LightColor', 'm_flBrightnessScale', 'm_SpotlightTextureName', 'm_flNearZ', 'm_flFarZ', 'm_bEnableShadows', 'm_bLightWorld'],
 	// sprites (env_sprite): how they're drawn
 	CSprite: ['m_nRenderMode', 'm_clrRender', 'm_hAttachedToEntity', 'm_nAttachment', 'm_flSpriteScale', 'm_flGlowProxySize', 'm_flHDRColorScale', 'm_nBrightness', 'm_bWorldSpaceScale'],
