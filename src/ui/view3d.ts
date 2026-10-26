@@ -3149,7 +3149,13 @@ export class View3D {
 	// An entity's origin and angles at a (fractional) tick: between network
 	// updates they're interpolated, as the game's client does, over gaps of
 	// up to a few updates (longer gaps are teleports or things appearing)
+	// The client draws other entities in the past, by its interpolation
+	// amount: (cl_interp 0.1 s, as cl_interp_ratio 2 / cl_updaterate 20) in
+	// ticks, plus one (C_BaseEntity::GetInterpolationAmount); the recording
+	// player is where its view is
+	interpDelay = 7;
 	private entityPose(t: EntityTrack, tick: number): {origin: THREE.Vector3; angles: Vec3} {
+		if (t !== this.followTrack) tick = Math.max(0, tick - this.interpDelay);
 		const i = keyIndexAt(t, Math.floor(tick));
 		const k = t.keys[Math.max(0, i)], n = t.keys[i + 1];
 		const origin = new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]);
