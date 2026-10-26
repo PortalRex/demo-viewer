@@ -2316,9 +2316,18 @@ export class View3D {
 				const m = (Number(k.extra?.m_fScreenFlags ?? 0) & 1) ? this.worldMatrix(t, k, tick, 0) : null;
 				if (!m) continue;
 				const e = panel.extra ?? {};
-				const image = Number(e.m_bCountingDown) ? 'vgui/signage/vgui_countdown_background_on'
-					: Number(e.m_bIsChecked) ? 'vgui/signage/vgui_indicator_checked' : 'vgui/signage/vgui_indicator_unchecked';
-				specs.push({key: `${t.index}:${t.keys[0].tick}`, file: '', image, start: 0, looping: false, corners: corners(m, k), uv: [0, 1, 0, 1]});
+				let image = Number(e.m_bIsChecked) ? 'vgui/signage/vgui_indicator_checked' : 'vgui/signage/vgui_indicator_unchecked';
+				let dial: number | undefined;
+				if (Number(e.m_bCountingDown)) {
+					// (counting down from when it started, over its duration)
+					const pt = ents.tracks.find(c => c.index === k.parent && c.className === 'CLabIndicatorPanel')!;
+					let i = keyIndexAt(pt, tick);
+					while (i > 0 && Number(pt.keys[i - 1].extra?.m_bCountingDown)) i--;
+					const left = 1 - (tick - pt.keys[Math.max(0, i)].tick) * this.interval / Math.max(1e-3, Number(e.m_flTimerDuration) || 1);
+					dial = Math.max(0, left) * 8;
+					image = dial > 1e-6 ? 'vgui/signage/vgui_countdown_background_on' : 'vgui/signage/vgui_countdown_background';
+				}
+				specs.push({key: `${t.index}:${t.keys[0].tick}`, file: '', image, dial, start: 0, looping: false, corners: corners(m, k), uv: [0, 1, 0, 1]});
 				continue;
 			}
 			const d = k?.parent !== undefined ? displays.get(k.parent) : undefined;

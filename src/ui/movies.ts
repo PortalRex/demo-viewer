@@ -19,6 +19,7 @@ export interface ScreenSpec {
 	key: string;
 	file: string;          // under the game folder, e.g. media/exercises_horiz.bik
 	image?: string;        // instead of a movie: this material's texture (e.g. vgui/signage/vgui_indicator_checked)
+	dial?: number;         // a countdown dial over it: the eighths of its time left (0..8)
 	start: number;         // seconds: when it started playing
 	looping: boolean;
 	corners: [THREE.Vector3, THREE.Vector3, THREE.Vector3];  // lower left, upper left, upper right
@@ -44,9 +45,22 @@ const FRAGMENT = `
 	uniform sampler2D map;
 	uniform float sceneExposure;
 	uniform float image;  // an image screen: its alpha, and exposed
+	uniform float dial;   // a countdown's eighths left, or < 0
 	varying vec2 vUv;
 	void main() {
 		vec4 c = texture2D(map, vUv);
+		if (dial >= 0.0) {
+			// (a ring of eight dark 45-degree segments, going out clockwise
+			// from twelve o'clock as the time runs down, the current one fading)
+			vec2 d = vec2(vUv.x - 0.5, 0.5 - vUv.y);
+			float r = length(d) * 2.0;
+			if (r > 0.25 && r < 0.81) {
+				float a = atan(d.x, d.y);
+				float segment = floor((a < 0.0 ? a + 6.2831853 : a) / 0.78539816);
+				float shade = clamp(dial - (7.0 - segment), 0.0, 1.0) * 0.98;
+				c.rgb *= 1.0 - shade;
+			}
+		}
 		gl_FragColor = image > 0.5 ? c : vec4(c.rgb / max(sceneExposure, 1e-3), 1.0);
 	}`;
 
@@ -76,7 +90,7 @@ export class MovieScreens {
 		this.imageTexture(name).then(tex => {
 			if (!tex) return;
 			this.images.set(name, new THREE.ShaderMaterial({
-				uniforms: {map: {value: tex}, image: {value: 1}, ...exposureUniforms},
+				uniforms: {map: {value: tex}, image: {value: 1}, dial: {value: -1}, ...exposureUniforms},
 				vertexShader: VERTEX, fragmentShader: FRAGMENT, transparent: true, depthWrite: false,
 				polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
 			}));
@@ -102,7 +116,7 @@ export class MovieScreens {
 				}
 				const video = new BinkVideo(bytes, tables);
 				const material = new THREE.ShaderMaterial({
-					uniforms: {map: {value: null}, image: {value: 0}, ...exposureUniforms},
+					uniforms: {map: {value: null}, image: {value: 0}, dial: {value: -1}, ...exposureUniforms},
 					vertexShader: VERTEX, fragmentShader: FRAGMENT,
 					polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
 				});
@@ -183,6 +197,15 @@ export class MovieScreens {
 				this.group.add(mesh);
 			}
 			mesh.material = material;
+			// (each screen's dial set as it's drawn: its material is shared)
+			mesh.userData.dial = s.dial ?? -1;
+			mesh.onBeforeRender = (_r, _s, _c, _g, mat) => {
+				const u = (mat as THREE.ShaderMaterial).uniforms;
+				if (u.dial.value !== mesh!.userData.dial) {
+					u.dial.value = mesh!.userData.dial;
+					(mat as THREE.ShaderMaterial).uniformsNeedUpdate = true;
+				}
+			};
 			const [ll, ul, ur] = s.corners;
 			const lr = ll.clone().add(ur).sub(ul);
 			const [u0, u1, v0, v1] = s.uv;
