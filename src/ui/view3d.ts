@@ -691,6 +691,15 @@ interface ModelEntry {
 	loaded?: ModelData | null; // once settled
 }
 
+// A model with its render mode and colour set to draw nothing: kRenderNone,
+// or a blended mode at alpha 0 (props kept hidden until the map's logic
+// fades them in, as crazy_box's cracked glass panels)
+function renderedClear(k: EntityKey): boolean {
+	const mode = Number(k.extra?.m_nRenderMode ?? 0);
+	if (mode === 10) return true;
+	return mode !== 0 && k.extra?.m_clrRender !== undefined && (Number(k.extra.m_clrRender) >>> 24) === 0;
+}
+
 export class View3D {
 	readonly container: HTMLElement;
 	mode: CameraMode = 'eyes';
@@ -1327,7 +1336,7 @@ export class View3D {
 				t.userData.frozenWindow = [t.keys[0].tick <= first + 2 || inMap(t) ? -Infinity : t.keys[0].tick, gone > 0 ? t.keys[gone].tick : Infinity];
 				const k0 = t.keys[0];
 				// (on a parent: fixed to it, moving with it)
-				return live.every(k => !k.removed && !k.nodraw && (k.visible || k.dormant) && k.parent === k0.parent && k.attachment === undefined
+				return !renderedClear(k0) && live.every(k => !k.removed && !renderedClear(k) && !k.nodraw && (k.visible || k.dormant) && k.parent === k0.parent && k.attachment === undefined
 					&& same(k.origin, k0.origin) && same(k.angles, k0.angles) && (k.skin ?? 0) === (k0.skin ?? 0) && k.model === k0.model
 					&& Number(k.extra?.m_nBody ?? 0) === Number(k0.extra?.m_nBody ?? 0)
 					&& (!k.anim || (k0.anim && k.anim.sequence === k0.anim.sequence && k.anim.cycle === k0.anim.cycle && (!k.anim.clientSide || !k.anim.rate))));
@@ -2020,7 +2029,7 @@ export class View3D {
 		case 'CTriggerPortalCleanser': return Number(e.m_bVisible) === 1 && Number(e.m_bDisabled) !== 1;
 		// out of the recording player's view: as last seen (what the game
 		// would show anyone else looking), until deleted
-		default: return k.visible || (!!k.dormant && !k.nodraw);
+		default: return (k.visible || (!!k.dormant && !k.nodraw)) && !(t.model.endsWith('.mdl') && renderedClear(k));
 		}
 	}
 
