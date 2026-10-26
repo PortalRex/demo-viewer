@@ -4260,9 +4260,10 @@ export class View3D {
 	private waterCam = new THREE.PerspectiveCamera();
 
 	// what the water surfaces in view reflect ($reflecttexture): the view
-	// mirrored in each one's plane, clipped to above it, at half size; the
-	// world and its props only, as $reflectonlymarkedentities has it (with
-	// $reflectskyboxonly too: the sky alone isn't drawn apart)
+	// mirrored in each one's plane, clipped to above it, at half size;
+	// entities too, as autorender forces (r_waterforcereflectentities 1, over
+	// the materials' $reflectonlymarkedentities; and $reflectskyboxonly: the
+	// sky alone isn't drawn apart)
 	private renderWaterReflections(r: THREE.WebGLRenderer) {
 		if (!this.waterMeshes.length) return;
 		const cam = this.camera;
@@ -4294,7 +4295,7 @@ export class View3D {
 
 		const frameTarget = r.getRenderTarget();
 		const size = r.getDrawingBufferSize(new THREE.Vector2()).multiplyScalar(0.5).floor();
-		const hidden = ([this.entityGroup, this.player, this.pathLine, this.particleRenderer?.group, this.paintBlobs?.group, this.ropes?.group, this.sprites?.group, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
+		const hidden = ([this.player, this.pathLine, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
 			.filter((o): o is THREE.Object3D => !!o && o.visible);
 		for (const o of hidden) o.visible = false;
 		const dither = ditherUniforms.ditherOn.value;
