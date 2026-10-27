@@ -1,6 +1,6 @@
 import {defineConfig} from 'vite';
 import type {Plugin} from 'vite';
-import {closeSync, createReadStream, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync} from 'node:fs';
+import {appendFileSync, closeSync, createReadStream, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync} from 'node:fs';
 import {join, normalize} from 'node:path';
 
 // Dev only: serves the local Portal 2 install at /__game/ (with Range
@@ -28,7 +28,8 @@ function devGameFiles(): Plugin {
 				});
 			});
 			// a Blender bundle's file: POST /__blender?path=<bundle>/<file>, saved
-			// under fixtures/blender (the export's sink when the dev server runs it)
+			// under fixtures/blender (the export's sink when the dev server runs
+			// it); &append=1 adds to the end of the file
 			server.middlewares.use('/__blender', (req, res) => {
 				const rel = normalize(decodeURIComponent(/path=([^&]*)/.exec(req.url ?? '')?.[1] ?? '')).replace(/^([/\\])+/, '');
 				if (!rel || rel.startsWith('..') || req.method !== 'POST') {
@@ -40,7 +41,7 @@ function devGameFiles(): Plugin {
 				req.on('end', () => {
 					const path = join('fixtures/blender', rel);
 					mkdirSync(join(path, '..'), {recursive: true});
-					writeFileSync(path, Buffer.concat(parts));
+					(/[?&]append=1/.test(req.url ?? '') ? appendFileSync : writeFileSync)(path, Buffer.concat(parts));
 					res.end('ok');
 				});
 			});

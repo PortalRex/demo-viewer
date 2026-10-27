@@ -106,7 +106,13 @@ class EffectBuilder:
             rgb = g.vscale(rgb, g.mul(alpha, 1.0 + add_self))
         cap = g.div(1.0, g.max(self.glob.outputs['Exposure'], 1e-3))
         rgb = g.vmin(g.vmul(rgb, vcol), g.splat(cap))
-        return rgb, g.min(alpha, 1.0)
+        # (a portal's own effects, on its opening, aren't seen through portals:
+        # a ray that came through one has passed a transparent surface)
+        fx = g.attr('p2_portalfx', out='Fac')
+        through = g.math('GREATER_THAN', g.node('ShaderNodeLightPath').outputs['Transparent Depth'], 0.5)
+        shown = g.sub(1.0, g.mul(fx, through))
+        # (premultiplied ones carry their alpha in their colour too)
+        return g.vscale(rgb, shown), g.min(g.mul(alpha, shown), 1.0)
 
     def laser(self, mat):
         """UnlitTwoTexture beam: texture x the second (its own transform,

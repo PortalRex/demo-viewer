@@ -28,7 +28,7 @@ class Bundle:
         self.bin = np.fromfile(os.path.join(self.dir, 'data.bin'), dtype=np.uint8)
 
     def view(self, v):
-        dtype = {'f32': np.float32, 'u32': np.uint32, 'u16': np.uint16, 'u8': np.uint8, 'i32': np.int32}[v['type']]
+        dtype = {'f64': np.float64, 'f32': np.float32, 'f16': np.float16, 'u32': np.uint32, 'u16': np.uint16, 'u8': np.uint8, 'i32': np.int32}[v['type']]
         return np.frombuffer(self.bin, dtype=dtype, count=v['length'], offset=v['offset'])
 
     def track(self, t):
@@ -352,6 +352,8 @@ class Importer:
             return b.view(a['view']).reshape(-1, a['size']) if a else None
         pos = attr('position').astype(np.float64) * self.S
         normal = attr('normal')
+        if normal is not None:
+            normal = normal.astype(np.float32)
         count = g['count']
         if g.get('index'):
             idx = b.view(g['index']).astype(np.int64)
@@ -508,10 +510,9 @@ class Importer:
     def dynamics(self):
         b = self.b
         for d in b.scene.get('dynamics', []):
-            spans = b.view(d['spans']).reshape(-1, 4).astype(np.int64)
+            spans = b.view(d['spans']).reshape(-1, 5).astype(np.int64)
             if not len(spans):
                 continue
-            attrs = {name: b.view(a['view']).reshape(-1, a['size']) for name, a in d['attributes'].items()}
             # (split so no one object holds too much: each shown only over its frames)
             limit = 600000
             chunk, start = [], 0
@@ -525,31 +526,46 @@ class Importer:
             if chunk:
                 groups.append(chunk)
             for gi, group in enumerate(groups):
-                self.dynamic_object(d, np.array(group), attrs, gi)
+                self.dynamic_object(d, np.array(group), gi)
 
-    def dynamic_object(self, d, spans, attrs, part):
+    def snapshot(self, d, span):
+        """One state of a dynamic object: its attributes, read from its block
+        (each attribute in turn, 4-byte aligned; positions floats, the rest
+        half floats)."""
+        count, at = int(span[3]), int(span[4])
+        out = {}
+        for name, size, kind in d['layout']:
+            dtype = {'f32': np.float32, 'f16': np.float16}[kind]
+            n = count * size
+            out[name] = np.frombuffer(self.b.bin, dtype=dtype, count=n, offset=at).reshape(count, size).astype(np.float32)
+            at += (n * np.dtype(dtype).itemsize + 3) // 4 * 4
+        return out
+
+    def dynamic_object(self, d, spans, part):
         S = self.S
-        sel = np.concatenate([np.arange(s[2], s[2] + s[3]) for s in spans])
-        n = len(sel)
-        n -= n % 3
-        sel = sel[:n]
+        quads = bool(d.get('quads'))
+        per = 4 if quads else 3
+        blocks = [self.snapshot(d, s) for s in spans]
+        attrs = {name: np.concatenate([bl[name] for bl in blocks]) for name, _, _ in d['layout']}
+        n = len(attrs['position'])
+        n -= n % per
         if not n:
             return
         me = bpy.data.meshes.new(f'dyn{d["id"]}_{part}')
         me.vertices.add(n)
-        me.vertices.foreach_set('co', (attrs['position'][sel].astype(np.float64) * S).astype(np.float32).ravel())
+        me.vertices.foreach_set('co', (attrs['position'][:n].astype(np.float64) * S).astype(np.float32).ravel())
         me.loops.add(n)
         me.loops.foreach_set('vertex_index', np.arange(n, dtype=np.int32))
-        me.polygons.add(n // 3)
-        me.polygons.foreach_set('loop_start', np.arange(0, n, 3, dtype=np.int32))
+        me.polygons.add(n // per)
+        me.polygons.foreach_set('loop_start', np.arange(0, n, per, dtype=np.int32))
         me.update(calc_edges=True)
         # the frames each face shows over
-        frm = np.concatenate([np.full(s[3] // 3, s[0]) for s in spans])[:n // 3]
-        to = np.concatenate([np.full(s[3] // 3, s[1]) for s in spans])[:n // 3]
+        frm = np.concatenate([np.full(s[3] // per, s[0]) for s in spans])[:n // per]
+        to = np.concatenate([np.full(s[3] // per, s[1]) for s in spans])[:n // per]
         for name, vals in (('p2_from', frm), ('p2_to', to)):
             a = me.attributes.new(name, 'INT', 'FACE')
             a.data.foreach_set('value', vals.astype(np.int32))
-        set_attributes(me, {name: a[sel] for name, a in attrs.items() if name != 'position'}, np.arange(n), n)
+        set_attributes(me, {name: a[:n] for name, a in attrs.items() if name != 'position'}, np.arange(n), n)
         me.materials.append(self.mats.get(d['material']))
         obj = bpy.data.objects.new(f'{d["name"][:50]} (frames)', me)
         self.layer_collection(d['scene'], d.get('group', 'effects')).objects.link(obj)

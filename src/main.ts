@@ -1072,7 +1072,8 @@ async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frame
 				await sink.write(`reference/frame_${String(i + 1).padStart(4, '0')}.png`, png);
 			}
 			progress(`Frame ${i + 1} of ${frames}`, (i + 1) / frames);
-			// (the page kept responsive now and then)
+			// (written out as it goes, and the page kept responsive now and then)
+			await capture.flush();
 			if (i % 30 === 29) await new Promise(r => setTimeout(r, 0));
 		}
 		const out = await capture.finish(note => progress(note, 1));
@@ -1086,12 +1087,11 @@ async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frame
 }
 // (dev: the files go to fixtures/blender/<name> through the dev server)
 function devBlenderSink(name: string): Sink {
-	return {
-		async write(file, data) {
-			const r = await fetch(`/__blender?path=${encodeURIComponent(`${name}/${file}`)}`, {method: 'POST', body: data});
-			if (!r.ok) throw new Error(`couldn't save ${file}: ${r.status}`);
-		},
+	const send = async (file: string, data: Uint8Array, append: boolean) => {
+		const r = await fetch(`/__blender?path=${encodeURIComponent(`${name}/${file}`)}${append ? '&append=1' : ''}`, {method: 'POST', body: data});
+		if (!r.ok) throw new Error(`couldn't save ${file}: ${r.status}`);
 	};
+	return {write: (file, data) => send(file, data, false), append: (file, data) => send(file, data, true)};
 }
 if (import.meta.env.DEV) (window as unknown as {exportBlender: typeof exportBlender}).exportBlender = exportBlender;
 

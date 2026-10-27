@@ -325,8 +325,48 @@ class MaterialBuilder:
             alpha = col.outputs['Alpha'] if alpha is None else g.mul(alpha, col.outputs['Alpha'])
         return albedo, base, alpha
 
+    def local_refract(self, g, desc):
+        """Refract's $localrefract (REFRACT_FRAGMENT): the base texture looked
+        into through its normal map, from a depth below the surface, darker
+        where the normal tilts (the slats of light covers). Tangent frame from
+        the uv map: t along u, b along the viewer's v (down)."""
+        r = desc.get('refract') or {}
+        base_img = self.images.get(desc.get('map'))
+        normal_img = self.images.get(r.get('localNormal'))
+        if base_img is None or normal_img is None:
+            return None
+        px, depth = (r.get('localParams') or [1, 0])[:2]
+        bx, by, _ = g.xyz(g.uv('UVMap'))
+        uv = g.vec(bx, g.sub(1.0, by), 0.0)  # (the viewer's uv: v down)
+        sample = lambda img, at: g.image(img, g.vec(g.xyz(at)[0], g.sub(1.0, g.xyz(at)[1]), 0.0), extension='EXTEND')
+        nc, _ = sample(normal_img, uv)
+        n_ts = g.vsub(g.vscale(nc, 2.0), 1.0)
+        nx, ny, nz = g.xyz(n_ts)
+        geo = g.geometry()
+        gn = g.norm(geo.outputs['True Normal'])
+        t = g.norm(g.node('ShaderNodeTangent', direction_type='UV_MAP', uv_map='UVMap').outputs[0])
+        b = g.vscale(g.norm(g.vmath('CROSS_PRODUCT', gn, t)), -1.0)
+        eye = g.norm(geo.outputs['Incoming'])
+        r_ts = g.norm(g.vec(g.dot(eye, t), g.dot(eye, b), g.dot(eye, gn)))
+        rx, ry, rz = g.xyz(r_ts)
+        k = g.div(1.0, g.mul(rz, -1.0))
+        nzk = g.add(1.0, g.sub(1.0, nz))
+        ox = g.add(g.mul(g.mul(rx, k), nzk), nx)
+        oy = g.add(g.mul(g.mul(ry, k), nzk), ny)
+        ruv = g.vadd(g.vec(g.mul(ox, px * depth), g.mul(oy, depth), 0.0), uv)
+        ruv = g.vmin(g.vmax(ruv, 0.0), 1.0)
+        seen, _ = sample(base_img, ruv)
+        _, seen_a = sample(base_img, g.vmin(g.vmax(g.vadd(uv, g.vscale(g.vec(nx, ny, 0.0), 0.1)), 0.0), 1.0))
+        seen = g.vmix(seen, g.splat(seen_a), 0.025)
+        shade = g.pow(g.max(nz, 0.0), 3.0)
+        return g.vmul(g.vscale(seen, shade), desc.get('color', (1, 1, 1)))
+
     def refract_color(self, g, desc, glob, albedo):
         r = desc.get('refract') or {}
+        if r.get('refractLocal'):
+            local = self.local_refract(g, desc)
+            if local is not None:
+                albedo = local
         if r.get('decalModulate'):
             # (the game multiplies its gamma-space frame by twice the texture;
             # in linear light that's (2 x tex)^2.2, halved for the blend's x2)
@@ -482,6 +522,9 @@ class MaterialBuilder:
 
     def vertexlit(self, g, desc, glob, cube):
         albedo, base, alpha = self.albedo(g, desc)
+        if (desc.get('refract') or {}).get('refractTint'):
+            # (Refract on a prop: unlit, its vertex light unused)
+            return self.refract_color(g, desc, glob, albedo), alpha
         color = albedo
         col = desc.get('color', (1, 1, 1))
         if base is not None:

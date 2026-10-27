@@ -17,29 +17,59 @@ import {modelAmbientUniforms, fogUniforms, flashUniforms} from '../ui/shaderhook
 // the browser's folder access)
 export interface Sink {
 	write(name: string, data: Uint8Array): Promise<void>;
+	append(name: string, data: Uint8Array): Promise<void>;
 }
 
-type BinType = 'f32' | 'u32' | 'u16' | 'u8' | 'i32';
+type BinType = 'f64' | 'f32' | 'f16' | 'u32' | 'u16' | 'u8' | 'i32';
 export interface BinView {offset: number; length: number; type: BinType}
 
-// the bundle's binary blob, written to in pieces
+// the bundle's binary blob (data.bin): pieces are added as they're made and
+// written out now and then (flush), so a long recording isn't held in memory
 class Bin {
-	parts: Uint8Array[] = [];
+	private pending: Uint8Array[] = [];
+	private pendingBytes = 0;
+	private written = 0;
 	size = 0;
-	add(a: Float32Array | Uint32Array | Uint16Array | Uint8Array | Int32Array): BinView {
-		const type: BinType = a instanceof Float32Array ? 'f32' : a instanceof Uint32Array ? 'u32' : a instanceof Uint16Array ? 'u16' : a instanceof Int32Array ? 'i32' : 'u8';
-		// (each piece 4-byte aligned, so numpy can view it in place)
-		const pad = (4 - (this.size % 4)) % 4;
-		if (pad) {
-			this.parts.push(new Uint8Array(pad));
-			this.size += pad;
-		}
-		const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength).slice();
+	add(a: Float64Array | Float32Array | Uint32Array | Uint16Array | Uint8Array | Int32Array, type?: BinType): BinView {
+		type ??= a instanceof Float64Array ? 'f64' : a instanceof Float32Array ? 'f32' : a instanceof Uint32Array ? 'u32' : a instanceof Uint16Array ? 'u16' : a instanceof Int32Array ? 'i32' : 'u8';
+		// (8-byte aligned for doubles)
+		this.align();
+		if (type === 'f64' && this.size % 8) this.push(new Uint8Array(4));
 		const view = {offset: this.size, length: a.length, type};
-		this.parts.push(bytes);
-		this.size += bytes.length;
+		this.push(new Uint8Array(a.buffer, a.byteOffset, a.byteLength).slice());
 		return view;
 	}
+	// (each piece 4-byte aligned, so numpy can view it in place)
+	align() {
+		const pad = (4 - (this.size % 4)) % 4;
+		if (pad) this.push(new Uint8Array(pad));
+	}
+	push(bytes: Uint8Array) {
+		this.pending.push(bytes);
+		this.pendingBytes += bytes.length;
+		this.size += bytes.length;
+	}
+	// what's waiting, onto the end of the file (the first write starts it)
+	async flush(sink: Sink, atLeast = 0) {
+		if (this.pendingBytes < atLeast || !this.pendingBytes) return;
+		const out = new Uint8Array(this.pendingBytes);
+		let o = 0;
+		for (const p of this.pending) {
+			out.set(p, o);
+			o += p.length;
+		}
+		this.pending = [];
+		this.pendingBytes = 0;
+		await (this.written ? sink.append('data.bin', out) : sink.write('data.bin', out));
+		this.written += out.length;
+	}
+}
+
+// numbers as half floats (attributes that need no more: uvs, colours, normals)
+function toHalf(a: Float32Array): Uint16Array {
+	const out = new Uint16Array(a.length);
+	for (let i = 0; i < a.length; i++) out[i] = THREE.DataUtils.toHalfFloat(a[i]);
+	return out;
 }
 
 // A value recorded each frame, kept only where it changes: keys at each
@@ -128,15 +158,18 @@ interface UniformTrack {
 
 // Geometry remade every frame (particles, sprites, beams, ropes): each
 // different state kept once, in world space, with the frames it's shown
-// [from, to)
+// [from, to). Each state is one block in data.bin: its attributes one after
+// another, in `layout` order (positions as floats, the rest half floats).
+// Particles are quads: four corners each rather than two triangles' six.
 interface DynamicRec {
 	id: number;
 	name: string;
 	scene: Layer;
 	group: Group;
 	material: number;
-	attrs: Map<string, {size: number; chunks: Float32Array[]}>;
-	spans: number[];  // from, to, first vertex, vertex count
+	layout: [string, number, BinType][];  // name, size, type
+	quads: boolean;
+	spans: number[];  // from, to, first vertex, vertex count, block offset
 	vertices: number;
 	lastSig: string;
 	uniforms?: UniformTrack;
@@ -229,6 +262,12 @@ export class BlenderCapture {
 			const c = await p;
 			if (c) this.cubePaths.set(c.texture, path);
 		}
+	}
+
+	// what's been recorded so far, onto the end of data.bin (when there's
+	// enough of it to be worth a write)
+	flush(atLeast = 32 << 20) {
+		return this.bin.flush(this.sink, atLeast);
 	}
 
 	// one frame: the scene as it was just drawn
@@ -356,6 +395,22 @@ export class BlenderCapture {
 		}
 	}
 
+	// whether a particle system is one of a portal's own: its edge flames, or
+	// an effect on its opening (as View3D.renderPortalViews tells them apart)
+	private onPortalOpening(inst: unknown): boolean {
+		const v = this.view;
+		if ((v.edgeParticles as Map<unknown, number>).has(inst)) return true;
+		const cp = (inst as {cps?: Map<number, THREE.Matrix4>}).cps?.get(0);
+		if (!cp) return false;
+		const pos = new THREE.Vector3().setFromMatrixPosition(cp);
+		for (const p of (v.portals as Map<number, {obj: THREE.Object3D; halfW: number; halfH: number}>).values()) {
+			const normal = new THREE.Vector3(1, 0, 0).transformDirection(p.obj.matrixWorld);
+			const at = new THREE.Vector3().setFromMatrixPosition(p.obj.matrixWorld);
+			if (Math.abs(normal.dot(pos) - normal.dot(at)) < 12 && pos.distanceTo(at) < Math.hypot(p.halfW, p.halfH) + 8) return true;
+		}
+		return false;
+	}
+
 	// where a portal's surface leads: the matrix taking the world in front of
 	// it to its partner's side (View3D.portalTransform), or identity unlinked
 	private portalWay(surface: THREE.Mesh): number[] {
@@ -426,64 +481,88 @@ export class BlenderCapture {
 		const mat = this.material(material, mesh);
 		if (mat < 0) return;
 		if (scene === 'main' && material.depthTest === false) scene = 'overlay';
+		const g = mesh.geometry;
+		const owners = mesh.userData.quadOwners as unknown[] | undefined;
 		let d = this.dyns.get(mesh);
 		if (!d || d.material !== mat) {
-			d = {id: this.dynList.length, name: mesh.name || mesh.parent?.name || 'dynamic', scene, group: this.groupOf(mesh), material: mat, attrs: new Map(), spans: [], vertices: 0, lastSig: '', uniforms: uniformTrack(material)};
+			// (its attributes as it first has them; the export's own last)
+			const layout: [string, number, BinType][] = [];
+			for (const [name, attr] of Object.entries(g.attributes)) {
+				if (name === 'skinIndex' || name === 'skinWeight' || (attr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) continue;
+				layout.push([name, attr.itemSize, name === 'position' ? 'f32' : 'f16']);
+			}
+			if (owners) layout.push(['p2_portalfx', 1, 'f16']);
+			d = {
+				id: this.dynList.length, name: mesh.name || mesh.parent?.name || 'dynamic', scene, group: this.groupOf(mesh), material: mat,
+				layout, quads: !!owners, spans: [], vertices: 0, lastSig: '', uniforms: uniformTrack(material),
+			};
 			this.dyns.set(mesh, d);
 			this.dynList.push(d);
 		}
 		if (d.uniforms) d.uniforms.track.push(f, uniformValues(material as THREE.ShaderMaterial, d.uniforms.layout));
 		mesh.updateWorldMatrix(true, false);
 		const world = pre ? pre.clone().multiply(mesh.matrixWorld) : mesh.matrixWorld;
-		const sig = geometrySig(mesh.geometry) + world.elements.join(',');
+		const sig = geometrySig(g) + world.elements.join(',');
 		const n = d.spans.length;
-		if (n && d.lastSig === sig && d.spans[n - 3] === f) {
-			d.spans[n - 3] = f + 1;
+		if (n && d.lastSig === sig && d.spans[n - 4] === f) {
+			d.spans[n - 4] = f + 1;
 			return;
 		}
 		d.lastSig = sig;
-		const g = mesh.geometry;
 		const pos = g.getAttribute('position');
 		if (!pos) return;
-		// the drawn vertices, triangles laid out in order
+		// the drawn vertices in order: triangles, or for particles, each quad's
+		// four corners (its two triangles are corners 0 1 2 and 0 2 3)
 		const range = g.drawRange;
 		const total = g.index ? g.index.count : pos.count;
 		const start = range.start, end = Math.min(total, range.start + (Number.isFinite(range.count) ? range.count : total));
 		const order: number[] = [];
-		for (let i = start; i < end; i++) order.push(g.index ? g.index.getX(i) : i);
-		const count = order.length - order.length % 3;
+		if (d.quads) {
+			for (let i = start; i + 5 < end; i += 6) order.push(i, i + 1, i + 2, i + 5);
+		} else {
+			for (let i = start; i < end; i++) order.push(g.index ? g.index.getX(i) : i);
+			order.length -= order.length % 3;
+		}
+		const count = order.length;
 		if (!count) return;
 		const m = world;
 		const nm = new THREE.Matrix3().getNormalMatrix(m);
 		const v = new THREE.Vector3();
-		for (const [name, attr] of Object.entries(g.attributes)) {
-			if (name === 'skinIndex' || name === 'skinWeight' || (attr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) continue;
-			const a = attr as THREE.BufferAttribute;
-			const size = a.itemSize;
+		// one block: each attribute in turn, 4-byte aligned
+		const offset = (this.bin.align(), this.bin.size);
+		for (const [name, size, type] of d.layout) {
 			const out = new Float32Array(count * size);
-			const kind = name === 'position' ? 'point' : name === 'normal' || name === 'ropeTangent' ? 'dir' : 'value';
-			for (let i = 0; i < count; i++) {
-				const k = order[i];
-				if (kind !== 'value' && size === 3) {
-					v.fromBufferAttribute(a, k);
-					if (kind === 'point') v.applyMatrix4(m);
-					else v.applyMatrix3(nm);
-					out[i * 3] = v.x;
-					out[i * 3 + 1] = v.y;
-					out[i * 3 + 2] = v.z;
-				} else for (let c = 0; c < size; c++) out[i * size + c] = a.getComponent(k, c);
+			const a = g.getAttribute(name) as THREE.BufferAttribute | undefined;
+			if (name === 'p2_portalfx' && owners) {
+				// particles on a portal's opening (its edge flames, placement
+				// sparks, fizzle), which the viewer leaves out of the views
+				// through portals
+				const flags = new Map<unknown, number>();
+				for (let i = 0; i < count; i++) {
+					const owner = owners[Math.floor((order[i] - start) / 6)];
+					let flag = flags.get(owner);
+					if (flag === undefined) flags.set(owner, flag = this.onPortalOpening(owner) ? 1 : 0);
+					out[i] = flag;
+				}
+			} else if (a && a.itemSize === size) {
+				const kind = name === 'position' ? 'point' : name === 'normal' || name === 'ropeTangent' ? 'dir' : 'value';
+				for (let i = 0; i < count; i++) {
+					const k = order[i];
+					if (kind !== 'value' && size === 3) {
+						v.fromBufferAttribute(a, k);
+						if (kind === 'point') v.applyMatrix4(m);
+						else v.applyMatrix3(nm);
+						out[i * 3] = v.x;
+						out[i * 3 + 1] = v.y;
+						out[i * 3 + 2] = v.z;
+					} else for (let c = 0; c < size; c++) out[i * size + c] = a.getComponent(k, c);
+				}
 			}
-			let rec = d.attrs.get(name);
-			if (!rec) {
-				rec = {size, chunks: []};
-				// (an attribute appearing late: zeros for the vertices before)
-				if (d.vertices) rec.chunks.push(new Float32Array(d.vertices * size));
-				d.attrs.set(name, rec);
-			}
-			rec.chunks.push(out);
+			const bytes = type === 'f16' ? toHalf(out) : out;
+			this.bin.push(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+			this.bin.align();
 		}
-		for (const [name, rec] of d.attrs) if (!(name in g.attributes)) rec.chunks.push(new Float32Array(count * rec.size));
-		d.spans.push(f, f + 1, d.vertices, count);
+		d.spans.push(f, f + 1, d.vertices, count, offset);
 		d.vertices += count;
 	}
 
@@ -497,25 +576,61 @@ export class BlenderCapture {
 		return s;
 	}
 
+	// A mesh's geometry, once: its attributes (positions, uvs and skin data
+	// as they are; normals, colours and the rest as half floats), with the
+	// drawn range. Triangle soups (the world's, by face) are joined up where
+	// corners are the same vertex in every attribute, and indexed.
 	private geometry(g: THREE.BufferGeometry, mesh: THREE.Mesh): number {
 		let id = this.geometries.get(g);
 		if (id !== undefined) return id;
 		const pos = g.getAttribute('position');
 		if (!pos || pos.count === 0) return -1;
-		const attrs: Record<string, {view: BinView; size: number}> = {};
-		const take = (name: string, as = name) => {
-			const a = g.getAttribute(name) as THREE.BufferAttribute | undefined;
-			if (!a || (a as unknown as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) return;
-			const arr = a.array;
-			const data = arr instanceof Float32Array ? arr : arr instanceof Uint16Array && !a.normalized ? new Uint32Array(arr) : new Float32Array(Array.from({length: a.count * a.itemSize}, (_, i) => a.getComponent(Math.floor(i / a.itemSize), i % a.itemSize)));
-			attrs[as] = {view: this.bin.add(data instanceof Float32Array || data instanceof Uint32Array ? data : new Float32Array(data)), size: a.itemSize};
-		};
 		const skinned = (mesh as THREE.SkinnedMesh).isSkinnedMesh;
-		for (const name of Object.keys(g.attributes)) if (skinned || (name !== 'skinIndex' && name !== 'skinWeight')) take(name);
-		const index = g.index ? this.bin.add(new Uint32Array(g.index.array)) : null;
+		const sources: [string, THREE.BufferAttribute][] = [];
+		for (const [name, a] of Object.entries(g.attributes)) {
+			if ((a as unknown as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) continue;
+			if (!skinned && (name === 'skinIndex' || name === 'skinWeight')) continue;
+			sources.push([name, a as THREE.BufferAttribute]);
+		}
+		const values = (a: THREE.BufferAttribute) => a.array instanceof Float32Array
+			? a.array
+			: Float32Array.from({length: a.count * a.itemSize}, (_, i) => a.getComponent(Math.floor(i / a.itemSize), i % a.itemSize));
+		const arrays = sources.map(([name, a]) => [name, values(a), a.itemSize] as const);
+		// (vertices alike in every attribute made one, the index through them)
+		const corners = g.index ? new Uint32Array(g.index.array) : Uint32Array.from({length: pos.count}, (_, i) => i);
+		const seen = new Map<string, number>();
+		const unique = new Int32Array(pos.count).fill(-1);
+		const firsts: number[] = [];
+		const index = new Uint32Array(corners.length);
+		for (let i = 0; i < corners.length; i++) {
+			const v = corners[i];
+			if (unique[v] < 0) {
+				let key = '';
+				for (const [, arr, size] of arrays) for (let c = 0; c < size; c++) key += arr[v * size + c] + ',';
+				let at = seen.get(key);
+				if (at === undefined) {
+					seen.set(key, at = firsts.length);
+					firsts.push(v);
+				}
+				unique[v] = at;
+			}
+			index[i] = unique[v];
+		}
+		const count = firsts.length;
+		const remap = Uint32Array.from(firsts);
+		const attrs: Record<string, {view: BinView; size: number}> = {};
+		for (const [name, arr, size] of arrays) {
+			const data = new Float32Array(count * size);
+			for (let i = 0; i < count; i++) for (let c = 0; c < size; c++) data[i * size + c] = arr[remap[i] * size + c];
+			const exact = name === 'position' || name.startsWith('uv') || name === 'skinIndex' || name === 'skinWeight';
+			attrs[name] = {view: exact ? this.bin.add(data) : this.bin.add(toHalf(data), 'f16'), size};
+		}
 		const range = g.drawRange;
 		id = this.geoList.length;
-		this.geoList.push({id, count: pos.count, index, attributes: attrs, groups: g.groups.length ? g.groups : undefined, drawRange: range.count !== Infinity || range.start ? [range.start, range.count] : undefined});
+		this.geoList.push({
+			id, count, index: this.bin.add(index), attributes: attrs, groups: g.groups.length ? g.groups : undefined,
+			drawRange: range.count !== Infinity || range.start ? [range.start, range.count] : undefined,
+		});
 		this.geometries.set(g, id);
 		return id;
 	}
@@ -707,7 +822,7 @@ export class BlenderCapture {
 		}
 		if (u.vertexLit) {
 			const si = u.selfIllum as {tint: number[]; mask: THREE.Texture | null} | undefined;
-			return {kind: 'vertexlit', ...common, selfIllum: has('SELFILLUM') && si ? {tint: si.tint, mask: this.tex(si.mask)} : undefined};
+			return {kind: 'vertexlit', ...common, selfIllum: has('SELFILLUM') && si ? {tint: si.tint, mask: this.tex(si.mask)} : undefined, refract};
 		}
 		if (env) {
 			// a world material (hookWorldMaterial): lightmapped
@@ -852,8 +967,7 @@ export class BlenderCapture {
 		}));
 		const dynamics = this.dynList.filter(d => d.vertices).map(d => ({
 			id: d.id, name: d.name, scene: d.scene, group: d.group, material: d.material, vertices: d.vertices,
-			spans: bin.add(new Uint32Array(d.spans)),
-			attributes: Object.fromEntries([...d.attrs].map(([name, a]) => [name, {size: a.size, view: bin.add(concatFloats(a.chunks))}])),
+			layout: d.layout, quads: d.quads, spans: bin.add(new Float64Array(d.spans)),
 			uniforms: uniforms(d.uniforms),
 		}));
 		const skeletons = this.skelList.map(s => ({
@@ -882,34 +996,14 @@ export class BlenderCapture {
 			flash: this.flashCookie !== null ? {cookie: this.flashCookie, layout: ['on', 'x', 'y', 'z', 'qw', 'qx', 'qy', 'qz', 'fov', 'near', 'far', 'r', 'g', 'b', 'shadows'], track: tracks(this.flash)} : null,
 			unsupported: Object.fromEntries(this.unsupported),
 		};
-		await this.sink.write('data.bin', concatParts(bin.parts, bin.size));
+		await bin.flush(this.sink);
 		const json = new TextEncoder().encode(JSON.stringify(scene));
 		await this.sink.write('scene.json', json);
 		return {bytes: bin.size + json.length, unsupported: scene.unsupported};
 	}
 }
 
-function concatParts(parts: Uint8Array[], size: number) {
-	const out = new Uint8Array(size);
-	let o = 0;
-	for (const p of parts) {
-		out.set(p, o);
-		o += p.length;
-	}
-	return out;
-}
-
 const srgbToLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
-
-function concatFloats(chunks: Float32Array[]): Float32Array {
-	const out = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
-	let o = 0;
-	for (const c of chunks) {
-		out.set(c, o);
-		o += c.length;
-	}
-	return out;
-}
 
 // a geometry's state: its buffers' versions (bumped when written), which
 // buffers they are, and its draw range

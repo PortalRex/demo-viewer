@@ -1088,6 +1088,10 @@ interface Batch {
 	uv: number[];
 	uv2: number[];  // the second sequence's frame
 	col: number[];
+	// the system each quad belongs to (kept on the mesh, not drawn: the
+	// Blender export tells portal-opening effects apart by it)
+	owners: ParticleInstance[];
+	current?: ParticleInstance;
 }
 
 const VERTEX = `
@@ -1273,6 +1277,7 @@ export class ParticleRenderer {
 		const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
 		const batches = new Map<string, Batch>();
 		const quad = (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][], uv2 = uv) => {
+			if (b.current) b.owners.push(b.current);
 			for (const k of [0, 1, 2, 0, 2, 3]) {
 				b.pos.push(c[k].x, c[k].y, c[k].z);
 				b.uv.push(uv[k][0], uv[k][1]);
@@ -1300,7 +1305,8 @@ export class ParticleRenderer {
 			// (each of its renderers draws it: some draw the sprites twice)
 			for (const r of def.renderers) {
 				if (r.fn !== 'render_animated_sprites' && r.fn !== 'render_sprite_trail' && r.fn !== 'render_rope') continue;
-				if (!b) batches.set(def.material, b = {pos: [], uv: [], uv2: [], col: []});
+				if (!b) batches.set(def.material, b = {pos: [], uv: [], uv2: [], col: [], owners: []});
+				b.current = inst;
 				if (r.fn === 'render_rope') {
 					this.rope(b, inst, r, camPos, quad, sprite.orientation, sprite.height);
 					continue;
@@ -1399,6 +1405,7 @@ export class ParticleRenderer {
 			writeAttribute(g, 'uv2', b.uv2, 2);
 			writeAttribute(g, 'pcolor', b.col, 4);
 			g.setDrawRange(0, count);
+			mesh.userData.quadOwners = b.owners;
 			mesh.visible = count > 0;
 		}
 	}
