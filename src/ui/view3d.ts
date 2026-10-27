@@ -896,7 +896,9 @@ type ModelData = Omit<ModelAsset, 'parts'> & {parts: Omit<ModelAsset['parts'][nu
 const KEEP_MODEL_MAPS = 2;
 // the size of the patches of the map static props are merged in (each
 // culled on its own)
-const PROP_CHUNK = 1024;
+const PROP_CHUNK = 4096;
+// how far behind the player the chase camera sits (closer where a wall is)
+const CHASE_DISTANCE = 150;
 interface ModelEntry {
 	data: Promise<ModelData | null>;
 	fromMap: boolean;          // from the map's own files
@@ -1219,6 +1221,10 @@ export class View3D {
 		const sun = new THREE.DirectionalLight(0xffffff, 0.4);
 		sun.position.set(0.35, 0.25, 1);
 		this.scene.add(hemi, sun, this.mapGroup, this.propGroup, this.entityGroup, this.sky);
+		// (its world matrices made once a frame, not again for every view
+		// drawn of it: a portal's, the water's, the meter's, the partner's.
+		// A walk of over a thousand objects, most of them models' bones)
+		this.scene.matrixWorldAutoUpdate = false;
 		this.sky.renderOrder = 2;
 
 		const body = new THREE.CapsuleGeometry(16, 40, 4, 12);
@@ -2094,9 +2100,44 @@ export class View3D {
 		}
 		return o.userData.clusters as number[];
 	}
+	// Water's views leave out what lies wholly on the clipped side of its
+	// plane (below it for a reflection, above for what's under it), which
+	// would only be clipped away after being drawn: the props and entities
+	// (most of the reflection's draws)
+	private cullPast(height: number, below: boolean) {
+		const past = (o: THREE.Object3D, box: THREE.Box3) => !box.isEmpty() && (below ? box.max.z < height - 1 : box.min.z > height + 1);
+		for (const o of this.visCulled) {
+			if (!o.visible) continue;
+			const box = (o.userData.worldBox ??= new THREE.Box3().setFromObject(o)) as THREE.Box3;
+			if (past(o, box)) {
+				o.visible = false;
+				this.visHidden.push(o);
+			}
+		}
+		for (const [t, o] of this.objects) {
+			if (!o.visible || WORLD_SPACE.has(t.className) || !(t.model.endsWith('.mdl') || t.model.startsWith('*'))) continue;
+			// (its box once a frame: entities move)
+			if (o.userData.heightBoxFrame !== this.frameNumber) {
+				o.userData.heightBoxFrame = this.frameNumber;
+				o.userData.heightBox = new THREE.Box3().setFromObject(o);
+			}
+			if (past(o, o.userData.heightBox as THREE.Box3)) {
+				o.visible = false;
+				this.visHidden.push(o);
+			}
+		}
+	}
+
 	private uncull() {
 		for (const o of this.visHidden) o.visible = true;
 		this.visHidden.length = 0;
+	}
+
+	// the 2D skybox moved to where a view is drawn from (the scene's
+	// matrices aren't remade for each view)
+	private placeSky(at: THREE.Vector3) {
+		this.sky.position.copy(at);
+		this.sky.updateMatrixWorld(true);
 	}
 
 	// The 2D skybox: six faces around the camera, drawn behind everything.
@@ -3359,6 +3400,73 @@ export class View3D {
 		return w > 0 && h > 0 ? {x, y, w, h} : null;
 	}
 
+	// Where water's surfaces are in a camera's view, as a rectangle of a
+	// target's pixels (null: anywhere, or one crosses behind the camera):
+	// from their triangles, as each material's water is one mesh across the
+	// whole map (its bounds say nothing)
+	private waterRect(meshes: THREE.Mesh[], cam: THREE.Camera, width: number, height: number): {x: number; y: number; w: number; h: number} | null {
+		const m = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+		const e = m.elements;
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+		for (const mesh of meshes) {
+			const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+			const index = mesh.geometry.index;
+			const tris = (index ? index.count : pos.count) / 3;
+			const p = pos.array as ArrayLike<number>;
+			for (let t = 0; t < tris; t++) {
+				let tx0 = Infinity, ty0 = Infinity, tx1 = -Infinity, ty1 = -Infinity, behind = 0;
+				for (let k = 0; k < 3; k++) {
+					const v = index ? index.getX(t * 3 + k) : t * 3 + k;
+					const x = p[v * 3], y = p[v * 3 + 1], z = p[v * 3 + 2];
+					const w = e[3] * x + e[7] * y + e[11] * z + e[15];
+					if (w <= 1e-3) {
+						behind++;
+						continue;
+					}
+					const nx = (e[0] * x + e[4] * y + e[8] * z + e[12]) / w, ny = (e[1] * x + e[5] * y + e[9] * z + e[13]) / w;
+					tx0 = Math.min(tx0, nx); tx1 = Math.max(tx1, nx);
+					ty0 = Math.min(ty0, ny); ty1 = Math.max(ty1, ny);
+				}
+				if (behind === 3) continue;
+				// (part of it behind the eye: where it goes on screen is
+				// unbounded; one that's in view is anywhere)
+				if (behind) return null;
+				if (tx1 < -1 || tx0 > 1 || ty1 < -1 || ty0 > 1) continue;
+				x0 = Math.min(x0, tx0); x1 = Math.max(x1, tx1);
+				y0 = Math.min(y0, ty0); y1 = Math.max(y1, ty1);
+			}
+		}
+		if (x0 > x1) return {x: 0, y: 0, w: 0, h: 0};
+		const left = Math.max(0, Math.floor((x0 + 1) / 2 * width)), right = Math.min(width, Math.ceil((x1 + 1) / 2 * width));
+		const top = Math.max(0, Math.floor((1 - y1) / 2 * height)), bottom = Math.min(height, Math.ceil((1 - y0) / 2 * height));
+		return {x: left, y: top, w: right - left, h: bottom - top};
+	}
+
+	// A water view drawn only where the water is in it (with a margin for
+	// the surface's bend): its camera's view narrowed to that part of the
+	// target, as a portal's view is (the same pixels; what's outside culled).
+	// False when it's most of the target anyway, or nowhere
+	private narrowTo(cam: THREE.PerspectiveCamera, rt: THREE.WebGLRenderTarget, meshes: THREE.Mesh[]): boolean {
+		const rect = this.waterRect(meshes, cam, rt.width, rt.height);
+		const pad = Math.ceil(Math.max(rt.width, rt.height) * 0.04) + 4;
+		if (rect && rect.w > 0 && rect.h > 0) {
+			const x0 = Math.max(0, rect.x - pad), y0 = Math.max(0, rect.y - pad);
+			const x1 = Math.min(rt.width, rect.x + rect.w + pad), y1 = Math.min(rt.height, rect.y + rect.h + pad);
+			const w = x1 - x0, h = y1 - y0;
+			if (w * h < rt.width * rt.height * 0.85) {
+				cam.setViewOffset(rt.width, rt.height, x0, y0, w, h);
+				rt.viewport.set(x0, rt.height - y0 - h, w, h);
+				rt.scissor.copy(rt.viewport);
+				rt.scissorTest = true;
+				return true;
+			}
+		}
+		cam.clearViewOffset();
+		rt.viewport.set(0, 0, rt.width, rt.height);
+		rt.scissorTest = false;
+		return false;
+	}
+
 	// the size of what's being drawn: the frame (the partner's is smaller)
 	private viewSize(r: THREE.WebGLRenderer): THREE.Vector2 {
 		const t = r.getRenderTarget();
@@ -3439,7 +3547,7 @@ export class View3D {
 			obliqueNear(cam, new THREE.Plane(normal, -normal.dot(at) - 0.25));
 			const linkedSurface = linked.obj.userData.portalSurface as THREE.Mesh;
 			surface.visible = linkedSurface.visible = false;
-			this.sky.position.setFromMatrixPosition(cam.matrixWorld);
+			this.placeSky(new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld));
 			// (the exit portal's own edge isn't in its view: it would wrap the
 			// camera, which sits in its plane; nor are the other effects on its
 			// opening, its placement sparks or fizzle, which would fill it)
@@ -5386,6 +5494,7 @@ export class View3D {
 	// turned to face the light in it)
 	private drawCasters(fc: THREE.PerspectiveCamera, leaveOut: THREE.Object3D[], ropes = false) {
 		const r = this.renderer!;
+		this.scene.updateMatrixWorld();
 		const hidden: THREE.Object3D[] = [];
 		const hide = (o: THREE.Object3D | null | undefined) => {
 			if (o && o.visible) {
@@ -5844,6 +5953,7 @@ export class View3D {
 			this.camera.updateProjectionMatrix();
 		}
 		this.camera.updateMatrixWorld();
+		this.scene.updateMatrixWorld();
 		// shaders compile in the background (parallel compile) and whatever
 		// is still compiling sits this frame out (the meter's too), rather
 		// than the page stalling until the driver has built it
@@ -5870,7 +5980,7 @@ export class View3D {
 		const waiting = this.capturing ? [] : this.notReady(r);
 		for (const o of waiting) o.visible = false;
 		if (this.bsp) {
-			if (!this.skyCamera) this.sky.position.copy(this.camera.position);
+			if (!this.skyCamera) this.placeSky(this.camera.position);
 			// (not metered while anything sits out: it'd read too dark)
 			this.meterExposure(r, waiting.length === 0);
 			this.updateFog();
@@ -6074,16 +6184,19 @@ export class View3D {
 			mirror.up.set(up.x, up.y, -up.z);
 			mirror.lookAt(mirror.position.x + forward.x, mirror.position.y + forward.y, mirror.position.z - forward.z);
 			mirror.updateMatrixWorld();
-			this.sky.position.copy(mirror.position);
-			r.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), -h)];
-			r.setRenderTarget(rt);
-			this.cullFrom(at);
-			r.render(this.scene, mirror);
-			this.uncull();
-			r.clippingPlanes = [];
 			// (where a point lands in the reflection: its texture coordinates)
 			const project = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
 				.multiply(mirror.projectionMatrix).multiply(mirror.matrixWorldInverse);
+			this.narrowTo(mirror, rt, meshes);
+			this.placeSky(mirror.position);
+			r.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, 1), -h)];
+			r.setRenderTarget(rt);
+			this.cullFrom(at);
+			this.cullPast(h, true);
+			r.render(this.scene, mirror);
+			this.uncull();
+			r.clippingPlanes = [];
+			mirror.clearViewOffset();
 			for (const m of meshes) {
 				const u = (m.material as THREE.Material).userData.waterUniforms as ReturnType<typeof waterMaterialUniforms>;
 				u.waterReflect.value = rt.texture;
@@ -6099,6 +6212,7 @@ export class View3D {
 	// the view clipped to under each one's plane, at half size, with its
 	// depth (the shader fogs it by how much water the view goes through)
 	private refractTargets = new Map<number, THREE.WebGLRenderTarget>();
+	private refractCam = new THREE.PerspectiveCamera();
 	private renderWaterRefractions(r: THREE.WebGLRenderer) {
 		const cam = this.camera;
 		const at = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
@@ -6132,7 +6246,7 @@ export class View3D {
 		for (const o of hidden) o.visible = false;
 		const dither = ditherUniforms.ditherOn.value;
 		ditherUniforms.ditherOn.value = 0;
-		this.sky.position.copy(at);
+		this.placeSky(at);
 		// (where a point lands in the texture, and back: the view's own)
 		const viewProj = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
 		const project = new THREE.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1).multiply(viewProj);
@@ -6147,10 +6261,15 @@ export class View3D {
 			}
 			if (rt.width !== size.x || rt.height !== size.y) rt.setSize(size.x, size.y);
 			// (a little above the surface too, as the engine's, so its edge has no gap)
+			const view = this.refractCam;
+			view.copy(cam);
+			view.clearViewOffset();
+			this.narrowTo(view, rt, meshes);
 			r.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 0, -1), h + 2)];
 			r.setRenderTarget(rt);
 			this.cullFrom(at);
-			r.render(this.scene, cam);
+			this.cullPast(h + 2, false);
+			r.render(this.scene, view);
 			this.uncull();
 			r.clippingPlanes = [];
 			for (const m of meshes) {
@@ -6175,7 +6294,7 @@ export class View3D {
 		this.sky.scale.setScalar(this.camera.far * 0.5);
 		const sc = this.skyCamera;
 		if (!sc) {
-			this.sky.position.copy(this.camera.position);
+			this.placeSky(this.camera.position);
 			this.cullFrom(this.camera.position);
 			r.render(this.scene, this.camera);
 			this.uncull();
@@ -6197,7 +6316,7 @@ export class View3D {
 		this.skyView.fov = this.camera.fov;
 		this.skyView.aspect = this.camera.aspect;
 		this.skyView.updateProjectionMatrix();
-		this.sky.position.copy(this.skyView.position);
+		this.placeSky(this.skyView.position);
 		for (const o of hidden) o.visible = false;
 		this.scene.fog = sc.fog;
 		const dither = ditherUniforms.ditherOn.value;
