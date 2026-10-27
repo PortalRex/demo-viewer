@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import {writeAttribute} from './dynamic.ts';
 import type {PropValue} from '../net/props.ts';
-import type {Materials} from '../game/materials.ts';
+import type {Materials, KV} from '../game/materials.ts';
 import type {TextureCache} from './textures.ts';
 import {exposureUniforms} from './shaderhooks.ts';
 
@@ -185,6 +185,50 @@ async function loadSolidEnergy(assets: EffectAssets, name: string, m: THREE.Shad
 			u.useTangent.value = 1;
 		}
 	}
+}
+
+// A brush drawn with SolidEnergy (a laser field's plane): the material, its
+// details' offsets moved by its Sine and LinearRamp proxies (the field's
+// atmosphere drifting, its phase flickering), or null for another shader or
+// a flow-mapped one (fizzlers: drawn by their trigger)
+export async function worldEnergyMaterial(assets: EffectAssets, name: string): Promise<THREE.ShaderMaterial | null> {
+	const raw = await assets.materials.raw(name);
+	if (!raw || raw.shader !== 'solidenergy' || raw.params.has('$flowmap')) return null;
+	const m = solidEnergyMaterial();
+	m.userData.effect = true;  // (freed with its object)
+	await loadSolidEnergy(assets, name, m);
+	const u = m.uniforms;
+	const offsets: Record<string, THREE.Vector2> = {$basetextureoffset: u.baseOffset.value, $detail1offset: u.detail1Offset.value, $detail2offset: u.detail2Offset.value};
+	for (const [k, v] of Object.entries(offsets)) {
+		const [x, y] = (raw.params.get(k) ?? '').replace(/["[\]{}]/g, ' ').trim().split(/\s+/).map(Number);
+		v.set(Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0);
+	}
+	const proxies: ((time: number) => void)[] = [];
+	for (const proxy of raw.proxies ?? []) {
+		if (typeof proxy.value === 'string') continue;
+		const get = (k: string) => {
+			const e = (proxy.value as KV).find(x => x.key.toLowerCase() === k);
+			return typeof e?.value === 'string' ? e.value : '';
+		};
+		// (the result: one of the offsets, or one part of it)
+		const target = /^(\$\w+?)(?:\[(\d)\])?$/.exec(get('resultvar').toLowerCase());
+		const v = target && offsets[target[1]];
+		if (!v) continue;
+		const set = (x: number) => target![2] === '1' ? (v.y = x) : target![2] === '0' ? (v.x = x) : v.set(x, x);
+		const kind = proxy.key.toLowerCase();
+		if (kind === 'sine') {
+			const lo = Number(get('sinemin')) || 0, hi = Number(get('sinemax') || 1), period = Number(get('sineperiod')) || 1;
+			proxies.push(t => set(lo + (hi - lo) * (Math.sin(t * Math.PI * 2 / period) * 0.5 + 0.5)));
+		} else if (kind === 'linearramp') {
+			const rate = Number(get('rate')) || 0, start = Number(get('initialvalue')) || 0;
+			proxies.push(t => set(start + rate * t));
+		}
+	}
+	m.userData.proxies = proxies;
+	return m;
+}
+export function animateEnergy(m: THREE.ShaderMaterial, time: number) {
+	for (const p of m.userData.proxies as ((t: number) => void)[]) p(time);
 }
 
 // ---- lasers ----

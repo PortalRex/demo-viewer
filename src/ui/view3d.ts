@@ -15,7 +15,7 @@ import type {StudioModel, ModelGroup} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
 import type {Gesture, Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
-import {Laser, Bridge, Funnel, fizzlerMaterial, setFizzlerState, portalMaterial, vec3, EffectAssets} from './effects.ts';
+import {Laser, Bridge, Funnel, worldEnergyMaterial, animateEnergy, fizzlerMaterial, setFizzlerState, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
 import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
 import type {ControlPoints, InstanceState} from './particles.ts';
@@ -1283,13 +1283,35 @@ export class View3D {
 			const mesh = new THREE.Mesh(geometry(g), this.library!.forWorld(g));
 			mesh.name = `brush ${g.material}`;
 			mesh.userData.brushGroup = g;
+			this.energize(mesh, g.material);
 			if (g.surface === 'glass' || g.surface === 'liquid') mesh.renderOrder = 1;
 			group.add(mesh);
 		}
 		return group;
 	}
 
+	// brushes of a SolidEnergy material (laser fields) drawn with it, its
+	// details and their proxies, rather than as a flat additive texture
+	private energyMaterials = new Map<string, Promise<THREE.ShaderMaterial | null>>();
+	private energyLive = new Set<THREE.ShaderMaterial>();
+	private energize(mesh: THREE.Mesh, name: string) {
+		if (!this.effects) return;
+		let m = this.energyMaterials.get(name);
+		if (!m) this.energyMaterials.set(name, m = worldEnergyMaterial(this.effects, name).catch(() => null));
+		const plain = mesh.material;
+		m.then(energy => {
+			if (!energy || mesh.material !== plain) return;
+			mesh.material = energy;
+			this.energyLive.add(energy);
+			this.compileSoon();
+			this.loaded();
+		});
+	}
+
 	setMap(bsp: BspMap | null, files: GameFiles | null = null, materials: Materials | null = null) {
+		for (const m of this.energyMaterials.values()) m.then(e => e?.dispose());
+		this.energyMaterials.clear();
+		this.energyLive.clear();
 		this.meterSnap = true;
 		this.bsp = bsp;
 		this.files = files;
@@ -4720,6 +4742,7 @@ export class View3D {
 			this.portals.clear();
 			const time = performance.now() / 1000;
 			for (const m of this.fizzlers.values()) m.uniforms.time.value = time;
+			for (const m of this.energyLive) animateEnergy(m, time);
 			waterUniforms.waterTime.value = time;
 			this.paint?.seek(tick);
 			this.updateLightStyles(tick);

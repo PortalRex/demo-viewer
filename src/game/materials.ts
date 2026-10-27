@@ -183,11 +183,11 @@ export class Materials {
 	}
 
 	// a material's shader and parameters (lower-case keys), patches resolved
-	raw(name: string): Promise<{shader: string; params: Map<string, string>} | null> {
+	raw(name: string): Promise<{shader: string; params: Map<string, string>; proxies?: KV} | null> {
 		return this.params(`materials/${name.toLowerCase().replace(/\\/g, '/').replace(/\.vmt$/, '')}.vmt`, 0);
 	}
 
-	private async params(path: string, depth: number): Promise<{shader: string; params: Map<string, string>} | null> {
+	private async params(path: string, depth: number): Promise<{shader: string; params: Map<string, string>; proxies?: KV} | null> {
 		const text = await this.files.text(path);
 		if (!text) return null;
 		const kv = parseKeyValues(text);
@@ -212,10 +212,12 @@ export class Materials {
 			const base = typeof include?.value === 'string' ? await this.params(include.value.toLowerCase().replace(/\\/g, '/'), depth + 1) : null;
 			if (base) for (const [k, v] of base.params) params.set(k, v);
 			for (const e of root.value) if ((e.key === 'insert' || e.key === 'replace') && typeof e.value !== 'string') take(e.value);
-			return {shader: base?.shader ?? shader, params};
+			return {shader: base?.shader ?? shader, params, proxies: base?.proxies};
 		}
 		take(root.value);
-		return {shader, params};
+		// (the proxies block, as written: see the effects that animate by it)
+		const proxies = root.value.find(e => e.key.toLowerCase() === 'proxies')?.value;
+		return {shader, params, proxies: typeof proxies === 'string' ? undefined : proxies};
 	}
 
 	private async load(name: string, depth: number): Promise<MaterialInfo> {
