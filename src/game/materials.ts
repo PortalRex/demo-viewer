@@ -79,6 +79,9 @@ export interface MaterialInfo {
 	detailBlendFactor: number;
 	detailBlendMode: number; // how it combines (LightmappedGeneric's TCOMBINE_ modes)
 	envLightScale: number;   // $envmaplightscale: reflections darkened where the light is
+	// eyes (EyeRefract): $ambientoccltexture (on the mesh's own coordinates),
+	// the colour it shades the eye's light towards, and how wide the pupil is
+	eye: {ao: string; aoColor: [number, number, number]; dilation: number} | null;
 	selfIllum: boolean;      // $selfillum (VertexLitGeneric): unlit where the mask (or base alpha) says
 	selfIllumMask: string;
 	selfIllumTint: [number, number, number];
@@ -132,7 +135,7 @@ const MISSING: MaterialInfo = {
 	envMap: '', envTint: [1, 1, 1], envMask: 'none', envMaskTexture: '', envFresnel: 0, fresnelReflection: 1, envContrast: 0, envSaturation: [1, 1, 1],
 	refractTint: [1, 1, 1], refractTintTexture: '',
 	detail: '', detailScale: 4, detailBlendFactor: 1, detailBlendMode: 0, envLightScale: 0,
-	selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
+	eye: null, selfIllum: false, selfIllumMask: '', selfIllumTint: [1, 1, 1],
 	phong: false, phongExponent: 5, phongBoost: 1, phongFresnel: [0, 0.5, 1], phongTint: [1, 1, 1], phongBaseMask: false, phongExponentTexture: '',
 	cloakFactor: 0, normalMap: '', localRefract: 0, water: null,
 };
@@ -226,6 +229,9 @@ export class Materials {
 		const p = m.params;
 		const shader = m.shader;
 		const alphaTest = truthy(p.get('$alphatest'));
+		// (eyes: the cornea's reflection lit as the eye is, by its $glossiness)
+		const eye = /^eye/.test(shader);
+		const gloss = p.has('$glossiness') ? Number(p.get('$glossiness')) || 0 : 1;
 		return {
 			found: true,
 			shader,
@@ -246,7 +252,7 @@ export class Materials {
 			bumpMap: (p.get('$bumpmap') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			ssbump: truthy(p.get('$ssbump')),
 			envMap: (p.get('$envmap') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
-			envTint: parseTint(p.get('$envmaptint')) ?? [1, 1, 1],
+			envTint: eye ? [gloss, gloss, gloss] : parseTint(p.get('$envmaptint')) ?? [1, 1, 1],
 			envMask: truthy(p.get('$basealphaenvmapmask')) ? 'base' : truthy(p.get('$normalmapalphaenvmapmask')) ? 'bump' : p.get('$envmapmask') ? 'texture' : 'none',
 			envMaskTexture: (p.get('$envmapmask') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.vtf$/, ''),
 			envFresnel: Number(p.get('$envmapfresnel') ?? 0) || 0,
@@ -259,7 +265,12 @@ export class Materials {
 			detailScale: p.has('$detailscale') ? Number(p.get('$detailscale')) || 4 : 4,
 			detailBlendFactor: p.has('$detailblendfactor') ? Number(p.get('$detailblendfactor')) || 0 : 1,
 			detailBlendMode: Number(p.get('$detailblendmode') ?? 0) || 0,
-			envLightScale: Number(p.get('$envmaplightscale') ?? 0) || 0,
+			envLightScale: eye ? 1 : Number(p.get('$envmaplightscale') ?? 0) || 0,
+			eye: eye ? {
+				ao: texturePath(p.get('$ambientoccltexture')),
+				aoColor: (parseColor(p.get('$ambientocclcolor')) ?? [0.33, 0.33, 0.33]) as [number, number, number],
+				dilation: p.has('$dilation') ? Number(p.get('$dilation')) || 0 : 0.5,
+			} : null,
 			selfIllum: truthy(p.get('$selfillum')),
 			// (some name the mask with a .tga extension; the engine finds the .vtf)
 			selfIllumMask: (p.get('$selfillummask') ?? '').toLowerCase().replace(/\\/g, '/').replace(/\.(vtf|tga)$/, ''),

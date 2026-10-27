@@ -461,8 +461,10 @@ class MaterialLibrary {
 		const phong = mat.userData.ambientLit && info.phong;
 		const phongMask = phong && !info.phongBaseMask && info.bumpMap ? this.textures.get(info.bumpMap, true) : Promise.resolve(null);
 		const phongExp = phong && info.phongExponentTexture ? this.textures.get(info.phongExponentTexture, true) : Promise.resolve(null);
-		Promise.all([this.textures.get(info.baseTexture, false, frame), envMask, glowMask, phongMask, phongExp]).then(([tex, maskMap, glow, phMask, phExp]) => {
+		const eyeAo = mat.userData.ambientLit && info.eye?.ao ? this.textures.get(info.eye.ao) : Promise.resolve(null);
+		Promise.all([this.textures.get(info.baseTexture, false, frame), envMask, glowMask, phongMask, phongExp, eyeAo]).then(([tex, maskMap, glow, phMask, phExp, ao]) => {
 			if (!tex) return;
+			if (mat.userData.ambientLit && info.eye) mat.userData.eye = {ao, aoColor: info.eye.aoColor, dilation: info.eye.dilation};
 			// (with neither a mask nor alpha in the base texture, the engine drops it)
 			if (modelLit && info.selfIllum && (glow || tex.userData.hasAlpha)) {
 				mat.userData.selfIllum = {tint: info.selfIllumTint, mask: glow};

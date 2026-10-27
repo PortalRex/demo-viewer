@@ -95,7 +95,7 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 	}
 	const vertex = (i: number) => vertexStart + (vertexIds ? vertexIds[i] : i) * VVD_VERTEX;
 
-	const groups = new Map<number, {pos: number[]; nrm: number[]; col: number[]; uv: number[]; mv: number[]; si: number[]; sw: number[]}>();
+	const groups = new Map<number, {pos: number[]; nrm: number[]; col: number[]; uv: number[]; ownUv: number[]; mv: number[]; si: number[]; sw: number[]}>();
 	const meshList: {vertexCount: number}[] = [];
 	const bodyParts = m.getInt32(232, true), bodyPartOffset = m.getInt32(236, true);
 	const vtxBodyParts = x.getInt32(28, true), vtxBodyPartOffset = x.getInt32(32, true);
@@ -138,7 +138,7 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 			const meshListIndex = firstMesh + mi;
 			let g = groups.get(ref);
 			if (!g) {
-				g = {pos: [], nrm: [], col: [], uv: [], mv: [], si: [], sw: []};
+				g = {pos: [], nrm: [], col: [], uv: [], ownUv: [], mv: [], si: [], sw: []};
 				groups.set(ref, g);
 			}
 			const vMesh = vMeshOffset + mi * 9;
@@ -164,7 +164,12 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 						g.nrm.push(d.getFloat32(vo + 28, true), d.getFloat32(vo + 32, true), d.getFloat32(vo + 36, true));
 						if (eye) {
 							const px = d.getFloat32(vo + 16, true), py = d.getFloat32(vo + 20, true), pz = d.getFloat32(vo + 24, true);
-							g.uv.push(eye[0][0] * px + eye[0][1] * py + eye[0][2] * pz + eye[0][3], eye[1][0] * px + eye[1][1] * py + eye[1][2] * pz + eye[1][3]);
+							// (held to the texture's edge, the white of the eye: wrapped
+							// round, its far side showed bits of iris again)
+							const clamp = (v: number) => Math.min(1, Math.max(0, v));
+							g.uv.push(clamp(eye[0][0] * px + eye[0][1] * py + eye[0][2] * pz + eye[0][3]), clamp(eye[1][0] * px + eye[1][1] * py + eye[1][2] * pz + eye[1][3]));
+							// (and its own, for its occlusion texture)
+							g.ownUv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
 						} else g.uv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
 						const nb = Math.min(3, d.getUint8(vo + 15));
 						for (let k = 0; k < 4; k++) {
@@ -187,6 +192,8 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 			materialCandidates: candidates(ref),
 			positions: new Float32Array(g.pos), normals: new Float32Array(g.nrm), colors: new Float32Array(g.col),
 			uv: new Float32Array(g.uv), meshVertex: new Uint32Array(g.mv),
+			// (an eye's own coordinates, where the uv are its projected iris)
+			...(g.ownUv.length === g.uv.length ? {lightUv: new Float32Array(g.ownUv)} : {}),
 			skinIndex: new Uint16Array(g.si), skinWeight: new Float32Array(g.sw),
 		});
 	}
