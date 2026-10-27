@@ -1081,7 +1081,7 @@ export class BlenderCapture {
 		const v = this.view;
 		const sc = v.skyCamera as {origin: THREE.Vector3; scale: number; fog: THREE.Fog | null} | null;
 		const scene = {
-			format: 'p2-demo-blender', version: 1,
+			format: 'p2-demo-blender', version: 2,
 			...this.info,
 			frames: this.frames,
 			textures: this.texList.map(t => ({

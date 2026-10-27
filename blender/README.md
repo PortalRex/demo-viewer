@@ -78,7 +78,8 @@ renders on its own too.
   - the frame's auto exposure (in the materials, keyframed in *P2 Globals*),
   - clamped to the Standard view transform,
   - the engine's bloom,
-  - and the screen fades.
+  - the screen fades,
+  - and the game's on-screen text (chapter titles, `game_text`).
 
 ## Files
 
@@ -89,7 +90,11 @@ renders on its own too.
 | `scene.json` | the scene: geometry, materials, objects and their tracks, cameras, frame-wide values |
 | `data.bin` | the numbers `scene.json` points into |
 | `textures/` | at the game's full size: DXT as `.dds`, others `.png`, light maps and cubemaps as `.exr` |
+| `hud/` | the on-screen text, a picture each time it changes |
 | `reference/` | (dev only) the viewer's own frames, for comparing |
+
+The add-on reads exports from the same version of the viewer. It names the
+version when one doesn't match: export the run again.
 
 ## Not carried over
 

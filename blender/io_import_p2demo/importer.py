@@ -21,11 +21,25 @@ from .nodes import Graph
 INTERP = {'CONSTANT': 0, 'LINEAR': 1}
 
 
+FORMAT, VERSION = 'p2-demo-blender', 2
+
+
+def read_scene(path):
+    """A bundle's scene.json, if it's one this add-on reads."""
+    with open(path, 'r', encoding='utf-8') as f:
+        scene = json.load(f)
+    if scene.get('format') != FORMAT:
+        raise ValueError(f'{path} is not a Portal 2 demo export')
+    if scene.get('version') != VERSION:
+        raise ValueError(f"{path} was exported by another version of the viewer "
+                         f"(bundle version {scene.get('version')}, this add-on reads {VERSION}): export it again")
+    return scene
+
+
 class Bundle:
     def __init__(self, path):
         self.dir = os.path.dirname(path)
-        with open(path, 'r', encoding='utf-8') as f:
-            self.scene = json.load(f)
+        self.scene = read_scene(path)
         self.bin = np.fromfile(os.path.join(self.dir, 'data.bin'), dtype=np.uint8)
 
     def view(self, v):
@@ -1067,11 +1081,16 @@ def load_run(context, path, **options):
         run = json.load(f)
     base = os.path.dirname(path)
     master = context.scene
+    paths = [os.path.join(base, seg['dir'], 'scene.json') for seg in run['segments']]
+    # (each segment's checked first: one that can't be read is found before
+    # anything is made)
+    for p in paths:
+        read_scene(p)
     imports = []
-    for i, seg in enumerate(run['segments']):
-        scene = bpy.data.scenes.new(f'segment {i + 1}')
-        imp = Importer(os.path.join(base, seg['dir'], 'scene.json'), **options)
-        imp.run(context, scene=scene, tag=f'{i + 1:02d}')
+    for i, p in enumerate(paths):
+        imp = Importer(p, **options)
+        imp.run(context, scene=bpy.data.scenes.new(f'segment {i + 1}'), tag=f'{i + 1:02d}')
+        imp.b = None  # (its data's in the scene now: not kept for the whole run)
         imports.append(imp)
     master.name = f'Run {run.get("demo", "")}'.strip()
     first = imports[0].scene

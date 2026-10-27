@@ -34,7 +34,12 @@ class ImportP2Demo(bpy.types.Operator, ImportHelper):
 
     def execute(self, context):
         from . import importer
-        importer.load(context, self.filepath, scale=self.scale, engine=self.engine, samples=self.samples, projected_light=self.projected_light)
+        try:
+            importer.load(context, self.filepath, scale=self.scale, engine=self.engine, samples=self.samples, projected_light=self.projected_light)
+        except ValueError as e:
+            # (not a bundle, or one from another version of the viewer)
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
         return {'FINISHED'}
 
 
