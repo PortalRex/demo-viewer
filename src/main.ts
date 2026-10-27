@@ -3,7 +3,7 @@ import {Playback, viewAt, cmdAt} from './player/playback.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
-import {View3D} from './ui/view3d.ts';
+import {View3D, QUALITY} from './ui/view3d.ts';
 import type {CameraMode} from './ui/view3d.ts';
 import {decodeEntitySteps, keyAt} from './net/entities.ts';
 import {background} from './ui/background.ts';
@@ -670,6 +670,21 @@ $('path-line').onclick = () => {
 	showPath();
 	render();
 };
+// the 3D view's quality, remembered per browser
+let quality = 'high';
+try {
+	quality = localStorage.getItem('quality') ?? 'high';
+} catch {}
+if (!QUALITY[quality]) quality = 'high';
+$<HTMLSelectElement>('quality').value = quality;
+view3d.setQuality(QUALITY[quality]);
+$<HTMLSelectElement>('quality').onchange = e => {
+	quality = (e.target as HTMLSelectElement).value;
+	try {
+		localStorage.setItem('quality', quality);
+	} catch {}
+	view3d.setQuality(QUALITY[quality]);
+};
 $('follow').onclick = () => {
 	pathView.follow = !pathView.follow;
 	render();
@@ -691,6 +706,7 @@ $('view-mode').onclick = e => {
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
 	$('path-line').hidden = !is3d;
+	$('quality').hidden = !is3d;
 	if (is3d) {
 		if (segIn3d === currentSeg) showViewAs();
 		load3dMap();

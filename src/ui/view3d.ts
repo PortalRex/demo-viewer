@@ -811,6 +811,21 @@ function renderedClear(k: EntityKey): boolean {
 	return mode !== 0 && k.extra?.m_clrRender !== undefined && (Number(k.extra.m_clrRender) >>> 24) === 0;
 }
 
+// How much the 3D view draws: its resolution (a share of the screen's
+// pixels), antialiasing (multisamples), bloom and the flashlight's shadow
+// map size
+export interface Quality {
+	scale: number;
+	samples: number;
+	bloom: boolean;
+	shadowSize: number;
+}
+export const QUALITY: Record<string, Quality> = {
+	high: {scale: 1, samples: 4, bloom: true, shadowSize: 1024},
+	medium: {scale: 0.75, samples: 2, bloom: true, shadowSize: 1024},
+	low: {scale: 0.5, samples: 0, bloom: false, shadowSize: 512},
+};
+
 export class View3D {
 	readonly container: HTMLElement;
 	mode: CameraMode = 'eyes';
@@ -970,7 +985,7 @@ export class View3D {
 		const token = ++this.precompileToken;
 		// (for the HDR frame, which is what scenes are drawn into: made now if
 		// nothing's been drawn yet, sized when it is)
-		this.frame ??= new THREE.WebGLRenderTarget(1, 1, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 4});
+		this.frame ??= new THREE.WebGLRenderTarget(1, 1, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: this.quality.samples});
 		type Step = () => void;
 		const steps: Step[] = [];
 		// (three takes the plane count from the last render: an empty one
@@ -1081,7 +1096,7 @@ export class View3D {
 		// synchronous query, which while the GPU process is building other
 		// shaders waits for all of them; turn on to debug a shader)
 		this.renderer.debug.checkShaderErrors = false;
-		this.renderer.setPixelRatio(window.devicePixelRatio || 1);
+		this.renderer.setPixelRatio((window.devicePixelRatio || 1) * this.quality.scale);
 		compressedSupport.dxt = this.renderer.extensions.has('WEBGL_compressed_texture_s3tc');
 		compressedSupport.srgb = this.renderer.extensions.has('WEBGL_compressed_texture_s3tc_srgb');
 		this.container.appendChild(this.renderer.domElement);
@@ -4554,6 +4569,33 @@ export class View3D {
 		return [a.sequence, wrap(a.cycle + (c1 - a.cycle) * f)];
 	}
 
+	private quality: Quality = QUALITY.high;
+	setQuality(q: Quality) {
+		const was = this.quality;
+		this.quality = q;
+		const r = this.renderer;
+		if (!r) return;
+		if (q.scale !== was.scale) r.setPixelRatio((window.devicePixelRatio || 1) * q.scale);
+		// (render targets are made again with the new sample count)
+		if (q.samples !== was.samples) {
+			for (const frame of [this.frame, this.pipFrame]) {
+				if (!frame) continue;
+				frame.samples = q.samples;
+				frame.dispose();
+			}
+		}
+		if (q.shadowSize !== was.shadowSize && this.flashTarget) {
+			this.flashTarget.dispose();
+			this.flashTarget.depthTexture?.dispose();
+			this.flashStatic?.dispose();
+			this.flashStatic?.depthTexture?.dispose();
+			this.flashTarget = this.flashStatic = null;
+			this.flashKey = this.flashStaticKey = '';
+			this.ensureFlashTarget();
+		}
+		this.render();
+	}
+
 	resize() {
 		const r = this.ensureRenderer();
 		const w = this.container.clientWidth, h = this.container.clientHeight;
@@ -4777,7 +4819,7 @@ export class View3D {
 	private ensureFlashTarget() {
 		const r = this.renderer;
 		if (this.flashTarget || !r) return;
-		const size = 1024;
+		const size = this.quality.shadowSize;
 		this.flashTarget = this.flashDepthTarget(size, true);
 		flashUniforms.flashDepth.value = this.flashTarget.depthTexture;
 		flashUniforms.flashTexel.value = 1 / size;
@@ -5367,7 +5409,7 @@ export class View3D {
 		if (this.pip) size.set(Math.max(1, Math.round(size.x * PIP_SCALE)), Math.max(1, Math.round(size.y * PIP_SCALE)));
 		let frame = this.pip ? this.pipFrame : this.frame;
 		if (!frame) {
-			frame = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 4});
+			frame = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: this.quality.samples});
 			if (this.pip) this.pipFrame = frame;
 			else this.frame = frame;
 		} else if (frame.width !== size.x || frame.height !== size.y) frame.setSize(size.x, size.y);
@@ -5439,8 +5481,9 @@ export class View3D {
 			return;
 		}
 		r.setRenderTarget(null);
-		this.composite.uniforms.bloom.value = this.bloom.render(r, frame, this.exposure);
-		this.composite.uniforms.bloomAmount.value = this.bloomOverride ?? this.bloomScale;
+		const bloom = this.quality.bloom ? this.bloomOverride ?? this.bloomScale : 0;
+		if (bloom) this.composite.uniforms.bloom.value = this.bloom.render(r, frame, this.exposure);
+		this.composite.uniforms.bloomAmount.value = bloom;
 		r.setRenderTarget(null);
 		this.composite.uniforms.frame.value = frame.texture;
 		this.composite.uniforms.exposure.value = this.exposure;
@@ -5743,6 +5786,8 @@ export class View3D {
 			const p = ang[0] * Math.PI / 180, y = ang[1] * Math.PI / 180;
 			this.camera.lookAt(eye[0] + Math.cos(p) * Math.cos(y), eye[1] + Math.cos(p) * Math.sin(y), eye[2] - Math.sin(p));
 		}
+		const ratio = r.getPixelRatio();
+		r.setPixelRatio(1);
 		r.setSize(w, h, false);
 		this.camera.aspect = w / h;
 		this.camera.updateProjectionMatrix();
@@ -5750,6 +5795,7 @@ export class View3D {
 		this.render();
 		this.capturing = false;
 		const url = r.domElement.toDataURL(type, 0.9);
+		r.setPixelRatio(ratio);
 		r.setSize(size.x, size.y, false);
 		this.camera.aspect = aspect;
 		this.camera.updateProjectionMatrix();
