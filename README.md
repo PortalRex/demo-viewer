@@ -113,6 +113,26 @@ computer.
 - **Smooth client recordings:** co-op client recordings (usually P-body's)
   play smoothly. Their snapshots arrive only every few ticks, unevenly
   spaced, and the viewer smooths between them.
+- **Off the page's thread:** maps and models are parsed in workers, and the
+  next level of a multi-map run is loaded while the current one plays, so
+  level changes don't stop.
+- **Remembered between visits:** the game folder's file listings are kept in
+  the browser, so opening the viewer again is quicker.
+- **Quality setting:** High, Medium or Low (resolution, antialiasing, bloom
+  and shadow detail) for slower machines.
+
+**Share and compare**
+- **Ghost race:** load another run of the same map and its player is drawn as
+  a glowing ghost beside yours. A live readout shows how far ahead or behind
+  you are, measured where the ghost passed the same spot.
+- **Video export:** save any segment, or the whole run, as an MP4 (720p to
+  1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
+  the challenge-mode HUD and chapter titles are included. Encoding uses the
+  browser's own H.264 encoder (WebCodecs), and nothing is uploaded.
+- **Links to a moment:** the **Link** button copies a URL with the tick, the
+  view and the 3D camera. When the run was opened from a URL, the link opens
+  it directly. Otherwise it names the file, and whoever opens the link drops
+  that file in to jump to the same moment.
 
 ## Quick start
 
@@ -176,6 +196,11 @@ These toggles in the 3D view are remembered per browser:
 | **Titles** | The game's on-screen text, such as chapter titles. |
 | **Partner** | The co-op partner's view in the corner. |
 | **Bright** | Brightens dark maps the way autorender does. |
+| **Quality** | High, Medium or Low: resolution, antialiasing, bloom and shadow detail. |
+
+The 3D toolbar also has **Ghost** (race another run of the map) and
+**Export** (save an MP4). The **Link** button next to the clock copies a link
+to the current moment.
 
 ## Made to match the game
 
