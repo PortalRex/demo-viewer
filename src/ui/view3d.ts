@@ -1137,8 +1137,7 @@ export class View3D {
 
 	// the parsed model (loaded once, kept across maps unless the map's own
 	// files supplied it)
-	private modelDataFor(key: string, name: string, skin: number, body: number): Promise<ModelData | null> | null {
-		const files = this.files;
+	private modelDataFor(key: string, name: string, skin: number, body: number, files = this.files): Promise<ModelData | null> | null {
 		if (!files) return null;
 		let entry = this.modelData.get(key);
 		if (!entry) {
@@ -1274,8 +1273,12 @@ export class View3D {
 		let lightTex: THREE.DataTexture | null = null;
 		if (bsp.lightmap) {
 			const lm = bsp.lightmap;
-			const half = new Uint16Array(lm.data.length);
-			for (let i = 0; i < lm.data.length; i++) half[i] = THREE.DataUtils.toHalfFloat(lm.data[i]);
+			// (half floats as the map's worker made them, else made here)
+			let half = lm.half;
+			if (!half || half.length !== lm.data.length) {
+				half = new Uint16Array(lm.data.length);
+				for (let i = 0; i < lm.data.length; i++) half[i] = THREE.DataUtils.toHalfFloat(lm.data[i]);
+			}
 			lightTex = new THREE.DataTexture(half, lm.width, lm.height, THREE.RGBAFormat, THREE.HalfFloatType);
 			lightTex.magFilter = lightTex.minFilter = THREE.LinearFilter;
 			lightTex.channel = 1;
@@ -1283,10 +1286,11 @@ export class View3D {
 			lightTex.needsUpdate = true;
 		}
 		this.lightTex = lightTex;
-		this.bumpTex = bsp.lightmap ? bsp.lightmap.bump.map(d => {
-			const t = new THREE.DataTexture(new Uint16Array(d.length), bsp.lightmap!.width, bsp.lightmap!.height, THREE.RGBAFormat, THREE.HalfFloatType);
+		this.bumpTex = bsp.lightmap ? bsp.lightmap.bump.map((d, k) => {
+			const made = bsp.lightmap!.bumpHalf?.[k];
+			const t = new THREE.DataTexture(made?.length === d.length ? made : new Uint16Array(d.length), bsp.lightmap!.width, bsp.lightmap!.height, THREE.RGBAFormat, THREE.HalfFloatType);
 			const half = t.image.data as unknown as Uint16Array;
-			for (let i = 0; i < d.length; i++) half[i] = THREE.DataUtils.toHalfFloat(d[i]);
+			if (made?.length !== d.length) for (let i = 0; i < d.length; i++) half[i] = THREE.DataUtils.toHalfFloat(d[i]);
 			t.magFilter = t.minFilter = THREE.LinearFilter;
 			t.flipY = false;
 			t.needsUpdate = true;
@@ -2074,6 +2078,36 @@ export class View3D {
 			r.initTexture(t);
 			this.lastGpuWork = performance.now();
 			return list.length > 0;
+		});
+	}
+
+	// Another map's models and textures fetched ahead (the next segment's,
+	// while this one plays): its static props' and entities' models parsed
+	// (in the workers) and its materials' textures read, a few a piece in the
+	// background, so they're in the caches when it's shown. (Through `files`,
+	// with that map's pak; what it doesn't find is looked for again then)
+	prewarm(bsp: BspMap, ents: EntityTimeline | null, files: GameFiles) {
+		const textures = this.textures;
+		if (!textures) return;
+		const models = new Map<string, [string, number, number]>();
+		for (const p of bsp.staticProps) models.set(`${p.model.toLowerCase()}#${p.skin}#0`, [p.model, p.skin, 0]);
+		for (const t of ents?.tracks ?? []) {
+			for (const k of t.keys) {
+				const model = k.model ?? t.model;
+				if (!model.endsWith('.mdl')) continue;
+				const skin = k.skin ?? 0, body = Number(k.extra?.m_nBody ?? 0);
+				models.set(`${model.toLowerCase()}#${skin}#${body}`, [model, skin, body]);
+			}
+		}
+		const todo: (() => void)[] = [];
+		for (const [key, [name, skin, body]] of models) todo.push(() => void this.modelDataFor(key, name, skin, body, files));
+		for (const info of bsp.materials.values()) {
+			for (const t of [info.baseTexture, info.baseTexture2]) if (t) todo.push(() => void textures.get(t));
+			if (info.bumpMap) todo.push(() => void textures.get(info.bumpMap, true));
+		}
+		background(() => {
+			for (let i = 0; i < 4 && todo.length; i++) todo.pop()!();
+			return todo.length > 0;
 		});
 	}
 
@@ -4868,50 +4902,64 @@ export class View3D {
 	// (three's compile of a whole scene works out every material's program
 	// again, which, done each time anything loaded, stalled frame after
 	// frame while a map came in)
+	// (a few milliseconds' worth a frame: what's left waits, unseen, for the
+	// next; a new map brought hundreds of them at once, a fifth of a second.
+	// A snapshot compiles them all: it waits for every shader anyway)
 	private compileFresh(r: THREE.WebGLRenderer) {
+		this.uncompiled.clear();
+		const end = performance.now() + (this.capturing ? Infinity : 6);
 		const visit = (root: THREE.Object3D, camera: THREE.Camera, scene: THREE.Scene) => {
 			const fresh: THREE.Mesh[] = [];
 			root.traverse(o => {
 				const mesh = o as THREE.Mesh;
 				if (!mesh.isMesh || !mesh.material) return;
 				const kind = (mesh as THREE.SkinnedMesh).isSkinnedMesh ? 1 : 0;
-				const materials = [mesh.material].flat();
-				if (materials.every(m => this.compiledAs.get(m)?.[kind] === m.version)) return;
-				fresh.push(mesh);
-				for (const m of materials) {
-					const seen = this.compiledAs.get(m) ?? [-1, -1];
-					seen[kind] = m.version;
-					this.compiledAs.set(m, seen);
-				}
+				if (![mesh.material].flat().every(m => this.compiledAs.get(m)?.[kind] === m.version)) fresh.push(mesh);
 			});
-			if (!fresh.length) return;
-			// (all in one compile, the scene's lights gathered once: three only
+			// (in batches, the scene's lights gathered once a batch: three only
 			// walks what it's given, for its meshes and for lights of its own)
-			const batch = {traverse: (f: (o: THREE.Object3D) => void) => fresh.forEach(f), traverseVisible: () => {}} as unknown as THREE.Object3D;
-			for (const m of r.compile(batch, camera, scene)) this.compiling.add(m);
-			this.lastGpuWork = performance.now();
+			for (let i = 0; i < fresh.length; i += 16) {
+				const part = fresh.slice(i, i + 16);
+				if (performance.now() > end) {
+					for (const mesh of part) for (const m of [mesh.material].flat()) this.uncompiled.add(m);
+					continue;
+				}
+				const batch = {traverse: (f: (o: THREE.Object3D) => void) => part.forEach(f), traverseVisible: () => {}} as unknown as THREE.Object3D;
+				for (const m of r.compile(batch, camera, scene)) this.compiling.add(m);
+				for (const mesh of part) {
+					const kind = (mesh as THREE.SkinnedMesh).isSkinnedMesh ? 1 : 0;
+					for (const m of [mesh.material].flat()) {
+						const seen = this.compiledAs.get(m) ?? [-1, -1];
+						seen[kind] = m.version;
+						this.compiledAs.set(m, seen);
+					}
+				}
+				this.lastGpuWork = performance.now();
+			}
 		};
 		visit(this.scene, this.camera, this.scene);
 		visit(this.vmScene, this.vmCam, this.vmScene);
 		visit(this.fpScene, this.camera, this.fpScene);
+		if (this.uncompiled.size) this.freshNeeded = true;
 	}
+	private uncompiled = new Set<THREE.Material>();  // new materials not compiled yet (their meshes sit out)
 	private recheck: (() => void) | undefined;
 	private compiling = new Set<THREE.Material>();
 
 	// the drawn meshes whose shaders are still compiling (none once all are)
 	private notReady(r: THREE.WebGLRenderer): THREE.Object3D[] {
-		if (!this.compiling.size) return [];
+		if (!this.compiling.size && !this.uncompiled.size) return [];
 		const props = (r as unknown as {properties: {get(m: THREE.Material): {currentProgram?: {isReady(): boolean}}}}).properties;
 		for (const m of [...this.compiling]) {
 			const program = props.get(m).currentProgram;
 			if (!program || program.isReady()) this.compiling.delete(m);
 		}
-		if (!this.compiling.size) return [];
+		if (!this.compiling.size && !this.uncompiled.size) return [];
 		const out: THREE.Object3D[] = [];
 		const visit = (o: THREE.Object3D) => {
 			if (!o.visible) return;
 			const mesh = o as THREE.Mesh;
-			if (mesh.material && !Array.isArray(mesh.material) && this.compiling.has(mesh.material)) {
+			if (mesh.material && !Array.isArray(mesh.material) && (this.compiling.has(mesh.material) || this.uncompiled.has(mesh.material))) {
 				out.push(o);
 				return;
 			}

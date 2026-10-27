@@ -5,9 +5,10 @@ import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D} from './ui/view3d.ts';
 import type {CameraMode} from './ui/view3d.ts';
-import {decodeEntities, keyAt} from './net/entities.ts';
+import {decodeEntitySteps, keyAt} from './net/entities.ts';
+import {background} from './ui/background.ts';
 import type {EntityTimeline} from './net/entities.ts';
-import {loadBsp} from './game/bsp.ts';
+import {loadBspOffThread} from './game/bsppool.ts';
 import type {BspMap} from './game/bsp.ts';
 import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
@@ -250,7 +251,7 @@ function timed<T>(p: Promise<T>, name: string, start: number): Promise<T> {
 if (import.meta.env.DEV) (window as unknown as {timings: typeof timings}).timings = timings;
 // (models parse in workers, off the page's thread)
 installModelWorkers();
-const entityCache = new Map<number, EntityTimeline | null>();
+const entityCache = new Map<number, Promise<EntityTimeline | null>>();
 const mapCache = new Map<string, Promise<BspMap>>();
 let gameFS: GameFS | null = null;
 let gameFiles: GameFiles | null = null;
@@ -278,25 +279,41 @@ let segLoading = -1;  // the segment a load is under way for
 let gameFilesReady: Promise<void> | null = null;
 let cancelBackgroundLoad: (() => void) | undefined;
 
-function entitiesFor(index: number): EntityTimeline | null {
-	if (!pb) return null;
-	if (!entityCache.has(index)) {
+// A segment's entities, decoded in the background (a few hundred network
+// records between frames: all at once stopped the page for a fifth of a
+// second), once a segment
+function entitiesFor(index: number): Promise<EntityTimeline | null> {
+	if (!pb) return Promise.resolve(null);
+	let p = entityCache.get(index);
+	if (!p) {
 		const seg = pb.run.segments[index];
 		const tables = seg.dataTables ?? pb.run.dataTables;
-		let tl: EntityTimeline | null = null;
-		if (tables) {
+		p = !tables ? Promise.resolve(null) : new Promise<EntityTimeline | null>(done => {
+			const t = performance.now();
+			let steps: Generator<void, EntityTimeline>;
 			try {
-				const t = performance.now();
-				tl = decodeEntities(seg, tables);
-				timing('decodeEntities', t);
-				if (tl.errors.length) console.warn(`entities in ${seg.map}:`, tl.errors);
+				steps = decodeEntitySteps(seg, tables);
 			} catch (e) {
 				console.warn(`couldn't decode entities in ${seg.map}`, e);
+				return done(null);
 			}
-		}
-		entityCache.set(index, tl);
+			background(() => {
+				try {
+					const r = steps.next();
+					if (!r.done) return true;
+					timing('decodeEntities', t);
+					if (r.value.errors.length) console.warn(`entities in ${seg.map}:`, r.value.errors);
+					done(r.value);
+				} catch (e) {
+					console.warn(`couldn't decode entities in ${seg.map}`, e);
+					done(null);
+				}
+				return false;
+			}, true);
+		});
+		entityCache.set(index, p);
 	}
-	return entityCache.get(index)!;
+	return p;
 }
 
 function message3d(html: string | null) {
@@ -318,6 +335,58 @@ async function connectGame() {
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') message3d(`<h2>Couldn't open the folder</h2>${(e as Error).message}`);
 	}
+}
+
+// A map's BSP, loaded once (in a worker) and kept while it's one of the last
+// three asked for: the one before, the one shown and the one after. Its
+// materials are looked up with its own pak (it may be the next map, loading
+// while another is shown)
+function bspFor(map: string, fs: GameFS, files: GameFiles): Promise<BspMap> {
+	let promise = mapCache.get(map);
+	if (promise) {
+		// (most recent last)
+		mapCache.delete(map);
+		mapCache.set(map, promise);
+		return promise;
+	}
+	promise = (async () => {
+		for (const path of mapPaths(map, pb!.run.gameDir)) {
+			if ((await fs.size(path)) !== null) {
+				const t = performance.now();
+				return timed(loadBspOffThread(fs, path, map, {
+					materials: async (names, pak) => {
+						const zip = pak ? new Zip(pak) : null;
+						mapPaks.set(map, zip);
+						const scoped = new Materials(files.withPak(zip));
+						const out = new Map<string, MaterialInfo>();
+						await Promise.all(names.map(async n => out.set(n, await scoped.get(n))));
+						return out;
+					},
+				}), 'loadBsp', t);
+			}
+		}
+		throw new Error(`${map}.bsp isn't in the game folder (${fs.label}).`);
+	})();
+	mapCache.set(map, promise);
+	promise.catch(() => mapCache.delete(map));
+	for (const key of [...mapCache.keys()].slice(0, -3)) {
+		mapCache.delete(key);
+		mapPaks.delete(key);
+	}
+	return promise;
+}
+
+// The next segment readied while this one plays: its map loaded, its
+// entities decoded, its models and textures fetched, so the level change
+// doesn't stop for them
+function prepareNext(index: number) {
+	const next = index + 1;
+	if (!pb || !gameFS || !gameFiles || next >= pb.tracks.length) return;
+	const seg = pb.tracks[next].seg;
+	const bsp = bspFor(seg.map, gameFS, gameFiles);
+	Promise.all([bsp, entitiesFor(next)]).then(([map, ents]) => {
+		if (pb && gameFiles) view3d.prewarm(map, ents, gameFiles.withPak(mapPaks.get(seg.map) ?? null));
+	}).catch(() => {});
 }
 
 async function load3dMap() {
@@ -349,39 +418,8 @@ async function load3dMap() {
 	if (token !== mapToken) return;
 	const files = gameFiles;
 	const mats = materials!;
-	let promise = mapCache.get(seg.map);
-	if (promise) {
-		// (most recent last)
-		mapCache.delete(seg.map);
-		mapCache.set(seg.map, promise);
-	} else {
-		message3d(`Loading ${seg.map}…`);
-		promise = (async () => {
-			for (const path of mapPaths(seg.map, pb!.run.gameDir)) {
-				if ((await fs.size(path)) !== null) {
-					const t = performance.now();
-					return timed(loadBsp(fs, path, seg.map, {
-						materials: async (names, pak) => {
-							const zip = pak ? new Zip(pak) : null;
-							mapPaks.set(seg.map, zip);
-							files.mapPak = zip;
-							const out = new Map<string, MaterialInfo>();
-							await Promise.all(names.map(async n => out.set(n, await mats.get(n))));
-							return out;
-						},
-					}), 'loadBsp', t);
-				}
-			}
-			throw new Error(`${seg.map}.bsp isn't in the game folder (${fs.label}).`);
-		})();
-		mapCache.set(seg.map, promise);
-		promise.catch(() => mapCache.delete(seg.map));
-		// (the last two maps kept: one back and forth across a level change)
-		for (const key of [...mapCache.keys()].slice(0, -2)) {
-			mapCache.delete(key);
-			mapPaks.delete(key);
-		}
-	}
+	if (!mapCache.has(seg.map)) message3d(`Loading ${seg.map}…`);
+	const promise = bspFor(seg.map, fs, files);
 	try {
 		const bsp = await promise;
 		if (token !== mapToken) return;
@@ -389,12 +427,14 @@ async function load3dMap() {
 		let t = performance.now();
 		view3d.setMap(bsp, files, mats);
 		timing('setMap', t);
-		const ents = entitiesFor(currentSeg);
+		const ents = await entitiesFor(currentSeg);
+		if (token !== mapToken) return;
 		t = performance.now();
 		view3d.setSegment(pb.tracks[currentSeg], ents);
 		timing('setSegment', t);
 		segIn3d = currentSeg;
 		segLoading = -1;
+		prepareNext(currentSeg);
 		if (viewMode === '3d') showViewAs();
 		message3d(null);
 		render();

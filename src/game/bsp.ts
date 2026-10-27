@@ -67,6 +67,10 @@ export interface Lightmap {
 	height: number;
 	data: Float32Array;  // RGBA, linear: the layers summed at the current style values
 	bump: Float32Array[];  // the same for the three bump directions (flat light for faces without)
+	// (the same as half floats, as the textures take them: made in the
+	// map's worker, where there is one)
+	half?: Uint16Array;
+	bumpHalf?: Uint16Array[];
 	blocks: LightmapBlock[];
 	styles: number[];    // the switchable styles in use (not 0)
 }

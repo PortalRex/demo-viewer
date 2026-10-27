@@ -15,6 +15,14 @@ export class GameFiles {
 	private loose = new Map<string, Set<string> | null>();
 	mapPak: Zip | null = null;
 
+	// these files as a map with this pak sees them (everything else, the
+	// indexes and what's been found missing, shared)
+	withPak(pak: Zip | null): GameFiles {
+		const view = Object.create(this) as GameFiles;
+		view.mapPak = pak;
+		return view;
+	}
+
 	constructor(fs: GameFS) {
 		this.fs = fs;
 	}

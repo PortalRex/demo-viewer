@@ -310,6 +310,15 @@ const num = (v: PropValue | undefined, d = 0) => (typeof v === 'number' ? v : d)
 const vec = (v: PropValue | undefined): number[] | undefined => (Array.isArray(v) && typeof v[0] === 'number' ? (v as number[]) : undefined);
 
 export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): EntityTimeline {
+	const steps = decodeEntitySteps(seg, dataTablesBlob);
+	let r = steps.next();
+	while (!r.done) r = steps.next();
+	return r.value;
+}
+
+// The same, a few hundred records at a time: it pauses (yields) between
+// them, so the page can decode a segment in pieces between frames
+export function* decodeEntitySteps(seg: Segment, dataTablesBlob: Uint8Array): Generator<void, EntityTimeline> {
 	const dt: DataTables = parseDataTables(dataTablesBlob);
 	const fields = dt.classes.map(fieldsFor);
 	const errors: string[] = [];
@@ -486,7 +495,9 @@ export function decodeEntities(seg: Segment, dataTablesBlob: Uint8Array): Entity
 		}
 	};
 
+	let handled = 0;
 	for (const r of seg.net) {
+		if (++handled % 200 === 0) yield;
 		try {
 			handle(r);
 		} catch (e) {
