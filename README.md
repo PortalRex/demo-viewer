@@ -124,10 +124,9 @@ computer.
 **Share and compare**
 - **Ghost race:** load other runs of the same map, as many as you like. Each
   one's player is drawn in its own colour beside yours (a glowing ghost in
-  3D, a marker in the Top and Side views),
-  with a live readout of how far ahead or behind you are, measured where it
-  passed the same spot. Each can be hidden, have its path drawn through the
-  map, or be taken off again.
+  3D, a marker in the Top and Side views), with a live readout of how far
+  ahead or behind you are, measured where it passed the same spot. Each can
+  be hidden, have its path drawn through the map, or be taken off again.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the
@@ -199,7 +198,7 @@ These toggles in the 3D view are remembered per browser:
 | **Titles** | The game's on-screen text, such as chapter titles. |
 | **Partner** | The co-op partner's view in the corner. |
 | **Bright** | Brightens dark maps the way autorender does. |
-| **Quality** | High, Medium or Low: resolution, antialiasing, bloom and shadow detail. |
+| **Quality** | High, Medium or Low: resolution, antialiasing, bloom, shadow detail, and in co-op how often the partner's view is redrawn (every frame, every 2nd, every 3rd). |
 
 The toolbar also has **Ghost** (race other runs of the map), and in 3D
 **Export** (save an MP4). The **Link** button next to the clock copies a link

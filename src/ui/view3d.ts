@@ -881,18 +881,20 @@ function renderedClear(k: EntityKey): boolean {
 }
 
 // How much the 3D view draws: its resolution (a share of the screen's
-// pixels), antialiasing (multisamples), bloom and the flashlight's shadow
-// map size
+// pixels), antialiasing (multisamples), bloom, the flashlight's shadow map
+// size, and how often the co-op partner's view is drawn again (every
+// that many frames: it costs about as much as the main view)
 export interface Quality {
 	scale: number;
 	samples: number;
 	bloom: boolean;
 	shadowSize: number;
+	partnerEvery: number;
 }
 export const QUALITY: Record<string, Quality> = {
-	high: {scale: 1, samples: 4, bloom: true, shadowSize: 1024},
-	medium: {scale: 0.75, samples: 2, bloom: true, shadowSize: 1024},
-	low: {scale: 0.5, samples: 0, bloom: false, shadowSize: 512},
+	high: {scale: 1, samples: 4, bloom: true, shadowSize: 1024, partnerEvery: 1},
+	medium: {scale: 0.75, samples: 2, bloom: true, shadowSize: 1024, partnerEvery: 2},
+	low: {scale: 0.5, samples: 0, bloom: false, shadowSize: 512, partnerEvery: 3},
 };
 
 export interface CameraState {
@@ -1009,6 +1011,8 @@ export class View3D {
 	pipEnabled = true;
 	private pip: {taunt: boolean} | null = null;
 	private pipShown = false;
+	private pipSkipped = 0;  // frames since the partner's view was drawn
+	private pipCatchUp: (() => void) | undefined;
 	private pipFrame: THREE.WebGLRenderTarget | null = null;
 	private pipParticles = new Set<string>();
 	// (each view meters its own exposure, and has its own portal and water
@@ -4842,8 +4846,21 @@ export class View3D {
 
 	private frameNumber = 0;
 	update(view: ViewState | null, tick: number) {
-		// (the partner's view first, so what's left set up is the main view's)
-		if (!this.pip) this.pipShown = this.updatePip(view, tick);
+		// (the partner's view first, so what's left set up is the main view's;
+		// at a lower rate where the quality asks, and drawn once more when
+		// frames stop coming, so a paused view shows its partner's at the tick)
+		if (!this.pip) {
+			if (this.capturing || !this.pipShown || ++this.pipSkipped >= this.quality.partnerEvery) {
+				this.pipCatchUp?.();
+				this.pipCatchUp = undefined;
+				this.pipShown = this.updatePip(view, tick);
+				this.pipSkipped = 0;
+			} else this.pipCatchUp ??= later(() => {
+				this.pipCatchUp = undefined;
+				this.pipSkipped = Infinity;
+				this.onLoaded();
+			}, 100);
+		}
 		this.meterTick = tick;
 		this.frameNumber++;
 		this.seenCache.clear();
