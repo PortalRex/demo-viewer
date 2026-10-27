@@ -6,7 +6,7 @@ import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D, QUALITY} from './ui/view3d.ts';
-import type {CameraMode, CameraState, GhostSpec} from './ui/view3d.ts';
+import type {CameraMode, CameraState, GhostSpec, NameTag} from './ui/view3d.ts';
 import {decodeEntitySteps, keyAt} from './net/entities.ts';
 import {background} from './ui/background.ts';
 import type {EntityTimeline} from './net/entities.ts';
@@ -535,6 +535,72 @@ $('pip-toggle').onclick = () => {
 	render();
 };
 let hudText: HudText | null = null;
+// players' names over their heads (remembered per browser)
+let namesShown = true;
+try {
+	namesShown = localStorage.getItem('nameTags') !== 'off';
+} catch {}
+$('names-toggle').classList.toggle('on', namesShown);
+$('names-toggle').onclick = () => {
+	namesShown = !namesShown;
+	try {
+		localStorage.setItem('nameTags', namesShown ? 'on' : 'off');
+	} catch {}
+	$('names-toggle').classList.toggle('on', namesShown);
+	render();
+};
+// each tag a small dark box with the name, in the raced player's colour
+// (this run's in white), fainter where the world's in front of it; tags
+// that would overlap stacked upwards; `s` scales it (with a video's height)
+function drawNameTags(g: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, tags: NameTag[], w: number, h: number, s: number) {
+	g.font = `700 ${12 * s}px Arial, Helvetica, sans-serif`;
+	g.textAlign = 'center';
+	g.textBaseline = 'middle';
+	const placed: {x: number; y: number; w: number}[] = [];
+	const bh = 17 * s, gap = 2 * s;
+	// (the lowest on screen first: the others go up past them)
+	for (const t of [...tags].sort((a, b) => b.y - a.y)) {
+		const x = Math.round(t.x * w);
+		let y = Math.round(t.y * h);
+		const bw = g.measureText(t.name).width + 10 * s;
+		for (let moved = true; moved;) {
+			moved = false;
+			for (const p of placed) {
+				if (Math.abs(p.x - x) < (p.w + bw) / 2 && y > p.y - bh - gap && y - bh < p.y + gap) {
+					y = p.y - bh - gap;
+					moved = true;
+				}
+			}
+		}
+		placed.push({x, y, w: bw});
+		g.globalAlpha = t.hidden ? 0.45 : 1;
+		g.fillStyle = 'rgba(0, 0, 0, 0.55)';
+		g.beginPath();
+		g.roundRect(x - bw / 2, y - bh, bw, bh, 3 * s);
+		g.fill();
+		g.fillStyle = t.color ?? '#fff';
+		g.fillText(t.name, x, y - bh / 2 + 0.5 * s);
+	}
+	g.globalAlpha = 1;
+}
+function showNameTags() {
+	const c = $<HTMLCanvasElement>('name-tags');
+	const is3d = viewMode === '3d';
+	$('names-toggle').hidden = !is3d;
+	const dpr = window.devicePixelRatio || 1;
+	const w = c.clientWidth, h = c.clientHeight;
+	if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+		c.width = Math.round(w * dpr);
+		c.height = Math.round(h * dpr);
+	}
+	const g = c.getContext('2d')!;
+	g.setTransform(dpr, 0, 0, dpr, 0, 0);
+	g.clearRect(0, 0, w, h);
+	if (is3d && namesShown) drawNameTags(g, view3d.nameTags(), w, h, 1);
+}
+
+view3d.onDrawn = showNameTags;
+
 function showHudText(tick: number) {
 	const hud = viewMode === '3d' ? view3d.hudMessages() : null;
 	$('titles-toggle').hidden = !hud;
@@ -636,6 +702,7 @@ function render() {
 	else pathView.draw(view, loc.tick, seg.sar);
 	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null);
 	showHudText(loc.tick);
+	if (viewMode !== '3d') showNameTags();
 	timeline.draw(t, loc.index);
 	speedGraph.draw(loc.tick);
 	inputs.show(cmd);
@@ -914,7 +981,7 @@ function showRacers(loc: Located, view: {origin: number[]} | null) {
 		// (its player as its robot in the 3D view)
 		const ents = viewMode === '3d' && r.shown ? racerEntitiesFor(r, track) : null;
 		const body = ents?.player ? {track: ents.player, tick: racerTick(loc, track)} : null;
-		marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null, body});
+		marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null, body, name: r.name});
 		// (in co-op, against whichever of this run's players it follows: the
 		// recording one or their partner)
 		const d = [view?.origin ?? null, ...others].map(at => racerDelta(loc, at, track))
@@ -1130,6 +1197,7 @@ $('export-go').onclick = async () => {
 				}
 				const stats = view3d.mode === 'eyes' && cmShown ? view3d.cmStats(loc.tick) : null;
 				if (stats) drawCmHud(g, stats, width, height);
+				if (namesShown) drawNameTags(g, view3d.nameTags(), width, height, height / 540);
 				if (racers.length) drawRacers(g, width, height);
 				return out;
 			},

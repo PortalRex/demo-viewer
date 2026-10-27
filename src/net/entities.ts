@@ -139,6 +139,7 @@ export interface EntityTimeline {
 	effects: EffectEvent[];           // dispatched effects (temp entities), in tick order
 	fades: ScreenFade[];              // screen fades sent to the recording player, in tick order
 	hudMessages: HudMessage[];        // on-screen text (game_text: chapter titles), in tick order
+	playerNames: Map<number, string>; // the players' names by entity index ("userinfo")
 }
 
 // A "Fade" user message (ScreenFade_t): over `duration` seconds to or from
@@ -661,7 +662,16 @@ export function* decodeEntitySteps(seg: Segment, dataTablesBlob: Uint8Array): Ge
 	}
 	const particleNames = (tableByName.get('ParticleEffectNames')?.entries ?? []).map(e => e?.name ?? '');
 	const panelNames = (tableByName.get('VguiScreen')?.entries ?? []).map(e => e?.name ?? '');
-	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, panelNames, effects, fades, hudMessages};
+	// (each client's player_info_t, its slot one less than its entity index:
+	// its 8-byte XUID, then its name, 32 bytes)
+	const playerNames = new Map<number, string>();
+	(tableByName.get('userinfo')?.entries ?? []).forEach((e, i) => {
+		if (!e?.data || e.data.length < 40) return;
+		const field = e.data.subarray(8, 40), end = field.indexOf(0);
+		const name = new TextDecoder().decode(end < 0 ? field : field.subarray(0, end)).trim();
+		if (name) playerNames.set(i + 1, name);
+	});
+	return {tracks, classCounts, errors, player, paint, lightStyles, particleNames, panelNames, effects, fades, hudMessages, playerNames};
 }
 
 const sameVec = (a: Vec3, b: Vec3) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];

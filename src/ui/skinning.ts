@@ -185,6 +185,11 @@ export class AnimatedModel {
 		return this.boneMats;
 	}
 
+	// the box around the model in its pose, in its own space
+	get poseBounds(): THREE.Box3 {
+		return this.box;
+	}
+
 	get hasHitboxes() {
 		return this.sk.hitboxes.length > 0;
 	}

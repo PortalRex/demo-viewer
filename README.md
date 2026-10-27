@@ -203,6 +203,7 @@ These toggles in the 3D view are remembered per browser:
 | **Path** | The route drawn through the map. |
 | **Timer** | The challenge-mode HUD (portals and time), from the recording's own stats. |
 | **Titles** | The game's on-screen text, such as chapter titles. |
+| **Names** | Each player's name over their head (raced runs' in their colour), drawn into exported videos too. |
 | **Partner** | The co-op partner's view in the corner. |
 | **Bright** | Brightens dark maps the way autorender does. |
 | **Quality** | High, Medium or Low: resolution, antialiasing, bloom, shadow detail, and in co-op how often the partner's view is redrawn (every frame, every 2nd, every 3rd). |

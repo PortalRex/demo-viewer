@@ -180,6 +180,17 @@ export interface GhostSpec {
 	// its player as its own demo's network data has it (model and
 	// animation), and the tick of that demo at this moment
 	body?: {track: EntityTrack; tick: number} | null;
+	name?: string;
+}
+
+// a player's name tag as the camera sees it: over their head, at 0..1 of
+// the view across and down, and whether the world is in front of it
+export interface NameTag {
+	x: number;
+	y: number;
+	name: string;
+	color: string | null;  // a raced player's colour (null: this run's)
+	hidden: boolean;
 }
 
 // A raced run's player: a glowing see-through body (brightest at its
@@ -1079,6 +1090,8 @@ export class View3D {
 	private freeLast = 0;
 	private mapToken = 0;
 	onLoaded = () => {};
+	// a frame was drawn (an update, or the camera moving on its own)
+	onDrawn = () => {};
 
 	// something finished loading: redraw, and once loading goes quiet,
 	// compile the shaders of everything in the scene, hidden entities too,
@@ -2191,6 +2204,37 @@ export class View3D {
 			seen.set(t.index, {index: t.index, name, recording: t === ents.player});
 		}
 		return [...seen.values()];
+	}
+
+	// The players' name tags for the frame just drawn: this run's players
+	// (by the names their demo gives them) and raced ones, those in view
+	nameTags(): NameTag[] {
+		const ents = this.entities;
+		if (!ents) return [];
+		const cam = this.camera;
+		const at = cam.position;
+		const tags: NameTag[] = [];
+		const tag = (feet: THREE.Vector3, top: number, name: string, color: string | null) => {
+			const head = new THREE.Vector3(feet.x, feet.y, feet.z + top + 12);
+			const p = head.clone().project(cam);
+			if (p.z < -1 || p.z > 1 || Math.abs(p.x) > 1.1 || Math.abs(p.y) > 1.1) return;
+			const d = head.distanceTo(at);
+			const dir = head.clone().sub(at).divideScalar(Math.max(d, 1e-3));
+			const hit = d > 1 ? this.collision?.raycastFirst(new THREE.Ray(at.clone(), dir), THREE.DoubleSide) : null;
+			tags.push({x: (p.x + 1) / 2, y: (1 - p.y) / 2, name, color, hidden: !!hit && hit.distance < d - 8});
+		};
+		const top = (o: THREE.Object3D) => (o.userData.anim as AnimatedModel | undefined)?.poseBounds.max.z ?? 72;
+		for (const [t, o] of this.objects) {
+			if (t.className !== 'CPortal_Player' || !o.visible) continue;
+			tag(o.position, top(o), ents.playerNames.get(t.index) ?? (/eggbot/.test(t.model) ? 'P-body' : /ballbot/.test(t.model) ? 'ATLAS' : 'Chell'), null);
+		}
+		for (const g of this.ghosts) {
+			if (!g.view || !g.name) continue;
+			// (on its robot, or its capsule till that's in)
+			const robot = g.body && this.ghostRobots.get(g.body.track);
+			tag(new THREE.Vector3(...g.view.origin), robot?.visible ? top(robot) : 72, g.name, g.color);
+		}
+		return tags;
 	}
 
 	// where the other co-op players stand at a tick (the recording's own view
@@ -5889,6 +5933,7 @@ export class View3D {
 		this.screenFade(this.meterTick);
 		r.render(this.compositeScene, this.compositeCam);
 		if (this.pipShown && this.pipFrame && this.mode === 'eyes') this.compositePip(r);
+		this.onDrawn();
 	}
 
 	// Free camera: drag to look, WASD to fly along the view, Q/E down/up,
