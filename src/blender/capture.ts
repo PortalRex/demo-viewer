@@ -367,7 +367,7 @@ export class BlenderCapture {
 		rec = {
 			id: this.objList.length, name: mesh.name || mesh.parent?.name || 'mesh', scene, group: this.groupOf(mesh), geometry: geo, material: mat,
 			skeleton: skinned?.id, lit, visible: new Track(1), transform: new Track(10),
-			lighting: lit ? new Track(45) : undefined, cube: material.userData.modelEnv ? new Track(1) : undefined,
+			lighting: lit ? new Track(48) : undefined, cube: material.userData.modelEnv ? new Track(1) : undefined,
 			uniforms: uniformTrack(material), lastXf: null,
 			portal: (material as THREE.ShaderMaterial).uniforms?.staticAmount ? new Track(13) : undefined,
 		};
@@ -440,7 +440,7 @@ export class BlenderCapture {
 	}
 
 	// a lit model's lighting: its ambient cube (6 x rgb), then three local
-	// lights (position, colour, falloff)
+	// lights (position, colour, falloff), then the point it's lit at
 	private lightingOf(mesh: THREE.Object3D): number[] {
 		let o: THREE.Object3D | null = mesh;
 		let l: {cube: number[]; lights: {pos: number[]; color: number[]; base?: number[]; atten?: number[]}[]} | undefined;
@@ -453,6 +453,10 @@ export class BlenderCapture {
 			out.push(color?.[0] ?? 0, color?.[1] ?? 0, color?.[2] ?? 0);
 			out.push(...(light?.atten ?? [1, 0, 0]));
 		}
+		// (and where it was worked out: the object's lighting centre)
+		const centre = o?.userData.lightCentre as THREE.Vector3 | undefined;
+		const at = centre && o ? centre.clone().applyMatrix4(o.matrixWorld) : new THREE.Vector3().setFromMatrixPosition(mesh.matrixWorld);
+		out.push(at.x, at.y, at.z);
 		return out;
 	}
 
@@ -1031,6 +1035,26 @@ export class BlenderCapture {
 			uniforms: uniforms(o.uniforms),
 			portal: o.portal ? tracks(o.portal) : undefined,
 		}));
+		// which uniforms of each effect material ever change (in any object
+		// drawn with it): only those are per-object, keyed values in Blender
+		// (Eevee reads at most 8 per material); the rest are its constants
+		for (const r of [...this.objList, ...this.dynList]) {
+			const u = r.uniforms;
+			if (!u || u.track.frames.length < 2) continue;
+			const desc = this.matList[r.material] as {animated?: string[]};
+			const set = new Set(desc.animated ?? []);
+			let col = 0;
+			const w = u.track.width, vals = u.track.values;
+			for (const [name, size] of u.layout) {
+				for (let c = 0; c < size; c++, col++) {
+					for (let k = w + col; k < vals.length; k += w) if (vals[k] !== vals[col]) {
+						set.add(name);
+						break;
+					}
+				}
+			}
+			desc.animated = [...set].sort();
+		}
 		const dynamics = this.dynList.filter(d => d.vertices).map(d => ({
 			id: d.id, name: d.name, scene: d.scene, group: d.group, material: d.material, vertices: d.vertices,
 			layout: d.layout, quads: d.quads, spans: bin.add(new Float64Array(d.spans)),

@@ -20,8 +20,38 @@ class EffectBuilder:
     # ---- inputs ----
 
     def u(self, name, i=0):
-        """A uniform's component, per object (keyframed where it changes)."""
-        return self.g.attr(f'u_{name}_{i}', 'OBJECT', 'Fac')
+        """A uniform's component: the material's constant, or where it changes
+        during the part, the object's keyframed value (packed four to a
+        property, in the order Importer.uniforms packs them)."""
+        animated = self.desc.get('animated', [])
+        if name not in animated:
+            v = self.values.get(name, 0.0)
+            if isinstance(v, list):
+                return float(v[i]) if i < len(v) else 0.0
+            return float(v)
+        k = 0
+        for n in self.layout():
+            if n[0] == name:
+                k += i
+                break
+            if n[0] in animated:
+                k += n[1]
+        attr = self.g.node('ShaderNodeAttribute', attribute_type='OBJECT', attribute_name=f'u_pk{k // 4}')
+        if k % 4 == 3:
+            return attr.outputs['Alpha']
+        return self.g.xyz(attr.outputs['Vector'])[k % 4]
+
+    def layout(self):
+        """The uniforms in the order the capture lists them (sorted names, not
+        the shared ones), with their sizes."""
+        shared = {'sceneExposure', 'exposure', 'fogMaxDensity', 'resolution'}
+        out = []
+        for name in sorted(self.values):
+            if name in shared:
+                continue
+            v = self.values[name]
+            out.append((name, len(v) if isinstance(v, list) else 1))
+        return out
 
     def uvec(self, name, n=3):
         comps = [self.u(name, i) for i in range(n)]
@@ -284,21 +314,30 @@ class EffectBuilder:
         # the way through: the ray goes on from the partner's side
         P = g.geometry().outputs['Position']
         D = g.vscale(g.geometry().outputs['Incoming'], -1.0)
-        rows = [g.vec(self.g.attr(f'p2_pm{r * 4}', 'OBJECT', 'Fac'), self.g.attr(f'p2_pm{r * 4 + 1}', 'OBJECT', 'Fac'), self.g.attr(f'p2_pm{r * 4 + 2}', 'OBJECT', 'Fac')) for r in range(3)]
-        trans = g.vec(*[self.g.attr(f'p2_pm{r * 4 + 3}', 'OBJECT', 'Fac') for r in range(3)])
+        pr = [g.node('ShaderNodeAttribute', attribute_type='OBJECT', attribute_name=f'p2_pr{r}') for r in range(3)]
+        rows = [p.outputs['Vector'] for p in pr]
+        trans = g.vec(*[p.outputs['Alpha'] for p in pr])
         P2 = g.vadd(g.vec(*[g.dot(rows[r], P) for r in range(3)]), trans)
         D2 = g.norm(g.vec(*[g.dot(rows[r], D) for r in range(3)]))
         # (past the partner's own surface, which sits just in front of it)
         P2 = g.vadd(P2, g.vscale(D2, 1.5 * self.mats.scale))
         through = g.node('ShaderNodeBsdfRayPortal', {'Color': (1, 1, 1), 'Position': P2, 'Direction': D2}).outputs[0]
         black = g.node('ShaderNodeEmission', {'Color': (0, 0, 0), 'Strength': 0.0}).outputs[0]
-        inside = g.node('ShaderNodeMixShader', {0: linked, 1: black, 2: through}).outputs[0]
-        under = g.node('ShaderNodeMixShader', {0: hole, 1: clear, 2: inside}).outputs[0]
-        shader = g.node('ShaderNodeMixShader', {0: alpha, 1: under, 2: emit}).outputs[0]
-        # (one-sided: from behind it's nothing)
         back = g.geometry().outputs['Backfacing']
-        shader = g.node('ShaderNodeMixShader', {0: back, 1: shader, 2: g.node('ShaderNodeBsdfTransparent').outputs[0]}).outputs[0]
-        g.link(shader, g.out().inputs['Surface'])
+
+        def surface(inside):
+            under = g.node('ShaderNodeMixShader', {0: hole, 1: clear, 2: inside}).outputs[0]
+            shader = g.node('ShaderNodeMixShader', {0: alpha, 1: under, 2: emit}).outputs[0]
+            # (one-sided: from behind it's nothing)
+            return g.node('ShaderNodeMixShader', {0: back, 1: shader, 2: g.node('ShaderNodeBsdfTransparent').outputs[0]}).outputs[0]
+        # Cycles: the view through; Eevee, which has no ray portals: the
+        # opening dark under the flames, as an unlinked portal's
+        out = g.out()
+        out.target = 'CYCLES'
+        g.link(surface(g.node('ShaderNodeMixShader', {0: linked, 1: black, 2: through}).outputs[0]), out.inputs['Surface'])
+        eevee = g.node('ShaderNodeOutputMaterial', target='EEVEE')
+        eevee.location = (900, -300)
+        g.link(surface(black), eevee.inputs['Surface'])
         mat.surface_render_method = 'BLENDED'
         return None
 

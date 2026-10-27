@@ -129,6 +129,12 @@ computer.
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the
   browser's own H.264 encoder (WebCodecs), and nothing is uploaded.
+- **Blender export:** save any segment, or the whole run, as a Blender scene
+  that plays like the run: the map with its light maps, every entity's
+  movement and animation, the camera, portals (live views in Cycles),
+  effects, screens and gel, and the same exposure, bloom and fades. Each map
+  is a scene, played in order by a Run scene. See
+  [blender/README.md](blender/README.md) for the add-on.
 - **Links to a moment:** the **Link** button copies a URL with the tick, the
   view and the 3D camera. When the run was opened from a URL, the link opens
   it directly. Otherwise it names the file, and whoever opens the link drops
@@ -199,7 +205,7 @@ These toggles in the 3D view are remembered per browser:
 | **Quality** | High, Medium or Low: resolution, antialiasing, bloom and shadow detail. |
 
 The 3D toolbar also has **Ghost** (race another run of the map) and
-**Export** (save an MP4). The **Link** button next to the clock copies a link
+**Export** (save an MP4, or a Blender scene). The **Link** button next to the clock copies a link
 to the current moment.
 
 ## Made to match the game

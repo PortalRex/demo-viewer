@@ -62,6 +62,28 @@ def globals_group():
     return tree
 
 
+def model_light_eevee_group():
+    """Eevee's model light: the cube with the lights folded in (p2_e0..5):
+    6 object properties, where Eevee reads no more than 8."""
+    name = MODEL_LIGHT + ' Eevee'
+    tree = bpy.data.node_groups.get(name)
+    if tree:
+        return tree
+    tree = bpy.data.node_groups.new(name, 'ShaderNodeTree')
+    tree.interface.new_socket('Light', in_out='OUTPUT', socket_type='NodeSocketVector')
+    g = Graph(tree)
+    out = g.node('NodeGroupOutput')
+    out.location = (1000, 0)
+    n = g.norm(g.geometry().outputs['Normal'])
+    amb = None
+    for axis, comp in enumerate(g.xyz(n)):
+        side = g.vmix(g.attr(f'p2_e{axis * 2 + 1}', 'OBJECT'), g.attr(f'p2_e{axis * 2}', 'OBJECT'), g.math('GREATER_THAN', comp, -1e-9))
+        term = g.vscale(side, g.mul(comp, comp))
+        amb = term if amb is None else g.vadd(amb, term)
+    g.link(g.vadd(amb, g.node('ShaderNodeGroup', node_tree=globals_group()).outputs['Ambient']), out.inputs['Light'])
+    return tree
+
+
 def model_light_group(scale):
     """A moving model's light (AMBIENT_FRAGMENT): its ambient cube by the
     normal plus three local lights, each with its falloff, read from the
@@ -122,6 +144,7 @@ class MaterialBuilder:
         # opaque materials take it as a real light (see Importer.flash)
         self.flash = False
         self._flash_albedo = None
+        self._target, self._eevee = None, False
 
     def get(self, mid, cube=None):
         key = (mid, cube)
@@ -299,6 +322,16 @@ class MaterialBuilder:
         if clear_t is not None:
             clear = g.node('ShaderNodeBsdfTransparent').outputs[0]
             shader = g.node('ShaderNodeMixShader', {0: clear_t, 1: shader, 2: clear}).outputs[0]
+        if self._target is not None:
+            # (a material drawn differently per engine: this one's output)
+            out = g.out() if self._target == 'CYCLES' else g.node('ShaderNodeOutputMaterial')
+            out.target = self._target
+            if self._target == 'EEVEE':
+                out.location = (900, -400)
+            g.link(shader, out.inputs['Surface'])
+            mat.surface_render_method = 'BLENDED' if transparent and blend not in ('clip',) else 'DITHERED'
+            mat.use_transparency_overlap = True
+            return
         g.link(shader, g.out().inputs['Surface'])
         mat.surface_render_method = 'BLENDED' if transparent and blend not in ('clip',) else 'DITHERED'
         mat.use_transparency_overlap = True
@@ -330,10 +363,16 @@ class MaterialBuilder:
             EffectBuilder(self, g, desc, glob).build(mat)
             return mat
         builder = {'world': self.world, 'model': self.model, 'vertexlit': self.vertexlit}.get(kind, self.unlit)
-        color, alpha = builder(g, desc, glob, cube)
-        if desc.get('fog', True):
-            color = self.fog(g, color, glob)
-        self.finish(mat, g, desc, color, alpha)
+        # (lit models: Cycles reads every light's settings, Eevee only 8 object
+        # properties: an output for each)
+        targets = ['CYCLES', 'EEVEE'] if kind == 'model' else [None]
+        for target in targets:
+            self._target, self._eevee = target, target == 'EEVEE'
+            color, alpha = builder(g, desc, glob, cube)
+            if desc.get('fog', True):
+                color = self.fog(g, color, glob)
+            self.finish(mat, g, desc, color, alpha)
+        self._target, self._eevee = None, False
         return mat
 
     def albedo(self, g, desc):
@@ -533,8 +572,12 @@ class MaterialBuilder:
             if ec is not None:
                 exponent = g.add(1.0, g.mul(149.0, g.xyz(ec)[0]))
         self._flash_albedo = albedo
-        lit = g.group(model_light_group(self.scale), {'Exponent': exponent})
-        amb = lit.outputs['Light']
+        if self._eevee:
+            amb = g.group(model_light_eevee_group()).outputs['Light']
+            phong = None
+        else:
+            lit = g.group(model_light_group(self.scale), {'Exponent': exponent})
+            amb = lit.outputs['Light']
         color = g.vscale(g.vmul(albedo, amb), scale)
         if phong:
             spec = lit.outputs['Specular']

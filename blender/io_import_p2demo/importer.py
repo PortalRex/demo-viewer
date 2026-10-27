@@ -480,9 +480,12 @@ class Importer:
             if rec.get('lighting'):
                 self.lighting(obj, rec['lighting'])
             if rec.get('uniforms'):
-                self.uniforms(obj, rec['uniforms'])
+                self.uniforms(obj, rec['uniforms'], desc)
             if rec.get('portal'):
                 self.portal(obj, rec['portal'])
+            if 'ropeTangent' in b['geometries'][rec['geometry']]['attributes']:
+                # (a rope that holds still: its ribbon still turns to the camera)
+                obj.modifiers.new('Rope', 'NODES').node_group = rope_group(self.S)
             if rec.get('skeleton') is not None:
                 arm = self.armature(rec['skeleton'], col)
                 self.skin(obj, rec['geometry'], arm)
@@ -518,24 +521,50 @@ class Importer:
             # (falloff by distance in Blender's units)
             a = v[:, base + 6:base + 9] / np.array([1.0, S, S * S])
             props.append((f'p2_l{i}a', a))
+        # For Eevee, which reads at most 8 object properties a material: the
+        # lights folded into the cube at the point the viewer lit it from
+        # (each face takes a light by how far it faces it), p2_e0..5
+        cube = v[:, :18].reshape(-1, 6, 3).copy()
+        at = v[:, 45:48] if v.shape[1] >= 48 else None
+        if at is not None:
+            axes = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]], dtype=np.float64)
+            for i in range(3):
+                base = 18 + i * 9
+                to = v[:, base:base + 3] - at
+                d = np.linalg.norm(to, axis=1)
+                l = to / np.maximum(d, 1e-6)[:, None]
+                ax, ay, az = v[:, base + 6], v[:, base + 7], v[:, base + 8]
+                att = 1.0 / np.maximum(ax + ay * d + az * d * d, 1e-3)
+                c = v[:, base + 3:base + 6] * att[:, None]
+                cube += np.maximum(l @ axes.T, 0.0)[:, :, None] * c[:, None, :]
+        props += [(f'p2_e{i}', cube[:, i]) for i in range(6)]
         for name, vals in props:
             obj[name] = [float(x) for x in vals[0]]
             if len(frames) > 1:
                 key_vectors(obj, f'["{name}"]', frames, vals)
 
-    def uniforms(self, obj, u):
-        """An effect shader's settings as properties u_<name>_<i>, keyframed
-        where they change (read by the effect node trees)."""
+    def uniforms(self, obj, u, desc):
+        """An effect shader's settings that change during the part (the
+        material's `animated` ones; the rest are its constants), four to a
+        property u_pk<j>, keyframed (read by the effect node trees: Eevee
+        reads at most 8 object properties a material)."""
+        animated = set(desc.get('animated', []))
+        if not animated:
+            return
         frames, v = self.b.track(u['track'])
-        col = 0
+        cols, col = [], 0
         for name, size in u['layout']:
-            for i in range(size):
-                vals = v[:, col]
-                col += 1
-                prop = f'u_{name}_{i}'
-                obj[prop] = float(vals[0])
-                if len(frames) > 1 and np.ptp(vals) > 0:
-                    keys(obj, f'["{prop}"]', frames, vals)
+            if name in animated:
+                cols += range(col, col + size)
+            col += size
+        for j in range(0, len(cols), 4):
+            part = v[:, cols[j:j + 4]]
+            vals = np.zeros((len(frames), 4))
+            vals[:, :part.shape[1]] = part
+            prop = f'u_pk{j // 4}'
+            obj[prop] = [float(x) for x in vals[0]]
+            if len(frames) > 1:
+                key_vectors(obj, f'["{prop}"]', frames, vals)
 
     def portal(self, obj, track):
         """Where a portal leads (its partner's side, as a 3 x 4 matrix in
@@ -543,11 +572,14 @@ class Importer:
         frames, v = self.b.track(track)
         v = v.copy()
         v[:, [3, 7, 11]] *= self.S
-        for i in range(13):
-            prop = f'p2_pm{i}' if i < 12 else 'p2_plink'
-            obj[prop] = float(v[0, i])
-            if len(frames) > 1 and np.ptp(v[:, i]) > 0:
-                keys(obj, f'["{prop}"]', frames, v[:, i], 'CONSTANT' if i == 12 else 'LINEAR')
+        # (rows of the matrix with their translation, p2_pr0..2, and p2_plink)
+        for r in range(3):
+            obj[f'p2_pr{r}'] = [float(x) for x in v[0, r * 4:r * 4 + 4]]
+            if len(frames) > 1 and np.ptp(v[:, r * 4:r * 4 + 4]) > 0:
+                key_vectors(obj, f'["p2_pr{r}"]', frames, v[:, r * 4:r * 4 + 4])
+        obj['p2_plink'] = float(v[0, 12])
+        if len(frames) > 1 and np.ptp(v[:, 12]) > 0:
+            keys(obj, '["p2_plink"]', frames, v[:, 12], 'CONSTANT')
 
     # ---- geometry remade every frame ----
 
@@ -630,7 +662,7 @@ class Importer:
             keys(obj, 'hide_render', np.array(frames, dtype=np.float64), np.array(hide, dtype=np.float32), 'CONSTANT')
             keys(obj, 'hide_viewport', np.array(frames, dtype=np.float64), np.array(hide, dtype=np.float32), 'CONSTANT')
         if d.get('uniforms'):
-            self.uniforms(obj, d['uniforms'])
+            self.uniforms(obj, d['uniforms'], self.b['materials'][d['material']])
 
     # ---- armatures ----
 
