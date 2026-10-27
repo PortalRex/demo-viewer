@@ -1314,6 +1314,8 @@ export class View3D {
 	setMap(bsp: BspMap | null, files: GameFiles | null = null, materials: Materials | null = null) {
 		// (no meter read carried over: a new map's first reading is taken as is)
 		this.dropMeterReads();
+		this.occluderList.length = 0;
+		this.occluderFrame = -1;
 		for (const m of this.energyMaterials.values()) m.then(e => e?.dispose());
 		this.energyMaterials.clear();
 		this.energyLive.clear();
@@ -2796,14 +2798,62 @@ export class View3D {
 		if (world && world.distance + ray.near < ray.far) return false;
 		// (only what's drawn into the depth buffer, which the engine's
 		// occlusion query tests against: shown entities and their shown
-		// parts, not translucent or hidden materials (a relay's lens))
+		// parts, not translucent or hidden materials (a relay's lens)); only
+		// those whose bounds the line passes through are tested, and the
+		// first in the way is enough)
 		const shown = (o: THREE.Object3D) => {
 			for (let p: THREE.Object3D | null = o; p; p = p.parent) if (!p.visible) return false;
 			return true;
 		};
 		const writesDepth = (m: THREE.Material | THREE.Material[]) => (Array.isArray(m) ? m : [m]).some(x => x.visible && x.depthWrite);
-		const candidates = [this.propGroup, ...this.entityGroup.children.filter(o => o.visible)];
-		return !ray.intersectObjects(candidates, true).some(h => shown(h.object) && writesDepth((h.object as THREE.Mesh).material));
+		const hits: THREE.Intersection[] = [];
+		for (const o of this.occluders()) {
+			if (o.r >= 0) {
+				const ox = o.x - eye.x, oy = o.y - eye.y, oz = o.z - eye.z;
+				const t = Math.min(ray.far, Math.max(ray.near, ox * dir.x + oy * dir.y + oz * dir.z));
+				const dx = ox - dir.x * t, dy = oy - dir.y * t, dz = oz - dir.z * t;
+				if (dx * dx + dy * dy + dz * dz > o.r * o.r) continue;
+			}
+			if (!shown(o.mesh) || !writesDepth(o.mesh.material)) continue;
+			hits.length = 0;
+			o.mesh.raycast(ray, hits);
+			if (hits.length) return false;
+		}
+		return true;
+	}
+
+	// The props' and entities' meshes, with their bounds in the world (r -1:
+	// geometry rewritten as it goes, no bounds to trust), once a frame for
+	// the lines of sight: shown or not, as what's shown changes within one
+	private occluderList: {mesh: THREE.Mesh; x: number; y: number; z: number; r: number}[] = [];
+	private occluderFrame = -1;
+	private occluders() {
+		if (this.occluderFrame === this.frameNumber) return this.occluderList;
+		this.occluderFrame = this.frameNumber;
+		const list = this.occluderList;
+		list.length = 0;
+		const sphere = new THREE.Sphere();
+		for (const group of [this.propGroup, this.entityGroup]) {
+			group.updateMatrixWorld();
+			group.traverse(o => {
+				const mesh = o as THREE.Mesh;
+				if (!mesh.isMesh) return;
+				const g = mesh.geometry;
+				const dynamic = (g.getAttribute('position') as THREE.BufferAttribute | undefined)?.usage === THREE.DynamicDrawUsage;
+				const bounds = (mesh as THREE.SkinnedMesh).isSkinnedMesh ? (mesh as THREE.SkinnedMesh).boundingSphere : g.boundingSphere ?? (g.computeBoundingSphere(), g.boundingSphere);
+				if (dynamic || !bounds) {
+					list.push({mesh, x: 0, y: 0, z: 0, r: -1});
+					return;
+				}
+				// (entities' rigid models through a bounds tree too, as props:
+				// a carried gun, tested triangle by triangle, cost most of a
+				// millisecond a ray)
+				if (!(mesh as THREE.SkinnedMesh).isSkinnedMesh && !Object.prototype.hasOwnProperty.call(mesh, 'raycast')) bvhOnDemand(mesh);
+				sphere.copy(bounds).applyMatrix4(mesh.matrixWorld);
+				list.push({mesh, x: sphere.center.x, y: sphere.center.y, z: sphere.center.z, r: sphere.radius});
+			});
+		}
+		return list;
 	}
 
 	// the matrix taking things in front of portal `from` to the same place
@@ -3341,7 +3391,7 @@ export class View3D {
 				const [seq, cycle] = this.animAt(pt, tick, sk);
 				anim.setPose(seq, cycle);
 			}
-			const bones = anim ? boneMatrices(sk, anim.pose) : po!.userData.staticBones as THREE.Matrix4[];
+			const bones = anim ? anim.poseBones : po!.userData.staticBones as THREE.Matrix4[];
 			const att = bones && attachmentMatrix(sk, bones, k.attachment - 1);
 			if (att) parent.multiply(att);
 		}
@@ -3759,7 +3809,7 @@ export class View3D {
 		o.updateMatrixWorld(true);
 		const anim = o.userData.anim as AnimatedModel | undefined;
 		if (anim) {
-			const a = attachmentMatrix(sk, boneMatrices(sk, anim.pose), attachment - 1);
+			const a = attachmentMatrix(sk, anim.poseBones, attachment - 1);
 			return a && o.matrixWorld.clone().multiply(a);
 		}
 		// the bone-merged gun: its weapon_bone is the group itself
@@ -4234,7 +4284,7 @@ export class View3D {
 		const bone = sk.bones.findIndex(b => b.name.toLowerCase() === 'weapon_bone');
 		if (bone < 0) return null;
 		po.updateMatrixWorld();
-		return po.matrixWorld.clone().multiply(boneMatrices(sk, anim.pose)[bone]);
+		return po.matrixWorld.clone().multiply(anim.poseBones[bone]);
 	}
 
 	// A player's animation, picked from their movement as the game's

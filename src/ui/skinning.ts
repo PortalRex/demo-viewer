@@ -2,6 +2,7 @@
 // geometry (static props, which the game draws posed with sequence 0), and
 // live skinned models for animated entities.
 import * as THREE from 'three';
+import {MeshBVH} from 'three-mesh-bvh';
 import type {Skeleton, Pose, Gesture} from '../game/anim.ts';
 import {referencePose, samplePose} from '../game/anim.ts';
 import type {ModelGroup} from '../game/mdl.ts';
@@ -28,7 +29,7 @@ export function skinMatrices(sk: Skeleton, pose: Pose): THREE.Matrix4[] {
 }
 
 // an attachment's transform in model space
-export function attachmentMatrix(sk: Skeleton, bones: THREE.Matrix4[], index: number): THREE.Matrix4 | null {
+export function attachmentMatrix(sk: Skeleton, bones: readonly THREE.Matrix4[], index: number): THREE.Matrix4 | null {
 	const a = sk.attachments[index];
 	if (!a || !bones[a.bone]) return null;
 	return bones[a.bone].clone().multiply(poseToBone(a.local));
@@ -73,7 +74,10 @@ const IDENTITY = new THREE.Matrix4();
 // farthest any of its vertices reaches from it, all in one box (for
 // culling and ray tests); a ray that reaches the box is tested against the
 // triangles of the bones it passes near, only their vertices posed (three's
-// own test skins every vertex again for every triangle).
+// own test skins every vertex again for every triangle). Triangles moved by
+// one bone alone keep their shape: those are tested with the ray taken into
+// that bone's rest place, against a bounds tree made once per model; the
+// rest in small runs, each with a box made once per pose.
 export class AnimatedModel {
 	readonly group = new THREE.Group();
 	private sk: Skeleton;
@@ -175,6 +179,12 @@ export class AnimatedModel {
 		return best;
 	}
 
+	// each bone's bone space -> model space in the current pose (kept with
+	// the pose: not to be changed)
+	get poseBones(): readonly THREE.Matrix4[] {
+		return this.boneMats;
+	}
+
 	get hasHitboxes() {
 		return this.sk.hitboxes.length > 0;
 	}
@@ -197,25 +207,70 @@ export class AnimatedModel {
 		}
 		const tick = ++this.rayStamp;
 		const centre = new THREE.Vector3(), a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), at = new THREE.Vector3();
+		const skin = new THREE.Matrix4(), rest = new THREE.Ray();
 		for (const [bone, tris] of rm.boneTris) {
 			const reach = this.reach[bone], m = this.boneMats[bone];
 			if (reach < 0 || !m || local.distanceSqToPoint(centre.setFromMatrixPosition(m)) > reach * reach) continue;
-			for (let n = 0; n < tris.length; n++) {
-				const tri = tris[n];
-				if (rm.seen[tri] === tick) continue;
-				rm.seen[tri] = tick;
-				const i0 = rm.index ? rm.index[tri * 3] : tri * 3, i1 = rm.index ? rm.index[tri * 3 + 1] : tri * 3 + 1, i2 = rm.index ? rm.index[tri * 3 + 2] : tri * 3 + 2;
-				this.posedVertex(rm, i0, a);
-				this.posedVertex(rm, i1, b);
-				this.posedVertex(rm, i2, c);
-				// (either side: what blocks a line of sight)
-				if (!local.intersectTriangle(a, b, c, false, at)) continue;
-				const point = at.clone().applyMatrix4(mesh.matrixWorld);
-				const distance = point.distanceTo(raycaster.ray.origin);
-				if (distance < raycaster.near || distance > raycaster.far) continue;
-				hits.push({distance, point, object: mesh, faceIndex: tri});
+			const rigid = rigidTree(rm, bone);
+			if (rigid) {
+				skin.fromArray(this.skinMats!, bone * 16);
+				rest.copy(local).applyMatrix4(skin.clone().invert());
+				for (const h of rigid.tree.raycast(rest, THREE.DoubleSide)) {
+					const point = h.point.applyMatrix4(skin).applyMatrix4(mesh.matrixWorld);
+					const distance = point.distanceTo(raycaster.ray.origin);
+					if (distance < raycaster.near || distance > raycaster.far) continue;
+					hits.push({distance, point, object: mesh, faceIndex: rigid.tris[h.faceIndex!]});
+				}
+			}
+			// the rest in runs of CHUNK, each with its box in the pose (made on
+			// the pose's first ray through the bone), the ray tested against
+			// the box before its triangles
+			const boxes = this.chunkBoxes(rm, bone, tris);
+			for (let chunk = 0; chunk * CHUNK < tris.length; chunk++) {
+				if (!rayHitsBox(local, boxes, chunk * 6)) continue;
+				for (let n = chunk * CHUNK; n < Math.min(tris.length, (chunk + 1) * CHUNK); n++) {
+					const tri = tris[n];
+					if (rm.seen[tri] === tick) continue;
+					rm.seen[tri] = tick;
+					const i0 = rm.index ? rm.index[tri * 3] : tri * 3, i1 = rm.index ? rm.index[tri * 3 + 1] : tri * 3 + 1, i2 = rm.index ? rm.index[tri * 3 + 2] : tri * 3 + 2;
+					this.posedVertex(rm, i0, a);
+					this.posedVertex(rm, i1, b);
+					this.posedVertex(rm, i2, c);
+					// (either side: what blocks a line of sight)
+					if (!local.intersectTriangle(a, b, c, false, at)) continue;
+					const point = at.clone().applyMatrix4(mesh.matrixWorld);
+					const distance = point.distanceTo(raycaster.ray.origin);
+					if (distance < raycaster.near || distance > raycaster.far) continue;
+					hits.push({distance, point, object: mesh, faceIndex: tri});
+				}
 			}
 		}
+	}
+
+	// the boxes around a bone's shared triangles, CHUNK at a time, in the pose
+	private chunkBoxes(rm: RayMesh, bone: number, tris: Uint32Array): Float32Array {
+		let c = rm.chunks.get(bone);
+		if (!c) rm.chunks.set(bone, c = {boxes: new Float32Array(Math.ceil(tris.length / CHUNK) * 6), stamp: -1});
+		if (c.stamp === this.stamp) return c.boxes;
+		c.stamp = this.stamp;
+		const v = new THREE.Vector3(), b = c.boxes;
+		for (let chunk = 0; chunk * CHUNK < tris.length; chunk++) {
+			const o = chunk * 6;
+			b[o] = b[o + 1] = b[o + 2] = Infinity;
+			b[o + 3] = b[o + 4] = b[o + 5] = -Infinity;
+			for (let n = chunk * CHUNK; n < Math.min(tris.length, (chunk + 1) * CHUNK); n++) {
+				for (let k = 0; k < 3; k++) {
+					this.posedVertex(rm, rm.index ? rm.index[tris[n] * 3 + k] : tris[n] * 3 + k, v);
+					b[o] = Math.min(b[o], v.x);
+					b[o + 1] = Math.min(b[o + 1], v.y);
+					b[o + 2] = Math.min(b[o + 2], v.z);
+					b[o + 3] = Math.max(b[o + 3], v.x);
+					b[o + 4] = Math.max(b[o + 4], v.y);
+					b[o + 5] = Math.max(b[o + 5], v.z);
+				}
+			}
+		}
+		return b;
 	}
 
 	// a vertex in the current pose (each worked out once per pose)
@@ -250,13 +305,17 @@ export class AnimatedModel {
 }
 
 // what a skinned mesh's ray test needs: its vertices, their bones, and for
-// each bone the triangles it moves
+// each bone the triangles it moves along with others (and those it moves
+// alone, apart, see rigidTree)
 interface RayMesh {
 	pos: ArrayLike<number>;
 	bone: ArrayLike<number>;
 	weight: ArrayLike<number>;
 	index: ArrayLike<number> | null;
 	boneTris: Map<number, Uint32Array>;
+	rigidTris: Map<number, Uint32Array>;
+	rigid: Map<number, {tree: MeshBVH; tris: Uint32Array} | null>;  // made when first needed
+	chunks: Map<number, {boxes: Float32Array; stamp: number}>;  // per bone, for the pose `stamp`
 	posed: Float32Array;   // vertices in the pose (where done)
 	done: Uint8Array;
 	poseStamp: number;
@@ -273,20 +332,74 @@ function rayMesh(g: THREE.BufferGeometry): RayMesh | null {
 		for (let k = 0; k < 4; k++) if (weight.array[v * 4 + k]) into.add(bone.array[v * 4 + k]);
 	};
 	const bones = new Set<number>();
+	const rigidLists = new Map<number, number[]>();
 	for (let t = 0; t < triangles; t++) {
 		bones.clear();
 		for (let k = 0; k < 3; k++) vertexBones(index ? index[t * 3 + k] : t * 3 + k, bones);
+		const into = bones.size === 1 ? rigidLists : lists;
 		for (const b of bones) {
-			let list = lists.get(b);
-			if (!list) lists.set(b, list = []);
+			let list = into.get(b);
+			if (!list) into.set(b, list = []);
 			list.push(t);
 		}
 	}
+	// (every bone that moves triangles has a list, empty or not)
+	for (const b of rigidLists.keys()) if (!lists.has(b)) lists.set(b, []);
 	return {
 		pos: pos.array, bone: bone.array, weight: weight.array, index,
 		boneTris: new Map([...lists].map(([b, list]) => [b, Uint32Array.from(list)])),
+		rigidTris: new Map([...rigidLists].map(([b, list]) => [b, Uint32Array.from(list)])),
+		rigid: new Map(),
+		chunks: new Map(),
 		posed: new Float32Array(pos.count * 3), done: new Uint8Array(pos.count), poseStamp: -1, seen: new Uint32Array(triangles),
 	};
+}
+
+// how many triangles share a box in a bone's ray test
+const CHUNK = 32;
+
+// whether a ray meets the box at `o` in a list of boxes (min xyz, max xyz)
+function rayHitsBox(ray: THREE.Ray, boxes: Float32Array, o: number): boolean {
+	let near = 0, far = Infinity;
+	for (let a = 0; a < 3; a++) {
+		const origin = a === 0 ? ray.origin.x : a === 1 ? ray.origin.y : ray.origin.z;
+		const dir = a === 0 ? ray.direction.x : a === 1 ? ray.direction.y : ray.direction.z;
+		const lo = boxes[o + a], hi = boxes[o + 3 + a];
+		if (Math.abs(dir) < 1e-12) {
+			if (origin < lo || origin > hi) return false;
+			continue;
+		}
+		let t0 = (lo - origin) / dir, t1 = (hi - origin) / dir;
+		if (t0 > t1) [t0, t1] = [t1, t0];
+		near = Math.max(near, t0);
+		far = Math.min(far, t1);
+		if (near > far) return false;
+	}
+	return true;
+}
+
+// the triangles one bone moves alone, as they are at rest, in a bounds tree
+function rigidTree(rm: RayMesh, bone: number): {tree: MeshBVH; tris: Uint32Array} | null {
+	let r = rm.rigid.get(bone);
+	if (r !== undefined) return r;
+	const tris = rm.rigidTris.get(bone);
+	r = null;
+	if (tris?.length) {
+		const pos = new Float32Array(tris.length * 9);
+		tris.forEach((t, n) => {
+			for (let k = 0; k < 3; k++) {
+				const v = rm.index ? rm.index[t * 3 + k] : t * 3 + k;
+				pos[n * 9 + k * 3] = rm.pos[v * 3];
+				pos[n * 9 + k * 3 + 1] = rm.pos[v * 3 + 1];
+				pos[n * 9 + k * 3 + 2] = rm.pos[v * 3 + 2];
+			}
+		});
+		const g = new THREE.BufferGeometry();
+		g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+		r = {tree: new MeshBVH(g), tris};
+	}
+	rm.rigid.set(bone, r);
+	return r;
 }
 
 export function skinnedGeometry(g: ModelGroup, base: THREE.BufferGeometry): THREE.BufferGeometry {
