@@ -14,6 +14,7 @@ from mathutils import Matrix, Quaternion, Vector
 
 from . import compositor
 from .geonodes import frame_filter_group, rope_group
+from . import materials
 from .materials import MaterialBuilder, globals_group
 from .nodes import Graph
 
@@ -118,12 +119,15 @@ class Importer:
         self.log.append(msg)
         print('[p2demo]', msg)
 
-    def run(self, context):
+    def run(self, context, scene=None, tag=''):
+        """Into `scene` (the current one by default); `tag` tells this
+        segment's node groups and scene names apart from the others'."""
         t0 = time.time()
         b = self.b
         name = os.path.basename(b.dir.rstrip('/\\'))
-        scene = context.scene
-        scene.name = f'{b["map"]}'
+        materials.name_groups(tag)
+        scene = scene or context.scene
+        scene.name = f'{tag} {b["map"]}'.strip()
         self.scene = scene
         self.setup_scene(scene, b['frames'])
         self.root = bpy.data.collections.new(f'P2 {b["map"]}')
@@ -138,9 +142,11 @@ class Importer:
         self.mats = MaterialBuilder(b.scene, self.images, self.S)
         self.mats.sky = self.sky_setup()
         self.mats.flash = self.projected_light and bool(b.scene.get('flash'))
+        self.mats.paint = b.scene.get('paint')
         self.globals()
         self.objects()
         self.dynamics()
+        self.sequences_play()
         self.note(f'objects {time.time() - t0:.1f}s')
         self.cameras(scene)
         self.flash()
@@ -182,7 +188,14 @@ class Importer:
         if sky_img is not None:
             env = nt.nodes.new('ShaderNodeTexEnvironment')
             env.image = sky_img
-            nt.links.new(env.outputs['Color'], bg.inputs['Color'])
+            # (exposed, as everything seen is)
+            expo = nt.nodes.new('ShaderNodeGroup')
+            expo.node_tree = globals_group()
+            mul = nt.nodes.new('ShaderNodeVectorMath')
+            mul.operation = 'SCALE'
+            nt.links.new(env.outputs['Color'], mul.inputs[0])
+            nt.links.new(expo.outputs['Exposure'], mul.inputs['Scale'])
+            nt.links.new(mul.outputs[0], bg.inputs['Color'])
         else:
             bg.inputs['Color'].default_value = (0, 0, 0, 1)
         # (seen, never a light: the projected light alone lights diffuse parts)
@@ -231,6 +244,8 @@ class Importer:
         fps = b['fps']
         scene.render.fps = fps
         scene.render.fps_base = 1
+        # (played back at the run's own speed, frames dropped if need be)
+        scene.sync_mode = 'FRAME_DROP'
         scene.render.resolution_x = b['width']
         scene.render.resolution_y = b['height']
         scene.render.resolution_percentage = 100
@@ -285,6 +300,7 @@ class Importer:
 
     def load_images(self):
         out = {}
+        self.sequences = {}
         for t in self.b['textures']:
             if not t['file']:
                 out[t['id']] = None
@@ -298,8 +314,41 @@ class Importer:
                 continue
             img.colorspace_settings.name = 'sRGB' if t['colorspace'] == 'srgb' else 'Non-Color'
             img.alpha_mode = 'CHANNEL_PACKED'
+            if t.get('sequence'):
+                # (pictures 0001.png on: shown by frame, see sequences)
+                img.source = 'SEQUENCE'
+                self.sequences[img.name] = t['sequence']
             out[t['id']] = img
         return out
+
+    def sequences_play(self):
+        """Each changing texture (movie screens, gel) shows its picture of the
+        frame: picture k from the frame it was taken to the next one's. The
+        picture shown is frame + offset, so the offset is keyed to fall by
+        one a frame within each picture's frames."""
+        if not self.sequences:
+            return
+        total = self.b['frames'] + 1
+        for tree in [m.node_tree for m in bpy.data.materials if m.node_tree] + list(bpy.data.node_groups):
+            for node in tree.nodes:
+                if node.bl_idname not in ('ShaderNodeTexImage', 'ShaderNodeTexEnvironment') or node.image is None:
+                    continue
+                seq = self.sequences.get(node.image.name)
+                if seq is None:
+                    continue
+                iu = node.image_user
+                iu.frame_start = 1
+                iu.frame_duration = total + 1
+                iu.use_cyclic = False
+                iu.use_auto_refresh = True
+                k = self.b.view(seq['keys']).reshape(-1, 2)
+                frames, values = [], []
+                for i, (f, idx) in enumerate(k):
+                    end = k[i + 1][0] - 1 if i + 1 < len(k) else total - 1
+                    # (Blender frame f + 1 shows picture idx + 1: offset idx - f)
+                    frames += [f, max(f, end)]
+                    values += [idx - f, idx - max(f, end)]
+                keys(tree, f'nodes["{node.name}"].image_user.frame_offset', np.array(frames, dtype=np.float64), np.array(values, dtype=np.float32), 'LINEAR', name=f'{tree.name} pictures')
 
     # ---- frame-wide values ----
 
@@ -321,12 +370,7 @@ class Importer:
         animate('Ambient R', col['ambientR'])
         animate('Ambient G', col['ambientG'])
         animate('Ambient B', col['ambientB'])
-        # the view's exposure (stops)
-        exposure = np.log2(np.maximum(col['exposure'], 1e-6))
-        if len(frames) == 1:
-            self.scene.view_settings.exposure = float(exposure[0])
-        else:
-            keys(self.scene, 'view_settings.exposure', frames, exposure, 'LINEAR', name='P2 Scene')
+        # (the exposure is in the materials: see MaterialBuilder.exposure)
         ff, fv = b.track(b['fog']['track'])
         frames = ff
         for i, node in enumerate(('Fog R', 'Fog G', 'Fog B')):
@@ -602,9 +646,12 @@ class Importer:
         S = self.S
         # bones at their bind pose (each unparented: the recording gives every
         # bone's place in the world each frame)
-        view_layer = bpy.context.view_layer
+        view_layer = self.scene.view_layers[0]
         prev = view_layer.objects.active
         view_layer.objects.active = arm
+        # (edit mode in this segment's scene, whichever the window shows)
+        override = bpy.context.temp_override(scene=self.scene, view_layer=view_layer, active_object=arm, object=arm)
+        override.__enter__()
         bpy.ops.object.mode_set(mode='EDIT')
         rests = []
         for i, bone in enumerate(sk['bones']):
@@ -616,6 +663,7 @@ class Importer:
             eb.matrix = Matrix.LocRotScale(loc * S, rot, None)
             rests.append(eb.name)
         bpy.ops.object.mode_set(mode='OBJECT')
+        override.__exit__(None, None, None)
         view_layer.objects.active = prev
         arm.data.display_type = 'STICK'
         arm.show_in_front = False
@@ -907,6 +955,51 @@ def decompose(m):
 
 
 def load(context, path, **options):
+    """A segment's bundle (scene.json), or a whole run (run.json)."""
+    if os.path.basename(path).lower() == 'run.json':
+        return load_run(context, path, **options)
     imp = Importer(path, **options)
     imp.run(context)
     return imp
+
+
+def load_run(context, path, **options):
+    """A whole run: each segment (one map's part) a scene of its own, and a
+    scene "Run" whose sequencer plays them one after another, as the run went:
+    play or render that one."""
+    with open(path, 'r', encoding='utf-8') as f:
+        run = json.load(f)
+    base = os.path.dirname(path)
+    master = context.scene
+    imports = []
+    for i, seg in enumerate(run['segments']):
+        scene = bpy.data.scenes.new(f'segment {i + 1}')
+        imp = Importer(os.path.join(base, seg['dir'], 'scene.json'), **options)
+        imp.run(context, scene=scene, tag=f'{i + 1:02d}')
+        imports.append(imp)
+    master.name = f'Run {run.get("demo", "")}'.strip()
+    first = imports[0].scene
+    master.render.fps = first.render.fps
+    master.render.fps_base = 1
+    master.render.resolution_x, master.render.resolution_y = first.render.resolution_x, first.render.resolution_y
+    master.render.resolution_percentage = 100
+    master.display_settings.display_device = 'sRGB'
+    master.view_settings.view_transform = 'Standard'
+    master.view_settings.look = 'None'
+    master.view_settings.exposure = 0.0
+    master.render.use_sequencer = True
+    master.render.use_compositing = False
+    master.sync_mode = 'FRAME_DROP'
+    edit = master.sequence_editor_create()
+    strips = getattr(edit, 'strips', None) or edit.sequences
+    frame = 1
+    for imp in imports:
+        sc = imp.scene
+        strip = strips.new_scene(name=sc.name, scene=sc, channel=1, frame_start=frame)
+        frame += sc.frame_end - sc.frame_start + 1
+    master.frame_start = 1
+    master.frame_end = frame - 1
+    master.frame_current = 1
+    if context.window is not None:
+        context.window.scene = master
+    return imports

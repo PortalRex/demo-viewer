@@ -17,8 +17,16 @@ BUMP_BASIS = (
     (-0.40824830, -0.70710678, 0.57735027),
 )
 
+# (each imported segment has its own: their values are keyframed per segment)
 GLOBALS = 'P2 Globals'
 MODEL_LIGHT = 'P2 Model Light'
+
+
+def name_groups(tag):
+    """The shared groups' names for the segment being imported."""
+    global GLOBALS, MODEL_LIGHT
+    GLOBALS = f'P2 Globals {tag}'.strip()
+    MODEL_LIGHT = f'P2 Model Light {tag}'.strip()
 
 
 def globals_group():
@@ -131,7 +139,7 @@ class MaterialBuilder:
         img = sky.get('image')
         if img is not None:
             view = g.vscale(g.geometry().outputs['Incoming'], -1.0)
-            color = g.env(img, view)
+            color = self.exposed(g, g.env(img, view))
         else:
             color = g.vec(0, 0, 0)
         emit = g.node('ShaderNodeEmission', {'Color': color, 'Strength': self.seen(g)}).outputs[0]
@@ -144,6 +152,18 @@ class MaterialBuilder:
         g.link(shader, g.out().inputs['Surface'])
 
     # ---- shared pieces ----
+
+    def exposure(self, g):
+        """The frame's exposure (keyframed in P2 Globals). It's applied here,
+        to everything seen, rather than by the view transform: a segment then
+        looks right in its own scene, in the run's sequencer and in the
+        viewport alike."""
+        if getattr(g, '_exposure', None) is None:
+            g._exposure = g.node('ShaderNodeGroup', node_tree=globals_group()).outputs['Exposure']
+        return g._exposure
+
+    def exposed(self, g, color):
+        return g.vscale(color, self.exposure(g))
 
     def seen(self, g):
         """How strongly a surface's colour shows: fully to the camera (and
@@ -223,11 +243,13 @@ class MaterialBuilder:
             alpha = g.mul(alpha, opacity)
         elif alpha is None and opacity != 1.0:
             alpha = g.value(opacity)
+        ratio = color  # (what multiplying blends multiply by: not exposed)
+        color = self.exposed(g, color)
         emit = g.node('ShaderNodeEmission', {'Color': color, 'Strength': self.seen(g)}).outputs[0]
         if self.flash and self._flash_albedo is not None and blend in ('opaque', 'clip'):
             # (the projected light, as the viewer adds it: albedo x 1.5 x its
             # light; the 1.5 is in the light)
-            diffuse = g.node('ShaderNodeBsdfDiffuse', {'Color': self._flash_albedo}).outputs[0]
+            diffuse = g.node('ShaderNodeBsdfDiffuse', {'Color': self.exposed(g, self._flash_albedo)}).outputs[0]
             emit = g.node('ShaderNodeAddShader', {0: emit, 1: diffuse}).outputs[0]
         shader = emit
         transparent = False
@@ -247,10 +269,10 @@ class MaterialBuilder:
             shader = g.node('ShaderNodeAddShader', {0: clear, 1: emit}).outputs[0]
             transparent = True
         elif blend == 'multiply':
-            shader = g.node('ShaderNodeBsdfTransparent', {'Color': color}).outputs[0]
+            shader = g.node('ShaderNodeBsdfTransparent', {'Color': ratio}).outputs[0]
             transparent = True
         elif blend == 'modulate2x':
-            shader = g.node('ShaderNodeBsdfTransparent', {'Color': g.vscale(color, 2.0)}).outputs[0]
+            shader = g.node('ShaderNodeBsdfTransparent', {'Color': g.vscale(ratio, 2.0)}).outputs[0]
             transparent = True
         elif blend == 'addAlphaBehind':
             behind = g.node('ShaderNodeBsdfTransparent', {'Color': g.splat(alpha) if alpha is not None else (1, 1, 1)}).outputs[0]
@@ -466,7 +488,32 @@ class MaterialBuilder:
             spec = self.env(g, desc, desc['env'], surface_light, alpha, bump_alpha, detail, desc['env'].get('cube'))
             if spec is not None:
                 color = g.vadd(color, spec)
+        if lm is not None:
+            color = self.gel(g, color, lm, desc.get('lightmapScale', 1.5))
         return color, alpha
+
+    def gel(self, g, color, lm, scale):
+        """The gel over a surface (PAINT_FRAGMENT, PAINT_FINAL): its coverage in
+        light map coordinates, with the splat texture's alpha averaged in;
+        thin gel desaturated and darker; lit by the flat light map (x 0.82,
+        plus a little of its own colour), blended over at most 85%."""
+        paint = getattr(self, 'paint', None)
+        img = self.images.get(paint.get('map')) if paint else None
+        if img is None:
+            return color
+        gel, gel_a = g.image(img, g.uv('Lightmap'), extension='EXTEND')
+        splat_a = 0.0
+        splat = self.images.get(paint.get('splat'))
+        if splat is not None:
+            tx, ty = paint.get('tiles', (1, 1))
+            _, splat_a = g.image(splat, g.vmul(g.uv('Lightmap'), (tx, ty, 1.0)))
+        amount = g.mul(g.sat(g.mul(g.add(gel_a, splat_a), 0.5)), g.math('GREATER_THAN', gel_a, 0.01))
+        thick = g.smoothstep(0.34, 0.63, amount)
+        c = g.vmath('POWER', gel, (2.2, 2.2, 2.2))
+        paint_color = g.vmix(g.splat(g.mul(g.lum(c), 0.5)), c, thick)
+        light = g.vadd(g.vscale(g.vscale(lm, scale), 0.82), 0.06)
+        over = g.vmul(g.vmul(light, paint_color), (0.8, 0.85, 1.0))
+        return g.vmix(color, over, g.mul(g.smoothstep(0.40, 0.45, amount), 0.85))
 
     def model(self, g, desc, glob, cube):
         albedo, base, alpha = self.albedo(g, desc)

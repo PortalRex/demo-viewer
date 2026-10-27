@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "io_import_p2demo"
+version = "0.1.0"
+name = "Portal 2 Demo"
+tagline = "Import Portal 2 demos as the SAR Run Viewer exports them"
+maintainer = "PortalRex"
+type = "add-on"
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Import-Export"]
+
+[permissions]
+files = "Reads the exported demo bundle (scene data, textures)"

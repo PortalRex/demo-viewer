@@ -3,8 +3,9 @@
 # model over it, then the final pass: exposed, clamped, sRGB-encoded; the
 # bloom (a quarter-size bright pass blurred by the engine's 25-tap Gaussian)
 # added at half strength in gamma space; the screen fade over that. The
-# result is turned back to linear and divided by the exposure, which the
-# scene's Standard view transform applies again: the picture is the viewer's.
+# frame comes in exposed (the materials apply the exposure) and goes out
+# linear again, for the Standard view transform: the picture is the viewer's,
+# in the segment's own scene and in the run's sequencer alike.
 import bpy
 import numpy as np
 
@@ -112,8 +113,7 @@ def build(scene, layers, frames, globals_values, keys):
         c.link(vrl.outputs['Image'], over.inputs[2])
         image = over.outputs[0]
 
-    exposure = c.value('P2 Exposure', float(globals_values['exposure'][0]))
-    exposed = c.mix('MULTIPLY', image, exposure, clamp=True)
+    exposed = c.mix('MIX', image, (0, 0, 0, 1), fac=0.0, clamp=True)
     shown = c.colorspace(exposed, 'Linear Rec.709', 'sRGB')
 
     # bloom: the bright pass (colour^2.2 x its luminance) at a quarter size
@@ -158,14 +158,13 @@ def build(scene, layers, frames, globals_values, keys):
         shown = c.mix('MULTIPLY', shown, color.outputs[0], fac=a_mod)
     clamped = c.mix('MIX', shown, (0, 0, 0, 1), fac=0.0, clamp=True)
     linear = c.colorspace(clamped, 'sRGB', 'Linear Rec.709')
-    out_img = c.mix('DIVIDE', linear, exposure)
+    out_img = linear
     out = c.node('CompositorNodeComposite')
     out.use_alpha = False
     c.link(out_img, out.inputs['Image'])
 
     # the values each frame
     if len(frames) > 1:
-        keys(tree, 'nodes["P2 Exposure"].outputs[0].default_value', frames, globals_values['exposure'], 'LINEAR', name='P2 Compositor')
         if np.max(bloom) > 0 and np.ptp(bloom) > 0:
             keys(tree, 'nodes["P2 Bloom"].outputs[0].default_value', frames, 0.5 * bloom, 'LINEAR', name='P2 Compositor')
         if np.max(alpha) > 0:

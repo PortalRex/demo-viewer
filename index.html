@@ -52,7 +52,7 @@
 					<button id="bright-toggle" class="toggle" hidden title="Brighten dark maps as autorender does (mat_ambient_light 0.05; on by default where autorender uses it)">Bright</button>
 					<button id="ghost" class="toggle" hidden title="Race another run of this map: its player shown as a ghost, with how far ahead or behind this one is">Ghost</button>
 					<input id="ghost-input" type="file" accept=".sarp,.dem" multiple hidden>
-					<button id="export" hidden title="Save part of the run as an MP4 video, drawn as the 3D view shows it">Export</button>
+					<button id="export" hidden title="Save part of the run as an MP4 video, or as a Blender scene, drawn as the 3D view shows it">Export</button>
 					<select id="quality" hidden title="3D quality: resolution, antialiasing, bloom and shadow detail (lower runs faster)">
 						<option value="high">High</option>
 						<option value="medium">Medium</option>
@@ -118,7 +118,11 @@
 
 		<dialog id="export-dialog" class="export-dialog">
 			<form method="dialog">
-				<h2>Export video</h2>
+				<h2>Export</h2>
+				<label>As <select id="export-format">
+					<option value="mp4">Video (MP4)</option>
+					<option value="blender">Blender scene (the Portal 2 Demo add-on imports it)</option>
+				</select></label>
 				<label>Part <select id="export-range">
 					<option value="segment">This segment</option>
 					<option value="here">From here to the end of the segment</option>

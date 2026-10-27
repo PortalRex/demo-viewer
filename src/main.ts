@@ -889,14 +889,14 @@ $('export').onclick = () => {
 	exportDialog.showModal();
 };
 $('export-cancel').onclick = () => {
-	if (exporting) exportCancelled = true;
+	if (exporting) exportCancelled = blenderCancelled = true;
 	else exportDialog.close();
 };
 exportDialog.addEventListener('cancel', e => {
 	// (Escape cancels an export running, rather than hiding it)
 	if (exporting) {
 		e.preventDefault();
-		exportCancelled = true;
+		exportCancelled = blenderCancelled = true;
 	}
 });
 // (until the 3D view has its map and has gone a moment without anything
@@ -943,6 +943,7 @@ function drawCmHud(g: OffscreenCanvasRenderingContext2D, stats: {portals: number
 }
 $('export-go').onclick = async () => {
 	if (!pb || exporting) return;
+	if (($('export-format') as HTMLSelectElement).value === 'blender') return exportBlenderFromDialog();
 	const range = ($('export-range') as HTMLSelectElement).value;
 	const [width, height] = ($('export-size') as HTMLSelectElement).value.split('x').map(Number);
 	const fps = Number(($('export-fps') as HTMLSelectElement).value);
@@ -1085,6 +1086,109 @@ async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frame
 		render();
 	}
 }
+// the export dialog's Blender choice: into a folder picked (or, on the dev
+// server without folder access, fixtures/blender), the part chosen
+async function exportBlenderFromDialog() {
+	if (!pb) return;
+	const range = ($('export-range') as HTMLSelectElement).value;
+	const [width, height] = ($('export-size') as HTMLSelectElement).value.split('x').map(Number);
+	const fps = Number(($('export-fps') as HTMLSelectElement).value);
+	const name = `${pb.run.fileName.replace(/\.[^.]+$/, '')}_blender`;
+	let sink: Sink;
+	const picker = (window as unknown as {showDirectoryPicker?: (o: object) => Promise<FileSystemDirectoryHandle>}).showDirectoryPicker;
+	try {
+		// (asked first: the browser allows it only straight after the click)
+		if (picker) sink = subSink(folderSink(await picker({mode: 'readwrite', id: 'blender-export'})), name);
+		else if (import.meta.env.DEV) sink = devBlenderSink(name);
+		else throw new Error("this browser can't save into a folder: use Chrome or Edge");
+	} catch (e) {
+		if ((e as Error).name !== 'AbortError') showError(`Couldn't export for Blender: ${(e as Error).message}`);
+		return;
+	}
+	const track = pb.tracks[currentSeg];
+	const from = range === 'run' ? 0 : range === 'here' ? t : track.start;
+	const to = range === 'run' ? pb.total : track.start + track.length;
+	const progress = $('export-progress') as HTMLProgressElement;
+	const note = $('export-note');
+	const noteText = note.textContent;
+	progress.hidden = false;
+	progress.value = 0;
+	($('export-go') as HTMLButtonElement).disabled = true;
+	exporting = true;
+	exportCancelled = blenderCancelled = false;
+	const started = performance.now();
+	try {
+		const out = await exportBlenderRun({from, to, fps, width, height, sink, progress: (text, done) => {
+			progress.value = done;
+			const left = done > 0.01 ? (performance.now() - started) / done * (1 - done) / 1000 : 0;
+			note.textContent = `${text}${left ? `, about ${Math.ceil(left / 60)} min left` : ''}`;
+		}});
+		if (out) note.textContent = `Saved ${out.segments} map${out.segments === 1 ? '' : 's'}, ${out.frames} frames, in ${name}: import its run.json in Blender (File > Import > Portal 2 Demo).`;
+		else exportDialog.close();
+	} catch (e) {
+		showError(`Couldn't export for Blender: ${(e as Error).message}`);
+		exportDialog.close();
+		note.textContent = noteText;
+	} finally {
+		exporting = false;
+		progress.hidden = true;
+		($('export-go') as HTMLButtonElement).disabled = false;
+	}
+}
+
+// A whole run (or the part of it from `from` to `to`) for Blender: each
+// segment (one map's part) a bundle folder of its own, NN_<map>, and run.json
+// listing them in order, which the add-on imports as one timeline
+async function exportBlenderRun(job: BlenderJob & {sink: Sink}): Promise<{segments: number; frames: number} | null> {
+	if (!pb) throw new Error('no run open');
+	const from = job.from ?? 0, to = job.to ?? pb.total;
+	const fps = job.fps ?? 60;
+	const parts = pb.tracks.map((tr, i) => ({i, tr, a: Math.max(from, tr.start), b: Math.min(to, tr.start + tr.length)})).filter(p => p.b > p.a);
+	const segments: {dir: string; map: string; frames: number; startTick: number}[] = [];
+	let frames = 0;
+	for (const [n, p] of parts.entries()) {
+		const dir = `${String(n + 1).padStart(2, '0')}_${p.tr.seg.map.replace(/[^\w-]+/g, '_')}`;
+		const out = await exportBlender({
+			...job, from: p.a, to: p.b, name: dir, sink: subSink(job.sink, dir),
+			progress: (note, done) => job.progress?.(`Map ${n + 1} of ${parts.length} (${p.tr.seg.map}): ${note}`, (n + done) / parts.length),
+		});
+		if (!out) return null;
+		segments.push({dir, map: p.tr.seg.map, frames: out.frames, startTick: pb.locate(p.a).tick});
+		frames += out.frames;
+		const manifest = {format: 'p2-demo-blender-run', version: 1, demo: pb.run.fileName, fps, segments};
+		// (written after each, so what's done can be imported if it stops)
+		await job.sink.write('run.json', new TextEncoder().encode(JSON.stringify(manifest, null, '\t')));
+	}
+	return {segments: segments.length, frames};
+}
+// a folder inside another sink
+function subSink(root: Sink, dir: string): Sink {
+	return {write: (file, data) => root.write(`${dir}/${file}`, data), append: (file, data) => root.append(`${dir}/${file}`, data)};
+}
+// a folder on disk the user picked (the browser's File System Access)
+function folderSink(root: FileSystemDirectoryHandle): Sink {
+	const fileIn = async (path: string) => {
+		const parts = path.split('/');
+		let dir = root;
+		for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part, {create: true});
+		return dir.getFileHandle(parts[parts.length - 1], {create: true});
+	};
+	return {
+		async write(path, data) {
+			const w = await (await fileIn(path)).createWritable();
+			await w.write(data as unknown as ArrayBuffer);
+			await w.close();
+		},
+		async append(path, data) {
+			const handle = await fileIn(path);
+			const size = (await handle.getFile()).size;
+			const w = await handle.createWritable({keepExistingData: true});
+			await w.seek(size);
+			await w.write(data as unknown as ArrayBuffer);
+			await w.close();
+		},
+	};
+}
 // (dev: the files go to fixtures/blender/<name> through the dev server)
 function devBlenderSink(name: string): Sink {
 	const send = async (file: string, data: Uint8Array, append: boolean) => {
@@ -1093,7 +1197,12 @@ function devBlenderSink(name: string): Sink {
 	};
 	return {write: (file, data) => send(file, data, false), append: (file, data) => send(file, data, true)};
 }
-if (import.meta.env.DEV) (window as unknown as {exportBlender: typeof exportBlender}).exportBlender = exportBlender;
+if (import.meta.env.DEV) {
+	const w = window as unknown as Record<string, unknown>;
+	w.exportBlender = exportBlender;
+	w.exportBlenderRun = (job: BlenderJob & {name: string}) => exportBlenderRun({...job, sink: devBlenderSink(job.name)});
+	w.runSegments = () => pb?.tracks.map(tr => ({map: tr.seg.map, start: tr.start, length: tr.length}));
+}
 
 // #load=<url> opens a recording from a URL (one served next to the page,
 // or anywhere that allows it)

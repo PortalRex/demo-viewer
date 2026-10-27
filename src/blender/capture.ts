@@ -11,7 +11,7 @@ import type {GameFiles} from '../game/files.ts';
 import {vtfLevel, vtfMips, decodeVtf, readVtfCube, VtfFormat} from '../game/vtf.ts';
 import {encodePng, encodeExr, encodeDds, cubeToEquirect} from './encode.ts';
 // (the shader-wide values the hooks share, set by the view each frame)
-import {modelAmbientUniforms, fogUniforms, flashUniforms} from '../ui/shaderhooks.ts';
+import {modelAmbientUniforms, fogUniforms, flashUniforms, paintUniforms} from '../ui/shaderhooks.ts';
 
 // where the bundle's files go (a folder on disk, through the dev server or
 // the browser's folder access)
@@ -129,6 +129,10 @@ interface TextureRec {
 	alpha: boolean;
 	// how it's made at the end
 	make: () => Promise<{data: Uint8Array; ext: string; width: number; height: number; alpha: boolean} | null>;
+	// a texture drawn in the page that changes (movie screens, gel): a picture
+	// each time it does, textures/<name>/0001.png on, and the frames each
+	// starts showing at (frame, picture index)
+	live?: {texture: THREE.Texture; version: number; count: number; keys: number[]; lastFrame: number; every: number};
 }
 
 interface ObjectRec {
@@ -242,6 +246,8 @@ export class BlenderCapture {
 	// fov, near, far, colour, shadows; and its cookie
 	private flash = new Track(15);
 	private flashCookie: number | null = null;
+	// the gel (its map, in light map coordinates, changes as it's painted)
+	private paint: {map: number | null; splat: number | null; tiles: number[]} | null = null;
 	private frames = 0;
 	private unsupported = new Map<string, number>();
 	private files: GameFiles;
@@ -266,7 +272,10 @@ export class BlenderCapture {
 
 	// what's been recorded so far, onto the end of data.bin (when there's
 	// enough of it to be worth a write)
-	flush(atLeast = 32 << 20) {
+	async flush(atLeast = 32 << 20) {
+		const writes = this.writes;
+		this.writes = [];
+		await Promise.all(writes);
 		return this.bin.flush(this.sink, atLeast);
 	}
 
@@ -322,6 +331,10 @@ export class BlenderCapture {
 		const ambient = modelAmbientUniforms.modelAmbient.value.toArray();
 		const bloom = v.quality?.bloom ? v.bloomOverride ?? v.bloomScale : 0;
 		this.globals.push(f, [v.exposure, fade.rgb[0], fade.rgb[1], fade.rgb[2], fade.alpha, fade.modulate ? 1 : 0, ...ambient, bloom]);
+		for (const rec of this.lives) this.snapLive(rec, f);
+		if (paintUniforms.paintOn.value > 0.5 && paintUniforms.paintMap.value) {
+			this.paint ??= {map: this.tex(paintUniforms.paintMap.value), splat: this.tex(paintUniforms.paintSplat.value), tiles: paintUniforms.paintTiles.value.toArray()};
+		}
 		const fu = flashUniforms;
 		const fc = v.flashCam as THREE.PerspectiveCamera;
 		if (fu.flashOn.value > 0.5 && fu.flashCookie.value) {
@@ -690,6 +703,8 @@ export class BlenderCapture {
 		if (t === v.lightTex) return this.dataTexture('lightmap', t as THREE.DataTexture, true);
 		const bump = (v.bumpTex as THREE.Texture[]).indexOf(t);
 		if (bump >= 0) return this.dataTexture(`lightmap_bump${bump}`, t as THREE.DataTexture, true);
+		const bytes = (t as THREE.DataTexture).isDataTexture && t.type === THREE.UnsignedByteType;
+		if (bytes || (t as THREE.CanvasTexture).isCanvasTexture) return this.liveTexture(t);
 		if ((t as THREE.DataTexture).isDataTexture) return this.dataTexture(`data_${t.id}`, t as THREE.DataTexture, t.colorSpace !== THREE.SRGBColorSpace);
 		this.unsupported.set(`texture:${t.constructor.name}`, (this.unsupported.get(`texture:${t.constructor.name}`) ?? 0) + 1);
 		return null;
@@ -736,7 +751,51 @@ export class BlenderCapture {
 		});
 	}
 
-	// a texture made in the page: half floats to EXR, bytes to PNG
+	// a texture the page draws into (a movie screen's frames, a sign, the gel):
+	// a picture of it now and whenever it changes (see snapLive)
+	private lives: TextureRec[] = [];
+	private writes: Promise<void>[] = [];
+	private liveTexture(t: THREE.Texture): number {
+		const key = `live_${t.id}`;
+		const known = this.textures.get(key);
+		if (known) return known.id;
+		const id = this.addTexture(key, `textures/${key}`, t.colorSpace === THREE.SRGBColorSpace ? 'srgb' : 'linear', async () => null);
+		const rec = this.texList[id];
+		// (the gel's map is big and changes nearly every frame: ten a second)
+		rec.live = {texture: t, version: -1, count: 0, keys: [], lastFrame: -Infinity, every: t === this.view.paint?.texture ? 6 : 1};
+		this.lives.push(rec);
+		this.snapLive(rec, Math.max(0, this.frames - 1));
+		return id;
+	}
+
+	private snapLive(rec: TextureRec, f: number) {
+		const live = rec.live!;
+		const t = live.texture;
+		if (t.version === live.version || f - live.lastFrame < live.every) return;
+		const img = t.image as {width: number; height: number; data?: Uint8Array} & CanvasImageSource;
+		const width = img.width, height = img.height;
+		if (!width || !height) return;
+		let rgba: Uint8Array;
+		if ((t as THREE.CanvasTexture).isCanvasTexture) {
+			const c = new OffscreenCanvas(width, height);
+			const g = c.getContext('2d')!;
+			g.drawImage(img, 0, 0);
+			rgba = new Uint8Array(g.getImageData(0, 0, width, height).data.buffer);
+		} else rgba = (img.data as Uint8Array).slice(0, width * height * 4);
+		// (pictures are written top row first as v = 0, as the game's textures
+		// are; a canvas goes up flipped, its top row at v = 1)
+		if (t.flipY) {
+			const row = width * 4, flipped = new Uint8Array(rgba.length);
+			for (let y = 0; y < height; y++) flipped.set(rgba.subarray(y * row, (y + 1) * row), (height - 1 - y) * row);
+			rgba = flipped;
+		}
+		live.version = t.version;
+		live.lastFrame = f;
+		const index = live.count++;
+		live.keys.push(f, index);
+		const file = `${rec.file}/${String(index + 1).padStart(4, '0')}.png`;
+		this.writes.push(encodePng(width, height, rgba, true).then(png => this.sink.write(file, png)));
+	}
 	private dataTexture(key: string, t: THREE.DataTexture, linear: boolean): number {
 		return this.addTexture(key, `textures/${BlenderCapture.fileName(key)}`, linear ? 'linear' : 'srgb', async () => {
 			const {width, height, data} = t.image as {width: number; height: number; data: ArrayBufferView};
@@ -943,8 +1002,15 @@ export class BlenderCapture {
 	async finish(progress: (note: string) => void = () => {}): Promise<{bytes: number; unsupported: Record<string, number>}> {
 		const sky2d = await this.skyTexture();
 		let done = 0;
+		await Promise.all(this.writes);
 		for (const t of this.texList) {
 			progress(`Textures ${++done}/${this.texList.length}`);
+			if (t.live) {
+				// (its pictures are written already: the first, or the sequence)
+				t.alpha = true;
+				t.file = t.live.count ? `${t.file}/0001.png` : '';
+				continue;
+			}
 			const made = await t.make().catch(() => null);
 			if (!made) {
 				t.file = '';
@@ -981,7 +1047,11 @@ export class BlenderCapture {
 			format: 'p2-demo-blender', version: 1,
 			...this.info,
 			frames: this.frames,
-			textures: this.texList.map(t => ({id: t.id, file: t.file, colorspace: t.colorspace, alpha: t.alpha})),
+			textures: this.texList.map(t => ({
+				id: t.id, file: t.file, colorspace: t.colorspace, alpha: t.alpha,
+				sequence: t.live && t.live.count > 1 ? {count: t.live.count, keys: bin.add(new Float64Array(t.live.keys))} : undefined,
+			})),
+			paint: this.paint,
 			geometries: this.geoList,
 			materials: this.matList,
 			skeletons,

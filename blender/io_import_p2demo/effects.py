@@ -276,7 +276,8 @@ class EffectBuilder:
         else:
             grad, _ = self.sample('gradient', g.vec(at, 0.5, 0.0), 'EXTEND')
             flame_color = grad if grad is not None else g.vec(1.0, 0.5, 0.1)
-        flame_color = self.unexposed(g.vscale(flame_color, self.u('colorScale')))
+        # (drawn at a fixed brightness: the exposure undone, then applied)
+        flame_color = self.mats.exposed(g, self.unexposed(g.vscale(flame_color, self.u('colorScale'))))
         alpha = g.sat(alpha)
         emit = g.node('ShaderNodeEmission', {'Color': flame_color, 'Strength': self.mats.seen(g)}).outputs[0]
         clear = g.node('ShaderNodeBsdfTransparent').outputs[0]
