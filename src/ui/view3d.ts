@@ -1062,6 +1062,7 @@ export class View3D {
 	private eyeAngles: number[] = [0, 0, 0];
 	// the player the camera follows (co-op: either one); null = the recording player
 	private followed: EntityTrack | null = null;
+	private undithered: THREE.Object3D[] = [];
 	// The partner's view in the corner (co-op in Eyes view): autorender's
 	// renders hold remote_view with cl_enable_remote_splitscreen, which shows
 	// the other player as picture in picture, 0.3 of the screen and 25
@@ -3629,9 +3630,13 @@ export class View3D {
 
 	private worldMatrix(t: EntityTrack, k: EntityKey, tick: number, depth: number): THREE.Matrix4 | null {
 		if (t.className === 'CWeaponPortalgun' && k.parent !== undefined) return this.handMatrix(k.parent, tick);
+		// (a parent between its updates, so what rides it moves smoothly with
+		// it: an elevator's model on its train, rather than in steps of each
+		// update; not delayed, as the attached ones never were)
+		const pose = depth > 0 ? this.entityPose(t, tick, false) : {origin: new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]), angles: k.angles};
 		const local = new THREE.Matrix4().compose(
-			new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]),
-			new THREE.Quaternion().setFromEuler(toEuler(t.className === 'CPortal_Player' ? [0, k.angles[1], 0] : k.angles)),
+			pose.origin,
+			new THREE.Quaternion().setFromEuler(toEuler(t.className === 'CPortal_Player' ? [0, pose.angles[1], 0] : pose.angles)),
 			new THREE.Vector3(1, 1, 1));
 		if (k.parent === undefined || depth > 8) return local;
 		let pt: EntityTrack | undefined, pk: EntityKey | undefined;
@@ -4401,8 +4406,8 @@ export class View3D {
 	// ticks, plus one (C_BaseEntity::GetInterpolationAmount); the recording
 	// player is where its view is
 	interpDelay = 7;
-	private entityPose(t: EntityTrack, tick: number): {origin: THREE.Vector3; angles: Vec3} {
-		if (t !== this.followTrack) tick = Math.max(0, tick - this.interpDelay);
+	private entityPose(t: EntityTrack, tick: number, delayed = true): {origin: THREE.Vector3; angles: Vec3} {
+		if (delayed && t !== this.followTrack) tick = Math.max(0, tick - this.interpDelay);
 		const i = keyIndexAt(t, Math.floor(tick));
 		const k = t.keys[Math.max(0, i)], n = t.keys[i + 1];
 		const origin = new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]);
@@ -5204,6 +5209,10 @@ export class View3D {
 		// screen-door dissolve of whatever is between the orbit camera and the player
 		ditherUniforms.ditherOn.value = feet && (this.mode === 'orbit' || this.mode === 'chase') ? 1 : 0;
 		if (feet) ditherUniforms.ditherTarget.value.copy(feet).add(new THREE.Vector3(0, 0, 36));
+		// (but never the followed player itself, nor the gun in its hands)
+		for (const o of this.undithered) o.userData.noDither = false;
+		this.undithered = [...this.objects].filter(([t]) => ft && (t === ft || (t.className === 'CWeaponPortalgun' && keyAt(t, tick)?.parent === ft.index))).map(([, o]) => o);
+		for (const o of this.undithered) o.userData.noDither = true;
 		if (feet) {
 			this.player.position.copy(feet);
 			this.player.visible = this.mode !== 'eyes' && !ents?.player;

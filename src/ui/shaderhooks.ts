@@ -225,6 +225,9 @@ export const ditherUniforms = {
 	ditherOn: {value: 0},
 	ditherTarget: {value: new THREE.Vector3()},
 	ditherRadius: {value: 110},
+	// (set while drawing a model that's never dropped: the player the camera
+	// follows, whose own head would otherwise open onto its insides)
+	ditherExempt: {value: 0},
 };
 
 const DITHER_FRAGMENT_HEAD = `
@@ -233,6 +236,7 @@ varying float vDitherUp;
 uniform float ditherOn;
 uniform vec3 ditherTarget;
 uniform float ditherRadius;
+uniform float ditherExempt;
 float ditherBayer4(vec2 p) {
 	vec2 q = mod(floor(p), 4.0);
 	int i = int(q.x + q.y * 4.0);
@@ -243,7 +247,7 @@ float ditherBayer4(vec2 p) {
 `;
 
 const DITHER_FRAGMENT = `
-	if (ditherOn > 0.5) {
+	if (ditherOn > 0.5 && ditherExempt < 0.5) {
 		vec3 toTarget = ditherTarget - cameraPosition;
 		float len = length(toTarget);
 		vec3 dir = toTarget / max(len, 0.001);
@@ -481,6 +485,9 @@ export function useModelLighting(mesh: THREE.Object3D) {
 		if (!u) return;
 		let o: THREE.Object3D | null = mesh, lighting: ModelLighting | undefined;
 		while (o && !(lighting = o.userData.lighting as ModelLighting | undefined)) o = o.parent;
+		let exempt = false;
+		for (let e: THREE.Object3D | null = mesh; e && !exempt; e = e.parent) exempt = !!e.userData.noDither;
+		ditherUniforms.ditherExempt.value = exempt ? 1 : 0;
 		const l = lighting ?? NEUTRAL;
 		const cube = u.ambCube.value as THREE.Vector3[];
 		for (let i = 0; i < 6; i++) cube[i].set(l.cube[i * 3], l.cube[i * 3 + 1], l.cube[i * 3 + 2]);
@@ -494,6 +501,9 @@ export function useModelLighting(mesh: THREE.Object3D) {
 			att[i].set(...(light?.atten ?? [1, 0, 0]));
 		}
 		(material as THREE.Material & {uniformsNeedUpdate: boolean}).uniformsNeedUpdate = true;
+	};
+	mesh.onAfterRender = () => {
+		ditherUniforms.ditherExempt.value = 0;
 	};
 }
 
