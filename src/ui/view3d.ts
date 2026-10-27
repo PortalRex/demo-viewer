@@ -3217,8 +3217,15 @@ export class View3D {
 			surface.visible = linkedSurface.visible = false;
 			this.sky.position.setFromMatrixPosition(cam.matrixWorld);
 			// (the exit portal's own edge isn't in its view: it would wrap the
-			// camera, which sits in its plane)
-			const shown = this.particlesShown.filter(i => this.edgeParticles.get(i) !== p.link);
+			// camera, which sits in its plane; nor are the other effects on its
+			// opening, its placement sparks or fizzle, which would fill it)
+			const onExit = (i: ParticleInstance) => {
+				const m = i.cps.get(0);
+				if (!m) return false;
+				const pos = new THREE.Vector3().setFromMatrixPosition(m);
+				return Math.abs(normal.dot(pos) - normal.dot(at)) < 12 && pos.distanceTo(at) < Math.hypot(linked.halfW, linked.halfH) + 8;
+			};
+			const shown = this.particlesShown.filter(i => this.edgeParticles.get(i) !== p.link && !onExit(i));
 			if (shown.length !== this.particlesShown.length) {
 				this.particleRenderer?.draw(shown, cam);
 				redrawn = true;

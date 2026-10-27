@@ -185,6 +185,7 @@ export interface InstanceState {
 	spawned: number;
 	epitrochoidCount: Map<ParticleOperator, number>;
 	restartCounts: Map<ParticleOperator, number>;
+	inheritNext: Map<ParticleOperator, number>;
 	restartAt: number;
 	emitBase: number;
 	sizeScale: number;
@@ -244,6 +245,9 @@ export class ParticleInstance {
 	// the particles some initializers have made since the effect (re)started
 	// (the engine's counts that Restart zeroes: warp, sequential path, count remap)
 	private restartCounts = new Map<ParticleOperator, number>();
+	// the parent particle each "inherit attribute from parent particle" reads
+	// next: it carries on from step to step
+	private inheritNext = new Map<ParticleOperator, number>();
 	// initializers that read a particle's position run after those that set it
 	private initOrder: ParticleOperator[];
 	// "restart effect after duration": when the emitters next fire again,
@@ -303,7 +307,7 @@ export class ParticleInstance {
 		return {
 			time: this.time, emitting: this.emitting, cps: new Map([...this.cps].map(([k, m]) => [k, m.clone()])), rng: this.rng.a,
 			lighting: this.lighting, emitted: new Map(this.emitted), pathBulge: this.pathBulge?.clone(), spawned: this.spawned, epitrochoidCount: new Map(this.epitrochoidCount), restartCounts: new Map(this.restartCounts),
-			restartAt: this.restartAt, emitBase: this.emitBase, sizeScale: this.sizeScale,
+			inheritNext: new Map(this.inheritNext), restartAt: this.restartAt, emitBase: this.emitBase, sizeScale: this.sizeScale,
 			particles: this.particles.map(copyParticle), children: this.children.map(c => c.inst.snapshot()),
 		};
 	}
@@ -320,6 +324,7 @@ export class ParticleInstance {
 		this.spawned = s.spawned;
 		this.epitrochoidCount = new Map(s.epitrochoidCount);
 		this.restartCounts = new Map(s.restartCounts);
+		this.inheritNext = new Map(s.inheritNext);
 		this.restartAt = s.restartAt;
 		this.emitBase = s.emitBase;
 		this.sizeScale = s.sizeScale;
@@ -522,18 +527,27 @@ export class ParticleInstance {
 		const ages = !!decay && endCapOk(decay, !this.emitting);
 		for (const p of this.particles) this.operate(p, dt);
 		// "inherit attribute from parent particle": each particle takes the
-		// position of its parent system's particle in the same place (every
-		// increment-th), so a child rope or sparks follow the parent's strand
+		// position of a parent system's particle, read in turn (every
+		// increment-th) from where the last step stopped, back to the first
+		// past the last; so a child rope follows a parent strand only while
+		// the counts line up, and is scattered across them (its long jumps
+		// faded out) otherwise, as the engine has it
 		if (this.parent) {
 			for (const o of this.def.operators) {
 				if (o.fn !== 'inherit attribute from parent particle' || num(o, 'Inherited Field', 0) !== 0) continue;
-				const from = [...this.parent.particles].sort((a, b) => a.index - b.index);
+				const from = this.parent.particles;
 				if (!from.length) continue;
-				const step = Math.max(1, Math.round(num(o, 'Particle Increment Amount', 1)));
-				// (matched against the parent's newest: its last burst)
-				const mine = [...this.particles].sort((a, b) => a.index - b.index);
-				const base = Math.max(0, from.length - mine.length * step);
-				mine.forEach((p, k) => p.pos.copy(from[(base + k * step) % from.length].pos));
+				const step = Math.round(num(o, 'Particle Increment Amount', 1));
+				const random = !!num(o, 'Random Parent Particle Distribution', 0);
+				const scale = num(o, 'Scale', 1);
+				let next = this.inheritNext.get(o) ?? 0;
+				for (const p of this.particles) {
+					if (random) next = Math.floor(this.r(0, from.length));
+					else if (next > from.length - 1 || next < 0) next = 0;
+					p.pos.copy(from[next].pos).multiplyScalar(scale);
+					next += step;
+				}
+				this.inheritNext.set(o, next);
 			}
 		}
 		// "remap difference of sequential particle vector to scalar": by how
