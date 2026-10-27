@@ -106,3 +106,57 @@ def rope_group(scale):
     l.new(setp.outputs[0], gout.inputs[0])
     gout.location = (800, 0)
     return tree
+
+
+VIEWMODEL = 'P2 Viewmodel In View'
+
+
+def viewmodel_group():
+    """The view model drawn by the scene's own camera, for the viewport: in
+    the camera's space, squashed across the view by tan(eyes' fov / 2) /
+    tan(view model's fov / 2), so it lands where the view model's camera
+    draws it (positions T^-1 C S C^-1 T p, T the object's, C the camera's)."""
+    tree = bpy.data.node_groups.get(VIEWMODEL)
+    if tree:
+        return tree
+    tree, _ = _tree(VIEWMODEL)
+    tree.interface.new_socket('Squash', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 1.0
+    n, l = tree.nodes, tree.links
+    gin, gout = n.new('NodeGroupInput'), n.new('NodeGroupOutput')
+    cam = n.new('GeometryNodeInputActiveCamera')
+    cinfo = n.new('GeometryNodeObjectInfo')
+    cinfo.transform_space = 'ORIGINAL'
+    l.new(cam.outputs[0], cinfo.inputs['Object'])
+    me = n.new('GeometryNodeSelfObject')
+    minfo = n.new('GeometryNodeObjectInfo')
+    minfo.transform_space = 'ORIGINAL'
+    l.new(me.outputs[0], minfo.inputs['Object'])
+    squash = n.new('ShaderNodeCombineXYZ')
+    l.new(gin.outputs['Squash'], squash.inputs[0])
+    l.new(gin.outputs['Squash'], squash.inputs[1])
+    squash.inputs[2].default_value = 1.0
+    s = n.new('FunctionNodeCombineTransform')
+    l.new(squash.outputs[0], s.inputs['Scale'])
+
+    def inv(m):
+        node = n.new('FunctionNodeInvertMatrix')
+        l.new(m, node.inputs[0])
+        return node.outputs[0]
+
+    def mul(a, b):
+        node = n.new('FunctionNodeMatrixMultiply')
+        l.new(a, node.inputs[0])
+        l.new(b, node.inputs[1])
+        return node.outputs[0]
+    t, c = minfo.outputs['Transform'], cinfo.outputs['Transform']
+    m = mul(inv(t), mul(c, mul(s.outputs[0], mul(inv(c), t))))
+    pos = n.new('GeometryNodeInputPosition')
+    tp = n.new('FunctionNodeTransformPoint')
+    l.new(pos.outputs[0], tp.inputs['Vector'])
+    l.new(m, tp.inputs['Transform'])
+    setp = n.new('GeometryNodeSetPosition')
+    l.new(gin.outputs[0], setp.inputs['Geometry'])
+    l.new(tp.outputs[0], setp.inputs['Position'])
+    l.new(setp.outputs[0], gout.inputs[0])
+    gout.location = (1200, 0)
+    return tree

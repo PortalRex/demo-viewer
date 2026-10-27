@@ -13,7 +13,7 @@ import numpy as np
 from mathutils import Matrix, Quaternion, Vector
 
 from . import compositor
-from .geonodes import frame_filter_group, rope_group
+from .geonodes import frame_filter_group, rope_group, viewmodel_group
 from . import materials
 from .materials import MaterialBuilder, globals_group
 from .nodes import Graph
@@ -151,6 +151,7 @@ class Importer:
         self.cameras(scene)
         self.flash()
         self.viewmodel_scene(context)
+        self.viewmodel_preview()
         self.overlay_scene()
         self.sky_scene()
         self.compositor(scene)
@@ -797,6 +798,49 @@ class Importer:
         vm.camera = self.camera('P2 Viewmodel Eyes', self.b['vmCamera'], cams)
         self.vm_scene = vm
 
+    def viewmodel_preview(self):
+        """Stand-ins of the view model in the map's own scene, for playing in
+        the viewport and the sequencer's preview, which don't composite the
+        view model's scene: copies drawn by the eyes' camera (squashed to the
+        view model's field of view, see viewmodel_group), left out of renders."""
+        if not self.vm_scene:
+            return
+        col = bpy.data.collections.new('viewmodel (viewport)')
+        self.root.children.link(col)
+        # (never rendered: the renders composite the view model's own scene;
+        # the copies share the originals' keys, showing and hiding with them)
+        col.hide_render = True
+        cf, cv = self.b.track(self.b['camera'])
+        vf, vv = self.b.track(self.b['vmCamera'])
+        vm_fov = np.interp(cf, vf, vv[:, 10]) if len(vf) > 1 else np.full(len(cf), vv[0, 10])
+        squash = np.tan(np.radians(cv[:, 10]) / 2) / np.tan(np.radians(vm_fov) / 2)
+        group = viewmodel_group()
+        ident = group.interface.items_tree['Squash'].identifier
+        for src in list(self.cols['viewmodel'].objects):
+            obj = src.copy()
+            obj.name = f'{src.name} (viewport)'
+            col.objects.link(obj)
+            ad = obj.animation_data
+            if ad and ad.action:
+                # (its own copy of the keys: it gets one of its own below)
+                slot = ad.action_slot.identifier if LAYERED and ad.action_slot else None
+                ad.action = ad.action.copy()
+                if slot:
+                    ad.action_slot = ad.action.slots[slot]
+            if obj.type == 'ARMATURE':
+                continue
+            mod = obj.modifiers.new('In view', 'NODES')
+            mod.node_group = group
+            mod[ident] = float(squash[0])
+            if len(cf) > 1 and np.ptp(squash) > 1e-6:
+                keys(obj, f'modifiers["In view"]["{ident}"]', cf, squash)
+            for m in obj.modifiers:
+                if m.type == 'ARMATURE' and m.object is not None:
+                    # (posed by the same armature, in this scene too)
+                    if m.object.name not in col.objects:
+                        col.objects.link(m.object)
+        self.vm_preview = col
+
     def flash(self):
         """The projected light (env_projectedtexture), as the viewer draws it:
         its cookie projected from it, its colour, a linear falloff
@@ -1022,6 +1066,9 @@ def load_run(context, path, **options):
     master.render.use_sequencer = True
     master.render.use_compositing = False
     master.sync_mode = 'FRAME_DROP'
+    # (the sequencer's preview draws each map's scene as the viewport's
+    # material preview: textured, lit as rendered)
+    master.render.sequencer_gl_preview = 'MATERIAL'
     edit = master.sequence_editor_create()
     strips = getattr(edit, 'strips', None) or edit.sequences
     frame = 1
