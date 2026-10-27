@@ -4748,6 +4748,29 @@ export class View3D {
 		return d;
 	}
 	private flashKey = '';
+	// the light's view of what doesn't move (copied in under what does)
+	private flashStatic: THREE.WebGLRenderTarget | null = null;
+	private flashStaticKey = '';
+	private flashCopy = new THREE.ShaderMaterial({
+		uniforms: {src: {value: null}},
+		vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+		fragmentShader: 'uniform sampler2D src; varying vec2 vUv; void main() { gl_FragDepth = texture2D(src, vUv).r; }',
+		colorWrite: false,
+		depthFunc: THREE.AlwaysDepth,
+	});
+	private flashCopyScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.flashCopy), {frustumCulled: false}));
+	private flashCopyCam = new THREE.OrthographicCamera();
+	// a depth map the light's size: the one the shaders sample compared and
+	// filtered (hardware PCF), the kept one read as it is
+	private flashDepthTarget(size: number, compared: boolean): THREE.WebGLRenderTarget {
+		const t = new THREE.WebGLRenderTarget(size, size, {depthBuffer: true});
+		t.depthTexture = new THREE.DepthTexture(size, size);
+		if (compared) {
+			t.depthTexture.compareFunction = THREE.LessEqualCompare;
+			t.depthTexture.minFilter = t.depthTexture.magFilter = THREE.LinearFilter;
+		}
+		return t;
+	}
 	// the shadow map, made up front: the shaders' shadow sampler needs a
 	// comparing depth texture bound even while no light casts (the draw
 	// fails otherwise)
@@ -4755,11 +4778,7 @@ export class View3D {
 		const r = this.renderer;
 		if (this.flashTarget || !r) return;
 		const size = 1024;
-		this.flashTarget = new THREE.WebGLRenderTarget(size, size, {depthBuffer: true});
-		this.flashTarget.depthTexture = new THREE.DepthTexture(size, size);
-		// (compared in the sampler, filtered: hardware PCF)
-		this.flashTarget.depthTexture.compareFunction = THREE.LessEqualCompare;
-		this.flashTarget.depthTexture.minFilter = this.flashTarget.depthTexture.magFilter = THREE.LinearFilter;
+		this.flashTarget = this.flashDepthTarget(size, true);
 		flashUniforms.flashDepth.value = this.flashTarget.depthTexture;
 		flashUniforms.flashTexel.value = 1 / size;
 		// (three only makes a depth texture when it's drawn into: cleared once,
@@ -4768,6 +4787,26 @@ export class View3D {
 		r.setRenderTarget(this.flashTarget);
 		r.clear();
 		r.setRenderTarget(target);
+	}
+	// What moves in the flashlight's cone, as a key: where each shown entity
+	// in it is (to half a unit), and the tick (every other one) while any of
+	// them animates
+	private flashMovers(fc: THREE.PerspectiveCamera, tick: number): string {
+		const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(fc.projectionMatrix, fc.matrixWorldInverse));
+		const sphere = new THREE.Sphere();
+		let key = '', animating = false;
+		for (const [t, o] of this.objects) {
+			if (!o.visible || WORLD_SPACE.has(t.className)) continue;
+			sphere.set(o.position, Math.max(32, Math.hypot(t.maxs[0] - t.mins[0], t.maxs[1] - t.mins[1], t.maxs[2] - t.mins[2]) / 2 + 16));
+			if (!frustum.intersectsSphere(sphere)) continue;
+			// (its pose as set this frame: its world matrix is only made when drawn)
+			const p = o.position, q = o.quaternion;
+			key += `${t.index}:${Math.round(p.x * 2)},${Math.round(p.y * 2)},${Math.round(p.z * 2)},${Math.round(q.x * 200)},${Math.round(q.y * 200)},${Math.round(q.z * 200)};`;
+			if (o.userData.anim) animating = true;
+		}
+		// (ropes cast too, and sway)
+		if (this.ropes?.group.children.some(c => c.visible)) animating = true;
+		return animating ? `${key}@${Math.floor(tick / 2)}` : key;
 	}
 	private flashCookieName = '';
 	private updateFlashlight(tick: number) {
@@ -4834,11 +4873,46 @@ export class View3D {
 		u.flashFar.value = far;
 		u.flashShadows.value = Number(e.m_bEnableShadows ?? 1) === 1 ? 1 : 0;
 		u.flashOn.value = 1;
-		const key = `${Math.floor(tick)}|${fc.position.toArray().join(',')}|${fwd.toArray().join(',')}|${fc.fov}`;
+		// (drawn again only when what it shows changes: the light, or what's
+		// in its cone moving, or animating, which redraws every other tick;
+		// a still scene under a still light, never)
+		const light = `${fc.position.toArray().join(',')}|${fwd.toArray().join(',')}|${fc.fov}|${near}|${far}`;
+		const key = `${light}|${this.flashMovers(fc, tick)}`;
 		if (!u.flashShadows.value || key === this.flashKey) return;
+		const lightStill = this.flashKey.startsWith(`${light}|`);
 		this.flashKey = key;
-		this.ensureFlashTarget();
-		// what casts: the solid scene (not the sky, effects, overlays, glass)
+		const target = r.getRenderTarget();
+		// The world and the frozen props are drawn once for a light that stays
+		// put (most of them: fixed in the map) and copied in under what moves,
+		// which is all that's drawn again; a light that's moving draws
+		// everything, as there's nothing to keep
+		const statics: THREE.Object3D[] = [this.mapGroup, this.propGroup];
+		const staticKey = `${light}|${this.mapGroup.children.length}|${this.propGroup.children.length}|${this.windowed.map(o => +o.visible).join('')}${this.windowedKids.map(o => +o.visible).join('')}`;
+		if (lightStill && staticKey !== this.flashStaticKey) {
+			this.flashStaticKey = staticKey;
+			this.flashStatic ??= this.flashDepthTarget(this.flashTarget!.width, false);
+			r.setRenderTarget(this.flashStatic);
+			r.clear();
+			this.drawCasters(fc, this.scene.children.filter(o => !statics.includes(o)));
+		}
+		r.setRenderTarget(this.flashTarget);
+		r.clear();
+		if (lightStill) {
+			this.flashCopy.uniforms.src.value = this.flashStatic!.depthTexture;
+			r.render(this.flashCopyScene, this.flashCopyCam);
+			this.drawCasters(fc, statics, true);
+		} else {
+			this.flashStaticKey = '';
+			this.drawCasters(fc, [], true);
+		}
+		r.setRenderTarget(target);
+	}
+	// what casts a shadow from the flashlight, drawn as depth into the
+	// target set: the solid scene (not the sky, effects, overlays, glass),
+	// less what's left out; ropes too, with their own shader (their strips
+	// turned to face the light in it)
+	private drawCasters(fc: THREE.PerspectiveCamera, leaveOut: THREE.Object3D[], ropes = false) {
+		const r = this.renderer!;
 		const hidden: THREE.Object3D[] = [];
 		const hide = (o: THREE.Object3D | null | undefined) => {
 			if (o && o.visible) {
@@ -4846,27 +4920,26 @@ export class View3D {
 				hidden.push(o);
 			}
 		};
+		leaveOut.forEach(hide);
 		hide(this.sky);
 		hide(this.pathLine);
 		hide(this.player);
 		hide(this.particleRenderer?.group);
-		this.scene.traverseVisible(o => {
-			const m = (o as THREE.Mesh).material as THREE.Material | undefined;
-			if (m && !Array.isArray(m) && (m.transparent || (m as THREE.ShaderMaterial).isShaderMaterial)) hide(o);
-		});
+		hide(this.ropes?.group);
 		// (alpha-tested ones, like grates, cast through their holes)
 		const swapped: [THREE.Mesh, THREE.Material][] = [];
 		this.scene.traverseVisible(o => {
 			const mesh = o as THREE.Mesh, m = mesh.material as THREE.Material | undefined;
-			if (!mesh.isMesh || !m || Array.isArray(m)) return;
+			if (!m || Array.isArray(m)) return;
+			if (m.transparent || (m as THREE.ShaderMaterial).isShaderMaterial) return hide(o);
+			if (!mesh.isMesh) return;
 			swapped.push([mesh, m]);
 			mesh.material = m.alphaTest > 0 && (m as THREE.MeshBasicMaterial).map ? this.flashDepthAlpha(m) : this.flashDepthMaterial;
 		});
-		const target = r.getRenderTarget(), fog = this.scene.fog, bg = this.scene.background;
+		const fog = this.scene.fog, bg = this.scene.background, auto = r.autoClear;
 		this.scene.fog = null;
 		this.scene.background = null;
-		r.setRenderTarget(this.flashTarget);
-		r.clear();
+		r.autoClear = false;
 		this.cullFrom(fc.position);
 		r.render(this.scene, fc);
 		this.uncull();
@@ -4874,15 +4947,8 @@ export class View3D {
 		this.scene.fog = fog;
 		this.scene.background = bg;
 		for (const o of hidden) o.visible = true;
-		// ropes cast too, with their own shader (their strips are turned to
-		// face the light in it)
-		if (this.ropes) {
-			const auto = r.autoClear;
-			r.autoClear = false;
-			r.render(this.ropes.group, fc);
-			r.autoClear = auto;
-		}
-		r.setRenderTarget(target);
+		if (ropes && this.ropes) r.render(this.ropes.group, fc);
+		r.autoClear = auto;
 	}
 
 	private frame: THREE.WebGLRenderTarget | null = null;
