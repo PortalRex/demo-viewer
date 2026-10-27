@@ -830,6 +830,11 @@ export class View3D {
 	// instead of simulating from the start
 	private particleRuns = new Map<string, {start: number; inst: ParticleInstance; saved: InstanceState[]}>();
 	private particlesShown: ParticleInstance[] = [];
+	// first-person effects (see VM_ATTACHMENT_SPREAD): run in the world's
+	// space, drawn after the view model, over it, as the game draws them
+	private fpParticleRenderer: ParticleRenderer | null = null;
+	private fpParticlesShown: ParticleInstance[] = [];
+	private fpScene = new THREE.Scene();
 	// portal edge effects, by portal (not drawn in the view through it)
 	private edgeParticles = new Map<ParticleInstance, number>();
 	// first-person view model (the portal gun), drawn over the world in
@@ -1128,6 +1133,7 @@ export class View3D {
 		this.waterMeshes = [];
 		this.accessedOverlays.clear();
 		this.particleRenderer?.dispose();
+		this.fpParticleRenderer?.dispose();
 		const token = ++this.mapToken;
 		if (!bsp || !files || !materials) {
 			// (no map: nothing to carry over)
@@ -1192,6 +1198,9 @@ export class View3D {
 			return near <= far ? near : Infinity;
 		};
 		this.scene.add(this.particleRenderer.group);
+		if (this.fpParticleRenderer) this.fpScene.remove(this.fpParticleRenderer.group);
+		this.fpParticleRenderer = new ParticleRenderer(files, materials, this.library.textures);
+		this.fpScene.add(this.fpParticleRenderer.group);
 		this.particleRuns.clear();
 		this.fizzlers.clear();
 		this.paint = null;
@@ -1882,6 +1891,7 @@ export class View3D {
 	private clearEntities() {
 		this.particleRuns.clear();
 		this.particlesShown = [];
+		this.fpParticlesShown = [];
 		disposeOwn(this.entityGroup);
 		this.turretLasers.clear();
 		this.paintBlobs?.clear();
@@ -2952,19 +2962,13 @@ export class View3D {
 	private updateParticles(tick: number) {
 		const ents = this.entities, lib = this.particleLib;
 		this.particlesShown = [];
+		this.fpParticlesShown = [];
 		this.edgeParticles.clear();
 		if (!ents || !lib) return;
 		const LINGER = 5 / this.interval;
 		const seen = new Set<string>();
 		const run = (key: string, name: string, start: number, end: number, cps: () => ControlPoints | null, opts: {cpAt?: (t: number) => THREE.Matrix4; fp?: boolean; live?: boolean; size?: number} = {}) => {
 			const def = lib.get(name);
-			if (opts.fp) {
-				const raw = cps;
-				cps = () => {
-					const c = raw();
-					return c && new Map([...c].map(([i, m]) => [i, this.formatViewModelAttachment(m)]));
-				};
-			}
 			if (!def || tick < start || tick > end + LINGER) return;
 			const time = (tick - start) * this.interval;
 			// a burst from long ago is over (no need to simulate it from the start)
@@ -3017,7 +3021,7 @@ export class View3D {
 					if (hit && hit.distance < dist - 8) return;
 				}
 			}
-			this.particlesShown.push(...r.inst.all);
+			(opts.fp ? this.fpParticlesShown : this.particlesShown).push(...r.inst.all);
 			if (key.startsWith('edge:')) for (const i of r.inst.all) this.edgeParticles.set(i, Number(key.split(':')[1]));
 		};
 
@@ -3155,10 +3159,14 @@ export class View3D {
 			if (!fp && !gk.visible) continue;
 			const [bodyLight, beamPoint] = fp ? [11, 17] : [12, 18];
 			const team = Number(keyAt(p, tick)?.extra?.m_iTeamNum ?? 0);
-			const color = this.portalColor(Number(gk.extra?.m_iLastFiredPortal ?? 0) === 2, team);
+			// (none until it has fired a portal, as the game's frames show)
+			const fired = Number(gk.extra?.m_iLastFiredPortal ?? 0);
+			if (!fired) continue;
+			const color = this.portalColor(fired === 2, team);
+			const vm = (m: THREE.Matrix4 | null) => (m && fp ? this.formatViewModelAttachment(m) : m);
 			run(`toplight:${fp ? 'fp' : 'tp'}:${p.index}:${gun.keys[0].tick}`, fp ? 'portalgun_top_light_firstperson' : 'portalgun_top_light_thirdperson', gun.keys[0].tick, Infinity, () => {
-				const light = this.attachmentAt(fp ? p.index : gun.index, bodyLight, tick, fp);
-				const core = this.attachmentAt(fp ? p.index : gun.index, beamPoint, tick, fp);
+				const light = vm(this.attachmentAt(fp ? p.index : gun.index, bodyLight, tick, fp));
+				const core = vm(this.attachmentAt(fp ? p.index : gun.index, beamPoint, tick, fp));
 				if (!light || !core) return null;
 				return new Map([[0, light], [1, new THREE.Matrix4().setPosition(color[0], color[1], color[2])], [3, core]]);
 			}, {fp, live: true});
@@ -3191,7 +3199,10 @@ export class View3D {
 				return new THREE.Matrix4().compose(pos, rot, new THREE.Vector3(1, 1, 1));
 			};
 			run(`hold:${fp ? 'fp' : 'tp'}:${p.index}:${since}`, fp ? 'portalgun_beam_holding_FP' : 'portalgun_beam_holding_TP', since, Infinity, () => {
-				const pts = atts.map(a => at(this.attachmentAt(gun.index, a, tick, fp)));
+				const pts = atts.map(a => {
+					const m = at(this.attachmentAt(gun.index, a, tick, fp));
+					return m && fp ? this.formatViewModelAttachment(m) : m;
+				});
 				if (pts.some(m => !m)) return null;
 				const cps: ControlPoints = new Map(pts.map((m, n) => [n, m!]));
 				const pk = this.entityPose(p, tick);
@@ -3234,7 +3245,8 @@ export class View3D {
 				if (!system) return;
 				const color = this.portalColor(fx.color === 2, fx.hitbox || this.teamOf(fx.entity, tick));
 				const at = new THREE.Matrix4().compose(new THREE.Vector3(...fx.origin), new THREE.Quaternion().setFromEuler(toEuler(fx.angles)), new THREE.Vector3(1, 1, 1));
-				run(`pfx:${n}`, system, fx.tick, fx.tick + 2, () => new Map([[0, at], [2, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]));
+				// (played out: its sparks come 0.15 s in)
+				run(`pfx:${n}`, system, fx.tick, Infinity, () => new Map([[0, at], [2, new THREE.Matrix4().setPosition(color[0], color[1], color[2])]]));
 				return;
 			}
 			if (fx.name !== 'ParticleEffect') return;
@@ -3256,6 +3268,7 @@ export class View3D {
 			const follow = [1, 3, 5, 6, 7, 9].includes(attach);
 			run(`fx:${n}`, name, fx.tick, stop, () => {
 				let cp = this.attachmentAt(fx.entity, fx.attachment, tick, fp);
+				if (cp && fp) cp = this.formatViewModelAttachment(cp);
 				if (!cp && attach === 1) {
 					const t = (this.tracksByIndex.get(fx.entity) ?? []).find(c => keyAt(c, tick));
 					const k = t && keyAt(t, tick);
@@ -3307,6 +3320,7 @@ export class View3D {
 	// a view model attachment where the world's view shows it as the view
 	// model's narrower one does (see VM_ATTACHMENT_SPREAD), turned as it is
 	private formatViewModelAttachment(m: THREE.Matrix4): THREE.Matrix4 {
+		this.camera.updateMatrixWorld();
 		const cam = this.camera.matrixWorld, eye = new THREE.Vector3().setFromMatrixPosition(cam);
 		const right = new THREE.Vector3().setFromMatrixColumn(cam, 0), up = new THREE.Vector3().setFromMatrixColumn(cam, 1), back = new THREE.Vector3().setFromMatrixColumn(cam, 2);
 		const rel = new THREE.Vector3().setFromMatrixPosition(m).sub(eye);
@@ -4842,6 +4856,7 @@ export class View3D {
 		};
 		hide(this.sky);
 		hide(this.particleRenderer?.group);
+		hide(this.fpParticleRenderer?.group);
 		hide(this.sprites?.group);
 		this.ownMaterial.length = 0;
 		for (const root of [this.scene, this.vmScene]) {
@@ -4931,6 +4946,7 @@ export class View3D {
 		if (!this.pip) this.renderMonitorCamera(r);
 		this.updateSprites(this.meterTick);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
+		this.fpParticleRenderer?.draw(this.fpParticlesShown, this.camera);
 		this.updateParticleBlobs();
 		// Everything is drawn linear and unexposed into one HDR frame (as the
 		// portal views and the meter are, so each material compiles once),
@@ -4950,6 +4966,10 @@ export class View3D {
 			ditherUniforms.ditherOn.value = 0;
 			r.render(this.vmScene, this.vmCam);
 			ditherUniforms.ditherOn.value = dither;
+			if (this.fpParticlesShown.length) {
+				r.clearDepth();
+				r.render(this.fpScene, this.camera);
+			}
 			r.autoClear = auto;
 		}
 		for (const o of waiting) o.visible = true;
