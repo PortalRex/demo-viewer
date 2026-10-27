@@ -291,7 +291,9 @@ export class BlenderCapture {
 			if (!o.visible || leaveOut.has(o)) return;
 			const mesh = o as THREE.Mesh;
 			if (mesh.isMesh) {
-				if (this.isDynamic(mesh)) this.dynamic(mesh, scene, f, pre);
+				// (with `pre`, a squash across the camera's view: no location,
+				// rotation and scale holds it, so it's baked into the vertices)
+				if (pre || this.isDynamic(mesh)) this.dynamic(mesh, scene, f, pre);
 				else {
 					const rec = this.object(mesh, scene);
 					if (rec) {
