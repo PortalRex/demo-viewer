@@ -1424,15 +1424,27 @@ export class View3D {
 		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
 		this.particleRenderer.onNewMesh = this.compileSoon;
 		this.particleRenderer.visibility = (point, eye, radius) => this.pointSeen(point, eye, radius);
-		this.particleRenderer.surface = (from, dir, far) => {
-			const ray = new THREE.Ray(from, dir);
-			let near = Infinity;
-			for (const tree of [this.collision, this.liquidCollision]) {
-				const hit = tree?.raycastFirst(ray, THREE.DoubleSide);
-				if (hit && hit.distance < near) near = hit.distance;
+		this.particleRenderer.surface = (from, dir, near, far) => {
+			// (seen through a portal: the world from the exit portal on, not the
+			// wall it's on, which stands between its camera and everything)
+			const plane = this.seenPlane;
+			if (plane) {
+				const t = -plane.distanceToPoint(from) / plane.normal.dot(dir);
+				if (t > 0 && t < far) near = Math.max(near, t + 0.5);
 			}
-			return near <= far ? near : Infinity;
+			// (a short ray over just that stretch: the trees' search is the
+			// shorter for it)
+			const ray = new THREE.Ray(from.clone().addScaledVector(dir, near), dir);
+			let first = Infinity;
+			for (const tree of [this.collision, this.liquidCollision]) {
+				const hit = tree?.raycastFirst(ray, THREE.DoubleSide, 0, Math.min(far - near, first));
+				if (hit && hit.distance < first) first = hit.distance;
+			}
+			return first < Infinity ? near + first : Infinity;
 		};
+		const closest = {point: new THREE.Vector3(), distance: 0, faceIndex: 0};
+		this.particleRenderer.clearAround = (point, distance) =>
+			![this.collision, this.liquidCollision].some(tree => tree?.closestPointToPoint(point, closest, 0, distance));
 		this.scene.add(this.particleRenderer.group);
 		if (this.fpParticleRenderer) this.fpScene.remove(this.fpParticleRenderer.group);
 		this.fpParticleRenderer = new ParticleRenderer(files, materials, this.library.textures);
@@ -3302,14 +3314,14 @@ export class View3D {
 				const pos = new THREE.Vector3().setFromMatrixPosition(m);
 				return Math.abs(normal.dot(pos) - normal.dot(at)) < 12 && pos.distanceTo(at) < Math.hypot(linked.halfW, linked.halfH) + 8;
 			};
+			// (its particles, sprites and glows as seen from there: turned to its
+			// camera, their proxies and soft edges tested from the exit portal)
+			this.seenPlane = new THREE.Plane(normal.clone(), -normal.dot(at));
 			const shown = this.particlesShown.filter(i => this.edgeParticles.get(i) !== p.link && !onExit(i));
 			if (shown.length !== this.particlesShown.length) {
-				this.particleRenderer?.draw(shown, cam);
+				this.particleRenderer?.draw(shown, cam, false);
 				redrawn = true;
 			}
-			// (its sprites and glows as seen from there: turned to its camera,
-			// their proxies tested from the exit portal)
-			this.seenPlane = new THREE.Plane(normal.clone(), -normal.dot(at));
 			this.updateSprites(this.meterTick, cam);
 			this.seenPlane = null;
 			spritesRedrawn = true;
@@ -3326,7 +3338,7 @@ export class View3D {
 			material.uniforms.resolution.value.copy(size);
 		}
 		ditherUniforms.ditherOn.value = dither;
-		if (redrawn) this.particleRenderer?.draw(this.particlesShown, this.camera);
+		if (redrawn) this.particleRenderer?.restore();
 		if (spritesRedrawn) this.updateSprites(this.meterTick);
 		// targets of portals that are gone
 		for (const [obj, rt] of this.portalTargets) {
@@ -5665,7 +5677,7 @@ export class View3D {
 		if (!this.pip) this.renderMonitorCamera(r);
 		this.updateSprites(this.meterTick);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
-		this.fpParticleRenderer?.draw(this.fpParticlesShown, this.camera);
+		this.fpParticleRenderer?.draw(this.fpParticlesShown, this.camera, true, false);
 		this.updateParticleBlobs();
 		// Everything is drawn linear and unexposed into one HDR frame (as the
 		// portal views and the meter are, so each material compiles once),

@@ -1082,13 +1082,43 @@ export interface BlobSet {
 	points: THREE.Vector3[];
 }
 
-// one material's quads, as they're written to its mesh
-interface Batch {
-	pos: number[];
-	uv: number[];
-	uv2: number[];  // the second sequence's frame
-	col: number[];
+// one material's quads (six vertices each), as they're written to its mesh,
+// into arrays kept from draw to draw
+class Batch {
+	pos = new Float32Array(64 * 3);
+	uv = new Float32Array(64 * 2);
+	uv2 = new Float32Array(64 * 2);  // the second sequence's frame
+	col = new Float32Array(64 * 4);
+	count = 0;  // vertices
+	vertex(x: number, y: number, z: number, u: number, v: number, u2: number, v2: number, r: number, g: number, b: number, a: number) {
+		if (this.count * 3 >= this.pos.length) this.grow();
+		const i = this.count++;
+		this.pos[i * 3] = x;
+		this.pos[i * 3 + 1] = y;
+		this.pos[i * 3 + 2] = z;
+		this.uv[i * 2] = u;
+		this.uv[i * 2 + 1] = v;
+		this.uv2[i * 2] = u2;
+		this.uv2[i * 2 + 1] = v2;
+		this.col[i * 4] = r;
+		this.col[i * 4 + 1] = g;
+		this.col[i * 4 + 2] = b;
+		this.col[i * 4 + 3] = a;
+	}
+	private grow() {
+		const more = (a: Float32Array) => {
+			const b = new Float32Array(a.length * 2);
+			b.set(a);
+			return b;
+		};
+		this.pos = more(this.pos);
+		this.uv = more(this.uv);
+		this.uv2 = more(this.uv2);
+		this.col = more(this.col);
+	}
 }
+// (the corners of a quad in the order its two triangles take them)
+const QUAD_CORNERS = [0, 1, 2, 0, 2, 3];
 
 const VERTEX = `
 	attribute vec4 pcolor;
@@ -1148,15 +1178,21 @@ export class ParticleRenderer {
 	private sprites = new Map<string, Promise<SpriteMaterial | null>>();
 	private loaded = new Map<string, SpriteMaterial | null>();
 	private meshes = new Map<string, THREE.Mesh>();
+	private batches = new Map<string, Batch>();
+	private keptUsed = new Set<Batch>();
+	private otherBatches = new Map<string, Batch>();
 	// systems drawn as blobs (render_blobs: gel, as the paint renderer
 	// draws it), gathered by draw for the view to merge into surfaces
 	readonly blobs: BlobSet[] = [];
 	// how much of a point the camera sees (0..1), for renderers with a
 	// visibility proxy; everything counts as seen without it
 	visibility: ((point: THREE.Vector3, camera: THREE.Vector3, radius: number) => number) | null = null;
-	// how far from a point along a direction the world's first surface is
-	// (Infinity for none within `far`), for $depthblend sprites
-	surface: ((from: THREE.Vector3, dir: THREE.Vector3, far: number) => number) | null = null;
+	// how far from a point along a direction the world's first surface
+	// between `near` and `far` is (Infinity for none), for $depthblend sprites
+	surface: ((from: THREE.Vector3, dir: THREE.Vector3, near: number, far: number) => number) | null = null;
+	// whether no surface is within `distance` of a point (a soft sprite
+	// with none within its blend distance isn't faded: no rays needed)
+	clearAround: ((point: THREE.Vector3, distance: number) => boolean) | null = null;
 
 	// called when a new mesh joins the group (its material's shader is to compile)
 	onNewMesh = () => {};
@@ -1249,6 +1285,10 @@ export class ParticleRenderer {
 	// behind it is, over the blend scale), taken over the card at its centre
 	// and four points around it: how far the surface behind each is
 	private depthFade(at: THREE.Vector3, radius: number, camPos: THREE.Vector3, right: THREE.Vector3, up: THREE.Vector3, scale: number): number {
+		// (nothing near: not faded; whatever is farther in front of it hides
+		// it as the depth test does, so only the line's stretch from a blend
+		// distance in front of each point to one behind it is looked along)
+		if (this.clearAround?.(at, scale + radius / 2 + 1)) return 1;
 		const offsets = radius < 16 ? [[0, 0]] : [[0, 0], [0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5]];
 		let sum = 0;
 		for (const [x, y] of offsets) {
@@ -1260,27 +1300,36 @@ export class ParticleRenderer {
 				continue;
 			}
 			dir.divideScalar(d);
-			const hit = this.surface!(camPos, dir, d + scale);
+			const hit = this.surface!(camPos, dir, Math.max(0, d - scale), d + scale);
 			sum += Math.min(1, Math.max(0, (hit - d) / scale));
 		}
 		return sum / offsets.length;
 	}
 
-	// rebuilds the quads of every live particle
-	draw(instances: ParticleInstance[], camera: THREE.Camera) {
+	// rebuilds the quads of every live particle; `kept` false for another
+	// view's (a portal's), drawn into arrays of its own so the view's quads
+	// can be put back afterwards (restore) without being built again; `cull`
+	// false to keep what's outside the camera's view (first-person effects,
+	// nearer than its near plane)
+	draw(instances: ParticleInstance[], camera: THREE.Camera, kept = true, cull = true) {
 		const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
 		const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
 		const camPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
-		const batches = new Map<string, Batch>();
-		const quad = (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][], uv2 = uv) => {
-			for (const k of [0, 1, 2, 0, 2, 3]) {
-				b.pos.push(c[k].x, c[k].y, c[k].z);
-				b.uv.push(uv[k][0], uv[k][1]);
-				b.uv2.push(uv2[k][0], uv2[k][1]);
-				b.col.push(...col[k]);
-			}
+		const batches = kept ? this.batches : this.otherBatches;
+		for (const b of batches.values()) b.count = 0;
+		const used = kept ? this.keptUsed : new Set<Batch>();
+		used.clear();
+		const quad = (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][]) => {
+			for (const k of QUAD_CORNERS) b.vertex(c[k].x, c[k].y, c[k].z, uv[k][0], uv[k][1], uv[k][0], uv[k][1], col[k][0], col[k][1], col[k][2], col[k][3]);
 		};
-		this.blobs.length = 0;
+		const at = new THREE.Vector3();
+		// (only what's in the view is built, and only that has its edges and
+		// proxies tested: a portal's view is the part of the screen it covers)
+		const frustum = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+		const bound = new THREE.Sphere();
+		// (the blobs are the view's, which the frame merges into surfaces)
+		const blobs: BlobSet[] = kept ? this.blobs : [];
+		blobs.length = 0;
 		for (const inst of instances) {
 			const def = inst.def;
 			if (!def.material || !inst.particles.length) continue;
@@ -1288,7 +1337,7 @@ export class ParticleRenderer {
 			if (blob) {
 				// (in the blob renderer's units of 10, as the paint's)
 				const render = num(blob, 'render_radius', 1.3), cutoff = num(blob, 'cutoff_radius', 3.3);
-				this.blobs.push({
+				blobs.push({
 					material: def.material, radius: render * 10, cutoffRatio: cutoff / Math.max(render, 1e-3), grid: Math.max(2, num(blob, 'cube_width', 1)),
 					points: inst.particles.map(p => inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos.clone()),
 				});
@@ -1300,7 +1349,8 @@ export class ParticleRenderer {
 			// (each of its renderers draws it: some draw the sprites twice)
 			for (const r of def.renderers) {
 				if (r.fn !== 'render_animated_sprites' && r.fn !== 'render_sprite_trail' && r.fn !== 'render_rope') continue;
-				if (!b) batches.set(def.material, b = {pos: [], uv: [], uv2: [], col: []});
+				if (!b) batches.set(def.material, b = new Batch());
+				used.add(b);
 				if (r.fn === 'render_rope') {
 					this.rope(b, inst, r, camPos, quad, sprite.orientation, sprite.height);
 					continue;
@@ -1311,26 +1361,37 @@ export class ParticleRenderer {
 				const orientation = num(r, 'orientation_type', 0);
 				const flat = orientation === 2;
 				// a visibility proxy (a light's flare): how much of a control point
-				// shows, remapped onto radius and alpha scales
-				let visRadius = 1, visAlpha = 1;
+				// shows, remapped onto radius and alpha scales (worked out once a
+				// particle of it is in view)
+				let visRadius = 1, visAlpha = 1, visKnown = false;
 				const proxy = num(r, 'Visibility Proxy Input Control Point Number', -1);
-				if (proxy >= 0 && this.visibility) {
+				const visMost = proxy >= 0 && this.visibility ? Math.max(1, num(r, 'Visibility Radius Scale minimum', 1), num(r, 'Visibility Radius Scale maximum', 1)) : 1;
+				const knowVisibility = () => {
+					visKnown = true;
+					if (proxy < 0 || !this.visibility) return;
 					const seen = this.visibility(inst.cpPos(proxy), camPos, num(r, 'Visibility Proxy Radius', 1));
 					const i0 = num(r, 'Visibility input minimum', 0), i1 = num(r, 'Visibility input maximum', 1);
 					const t = Math.min(1, Math.max(0, (seen - i0) / ((i1 - i0) || 1)));
 					const lerp = (a: string, da: number, b: string, db: number) => num(r, a, da) + (num(r, b, db) - num(r, a, da)) * t;
 					visRadius = lerp('Visibility Radius Scale minimum', 1, 'Visibility Radius Scale maximum', 1);
 					visAlpha = lerp('Visibility Alpha Scale minimum', 0, 'Visibility Alpha Scale maximum', 1);
-					if (visAlpha <= 0) continue;
-				}
+				};
 				const [minSize, maxSize, startFade, endFade] = sprite.size;
+				const maxLength = num(r, 'max length', 2000), minLength = num(r, 'min length', 0);
 				for (const p of inst.particles) {
 					if (p.drawAlpha <= 0.002 || p.drawRadius <= 0) continue;
+					at.copy(p.pos);
+					if (inst.ahead) at.addScaledVector(p.vel, inst.ahead);
+					// (its card at its largest, turned any way; a trail along the
+					// longest it can be)
+					const l = at.distanceTo(camPos);
+					const reach = trail ? Math.min(maxLength, Math.max(minLength, p.vel.length() * p.trail)) + p.drawRadius : Math.max(p.drawRadius * visMost, minSize * l) * 1.5;
+					if (cull && !frustum.intersectsSphere(bound.set(at, reach))) continue;
+					if (!visKnown) knowVisibility();
+					if (visAlpha <= 0) break;
 					// (the sprite shader's size limits, by distance from the eye)
 					let radius = p.drawRadius * visRadius, alpha = p.drawAlpha * visAlpha;
-					const at = inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos;
 					if (!trail) {
-						const l = at.distanceTo(camPos);
 						radius = Math.max(radius, minSize * l);
 						if (radius > startFade * l) {
 							if (radius > endFade * l) continue;
@@ -1342,46 +1403,85 @@ export class ParticleRenderer {
 							if (alpha <= 0.002) continue;
 						}
 					}
-					const age = inst.time + inst.ahead - p.born;
-					const uv = frameUv(sprite.sheet, p.seq, fit ? age / Math.max(p.life, 1e-3) : age * rate, !!fit);
-					const uv2 = sprite.dual ? frameUv(sprite.sheet, p.seq2, age * rate2, false) : uv;
-					let ax: THREE.Vector3, ay: THREE.Vector3, center = at;
+					// the card: its centre, and its half-extents along its x and y
+					let cx = at.x, cy = at.y, cz = at.z;
+					let xx: number, xy: number, xz: number, yx: number, yy: number, yz: number;
 					if (trail) {
 						// stretched back along the velocity, as wide as the radius
 						const speed = p.vel.length();
-						const len = Math.min(num(r, 'max length', 2000), Math.max(num(r, 'min length', 0), speed * p.trail));
 						if (speed < 1e-3) continue;
-						const dir = p.vel.clone().divideScalar(speed);
-						center = at.clone().addScaledVector(dir, -len / 2);
-						const toCam = camPos.clone().sub(center).normalize();
-						ax = dir.clone().cross(toCam).normalize().multiplyScalar(p.drawRadius);
-						ay = dir.multiplyScalar(len / 2);
-					} else if (flat) {
-						const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-						ax = new THREE.Vector3(c, s, 0).multiplyScalar(radius);
-						ay = new THREE.Vector3(-s, c, 0).multiplyScalar(radius);
-					} else if (orientation === 3 && p.normal) {
-						// in the plane across its normal, turned by its rotation
-						const n = p.normal;
-						const u0 = new THREE.Vector3(...(Math.abs(n.z) < 0.99 ? [0, 0, 1] : [1, 0, 0]) as [number, number, number]).cross(n).normalize();
-						const v0 = n.clone().cross(u0);
-						const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-						ax = u0.clone().multiplyScalar(c).addScaledVector(v0, s).multiplyScalar(radius);
-						ay = v0.clone().multiplyScalar(c).addScaledVector(u0, -s).multiplyScalar(radius);
+						const len = Math.min(maxLength, Math.max(minLength, speed * p.trail));
+						const dx = p.vel.x / speed, dy = p.vel.y / speed, dz = p.vel.z / speed;
+						cx -= dx * len / 2;
+						cy -= dy * len / 2;
+						cz -= dz * len / 2;
+						const tl = Math.hypot(camPos.x - cx, camPos.y - cy, camPos.z - cz) || 1;
+						const tx = (camPos.x - cx) / tl, ty = (camPos.y - cy) / tl, tz = (camPos.z - cz) / tl;
+						// (across: the direction crossed with the way to the camera)
+						xx = dy * tz - dz * ty;
+						xy = dz * tx - dx * tz;
+						xz = dx * ty - dy * tx;
+						const xl = (Math.hypot(xx, xy, xz) || 1) / p.drawRadius;
+						xx /= xl;
+						xy /= xl;
+						xz /= xl;
+						yx = dx * len / 2;
+						yy = dy * len / 2;
+						yz = dz * len / 2;
 					} else {
 						const c = Math.cos(p.rot * Math.PI / 180), s = Math.sin(p.rot * Math.PI / 180);
-						ax = right.clone().multiplyScalar(c).addScaledVector(up, s).multiplyScalar(radius);
-						ay = up.clone().multiplyScalar(c).addScaledVector(right, -s).multiplyScalar(radius);
+						let ux = right.x, uy = right.y, uz = right.z, vx = up.x, vy = up.y, vz = up.z;
+						if (flat) {
+							ux = 1, uy = 0, uz = 0;
+							vx = 0, vy = 1, vz = 0;
+						} else if (orientation === 3 && p.normal) {
+							// in the plane across its normal, turned by its rotation
+							const n = p.normal;
+							const ax = Math.abs(n.z) < 0.99 ? 0 : 1, az = 1 - ax;
+							ux = -az * n.y;
+							uy = az * n.x - ax * n.z;
+							uz = ax * n.y;
+							const ul = Math.hypot(ux, uy, uz) || 1;
+							ux /= ul;
+							uy /= ul;
+							uz /= ul;
+							vx = n.y * uz - n.z * uy;
+							vy = n.z * ux - n.x * uz;
+							vz = n.x * uy - n.y * ux;
+						}
+						xx = (ux * c + vx * s) * radius;
+						xy = (uy * c + vy * s) * radius;
+						xz = (uz * c + vz * s) * radius;
+						yx = (vx * c - ux * s) * radius;
+						yy = (vy * c - uy * s) * radius;
+						yz = (vz * c - uz * s) * radius;
 					}
-					const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([cx, cy]) => center.clone().addScaledVector(ax, cx).addScaledVector(ay, cy));
-					const col = [p.color[0], p.color[1], p.color[2], alpha];
-					quad(b, corners, [[uv[0], uv[3]], [uv[2], uv[3]], [uv[2], uv[1]], [uv[0], uv[1]]], [col, col, col, col],
-						[[uv2[0], uv2[3]], [uv2[2], uv2[3]], [uv2[2], uv2[1]], [uv2[0], uv2[1]]]);
+					const age = inst.time + inst.ahead - p.born;
+					const uv = frameUv(sprite.sheet, p.seq, fit ? age / Math.max(p.life, 1e-3) : age * rate, !!fit);
+					const uv2 = sprite.dual ? frameUv(sprite.sheet, p.seq2, age * rate2, false) : uv;
+					const [red, green, blue] = p.color;
+					// (corners -x-y, +x-y, +x+y, -x+y; the texture's v runs down)
+					for (const k of QUAD_CORNERS) {
+						const sx = k === 0 || k === 3 ? -1 : 1, sy = k < 2 ? -1 : 1;
+						const u = sx < 0 ? 0 : 2, v = sy < 0 ? 3 : 1;
+						b.vertex(cx + xx * sx + yx * sy, cy + xy * sx + yy * sy, cz + xz * sx + yz * sy,
+							uv[u], uv[v], uv2[u], uv2[v], red, green, blue, alpha);
+					}
 				}
 			}
 		}
-		for (const [name, mesh] of this.meshes) if (!batches.has(name)) mesh.visible = false;
+		this.upload(batches, used);
+	}
+
+	// the view's quads, as last drawn with `kept`, back in place
+	restore() {
+		this.upload(this.batches, this.keptUsed);
+	}
+
+	private upload(batches: Map<string, Batch>, used: Set<Batch>) {
+		for (const [name, mesh] of this.meshes) if (!used.has(batches.get(name)!)) mesh.visible = false;
 		for (const [name, b] of batches) {
+			if (!used.has(b)) continue;
 			let mesh = this.meshes.get(name);
 			const sprite = this.loaded.get(name);
 			if (!sprite) continue;
@@ -1394,10 +1494,10 @@ export class ParticleRenderer {
 				this.onNewMesh();
 			}
 			const g = mesh.geometry;
-			const count = writeAttribute(g, 'position', b.pos, 3);
-			writeAttribute(g, 'uv', b.uv, 2);
-			writeAttribute(g, 'uv2', b.uv2, 2);
-			writeAttribute(g, 'pcolor', b.col, 4);
+			const count = writeAttribute(g, 'position', b.pos.subarray(0, b.count * 3), 3);
+			writeAttribute(g, 'uv', b.uv.subarray(0, b.count * 2), 2);
+			writeAttribute(g, 'uv2', b.uv2.subarray(0, b.count * 2), 2);
+			writeAttribute(g, 'pcolor', b.col.subarray(0, b.count * 4), 4);
 			g.setDrawRange(0, count);
 			mesh.visible = count > 0;
 		}
@@ -1468,6 +1568,9 @@ export class ParticleRenderer {
 	clear() {
 		for (const m of this.meshes.values()) m.geometry.dispose();
 		this.meshes.clear();
+		this.batches.clear();
+		this.keptUsed.clear();
+		this.otherBatches.clear();
 		this.group.clear();
 	}
 

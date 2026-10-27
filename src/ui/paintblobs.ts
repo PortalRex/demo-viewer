@@ -113,7 +113,13 @@ export class PaintBlobs {
 	}
 
 	// the blobs in the air at `time` (seconds)
+	private lastKey = '';
 	update(sprayers: Sprayer[], time: number) {
+		// (the same moment again, as the co-op partner's view asks first: the
+		// surfaces built for it stand)
+		const key = `${time}|` + sprayers.map(sp => `${sp.key},${sp.origin.x},${sp.origin.y},${sp.origin.z},${sp.dir.x},${sp.dir.y},${sp.dir.z},${sp.rate},${sp.light}`).join(';');
+		if (key === this.lastKey) return;
+		this.lastKey = key;
 		const s = new THREE.Vector3(), p = new THREE.Vector3();
 		const blobs: Blob[] = [];
 		this.used.clear();
@@ -150,6 +156,7 @@ export class PaintBlobs {
 	// blobs placed by someone else (a particle system's), drawn merged as
 	// the sprayers' are, each at the shape's radius
 	show(points: {pos: THREE.Vector3; color: THREE.Color}[]) {
+		this.lastKey = '';
 		this.draw(points.slice(0, CAPACITY).map(p => ({pos: p.pos, radius: this.shape.radius, color: p.color})));
 	}
 
@@ -273,6 +280,7 @@ export class PaintBlobs {
 	}
 
 	clear() {
+		this.lastKey = '';
 		this.paths.clear();
 		for (const grid of this.cells) grid.mesh.visible = false;
 	}
