@@ -1152,6 +1152,19 @@ export class ParticleRenderer {
 	}
 
 	// whether a material draws over everything ($ignorez), once it's loaded
+	// the sprites of these systems (and their children's) loaded ahead
+	preload(names: string[], lib: ParticleLibrary) {
+		const seen = new Set<ParticleSystemDef>();
+		const visit = (name: string) => {
+			const def = lib.get(name);
+			if (!def || seen.has(def)) return;
+			seen.add(def);
+			if (def.material) this.sprite(def.material);
+			for (const c of def.children) visit(c.name);
+		};
+		for (const name of names) visit(name);
+	}
+
 	ignoresDepth(name: string): boolean {
 		return this.loaded.get(name)?.material.depthTest === false;
 	}

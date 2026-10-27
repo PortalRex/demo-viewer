@@ -33,7 +33,7 @@ import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt, type ScreenFade, type HudMessage} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
-import {later} from '../core/later.ts';
+import {later, soon} from '../core/later.ts';
 import {Bloom, ENCODE} from './bloom.ts';
 
 export type CameraMode = 'eyes' | 'orbit' | 'free';
@@ -68,6 +68,8 @@ const HIDDEN_CLASSES = new Set([
 ]);
 
 // effects placed in world space from their props, not the entity's transform
+// (rendered to set three's clipping state before a compile: see precompile)
+const EMPTY_SCENE = new THREE.Scene();
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
 const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
@@ -840,6 +842,7 @@ export class View3D {
 				this.mergeFrozenKids();
 			}
 			this.precompile();
+			this.prelightProps(this.mapToken);
 		}, 400);
 	}
 	private precompileTimer: (() => void) | undefined;
@@ -856,22 +859,35 @@ export class View3D {
 				}
 			});
 		}
-		// (for the HDR frame, which is what scenes are drawn into)
+		// (for the HDR frame, which is what scenes are drawn into: made now if
+		// nothing's been drawn yet, sized when it is)
 		const target = r.getRenderTarget();
-		if (this.frame) r.setRenderTarget(this.frame);
+		this.frame ??= new THREE.WebGLRenderTarget(1, 1, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 4});
+		r.setRenderTarget(this.frame);
+		const clipping = r.clippingPlanes, auto = r.autoClear;
 		try {
-			r.compile(this.scene, this.camera);
-			r.compile(this.vmScene, this.vmCam);
-			// and the world as the other camera modes draw it (with or
-			// without back faces), so switching is instant
-			const lib = this.library;
-			if (lib) {
-				const on = lib.showsBackFaces;
-				lib.setBackFaces(!on);
+			// as drawn here, then cut by a plane as the portal views draw it
+			// (three takes the plane count from the last render: an empty
+			// one with a plane set)
+			for (const planes of [[], [new THREE.Plane()]]) {
+				r.clippingPlanes = planes;
+				r.autoClear = false;
+				r.render(EMPTY_SCENE, this.camera);
 				r.compile(this.scene, this.camera);
-				lib.setBackFaces(on);
+				if (!planes.length) r.compile(this.vmScene, this.vmCam);
+				// and the world as the other camera modes draw it (with or
+				// without back faces), so switching is instant
+				const lib = this.library;
+				if (lib) {
+					const on = lib.showsBackFaces;
+					lib.setBackFaces(!on);
+					r.compile(this.scene, this.camera);
+					lib.setBackFaces(on);
+				}
 			}
 		} finally {
+			r.clippingPlanes = clipping;
+			r.autoClear = auto;
 			r.setRenderTarget(target);
 			for (const o of hidden) o.visible = false;
 		}
@@ -1777,8 +1793,73 @@ export class View3D {
 		if (this.pathLine) this.pathLine.visible = on;
 	}
 
+	// Everything the segment shows, loaded ahead so the first watch doesn't
+	// stall where something appears: each entity's object (built hidden,
+	// with its model) and its model in every skin and body it takes, and the
+	// sprites of the map's particle systems. Once those are in, their
+	// textures go to the GPU a few at a time (three would upload each the
+	// first time it's drawn), and the shaders compile with the rest
+	private preloadRun(ents: EntityTimeline) {
+		if (this.entities !== ents) return;
+		const token = this.mapToken;
+		const waits: Promise<unknown>[] = [];
+		const asked = new Set<string>();
+		for (const t of ents.tracks) {
+			if (this.frozen.has(t)) continue;
+			const first = t.keys.find(k => !k.removed && this.shows(t, k));
+			if (!first) continue;
+			for (const k of t.keys) {
+				const model = k.model ?? t.model;
+				if (!model.endsWith('.mdl')) continue;
+				const skin = k.skin ?? 0, body = Number(k.extra?.m_nBody ?? 0);
+				const key = `${model}#${skin}#${body}`;
+				if (asked.has(key)) continue;
+				asked.add(key);
+				waits.push(this.model(model, skin, body));
+			}
+			this.objectFor(t, first.skin ?? 0, Number(first.extra?.m_nBody ?? 0), first.model ?? t.model);
+		}
+		const lib = this.particleLib;
+		if (lib) waits.push(lib.ready.then(() => {
+			for (const r of [this.particleRenderer, this.fpParticleRenderer]) r?.preload(ents.particleNames, lib);
+		}));
+		Promise.allSettled(waits).then(() => {
+			if (token !== this.mapToken || this.entities !== ents) return;
+			for (const o of this.objects.values()) this.hookModelLighting(o);
+			this.loaded();
+			this.uploadTextures(token);
+		});
+	}
+
+	// every texture the scene's objects use (hidden ones too) sent to the GPU,
+	// a few per task so nothing stalls for long
+	private uploadTextures(token: number) {
+		const r = this.ensureRenderer();
+		const textures = new Set<THREE.Texture>();
+		const add = (v: unknown) => {
+			if ((v as THREE.Texture | null)?.isTexture) textures.add(v as THREE.Texture);
+		};
+		for (const root of [this.mapGroup, this.propGroup, this.entityGroup, this.vmScene]) {
+			root.traverse(o => {
+				const m = (o as THREE.Mesh).material;
+				for (const mat of m ? [m].flat() : []) {
+					for (const v of Object.values(mat)) add(v);
+					for (const u of Object.values((mat as THREE.ShaderMaterial).uniforms ?? {})) add(u.value);
+				}
+			});
+		}
+		const list = [...textures];
+		const step = () => {
+			if (token !== this.mapToken) return;
+			for (const t of list.splice(0, 8)) r.initTexture(t);
+			if (list.length) later(step, 0);
+		};
+		step();
+	}
+
 	setSegment(track: SegmentTrack, entities: EntityTimeline | null) {
 		this.entities = entities;
+		if (entities) soon(() => this.preloadRun(entities));
 		this.followed = null;
 		this.tracksByIndex.clear();
 		for (const t of entities?.tracks ?? []) {
@@ -3496,83 +3577,107 @@ export class View3D {
 
 	// Moving models' lighting: the ambient cube and local lights at each
 	// object's centre (recomputed when it moves), for the shader to use
+	// An object's model parts moved onto their own copies of their materials,
+	// lit by the map's light where the object is (see lightModels): done when
+	// it's first shown, or ahead by the run's preload (each copy is a shader
+	// of its own to compile)
+	private hookModelLighting(o: THREE.Object3D) {
+		// (looked at again whenever its meshes change, at any depth: a model
+		// replacing its placeholder box inside the object's group)
+		let parts = '';
+		o.traverse(c => {
+			if ((c as THREE.Mesh).isMesh) parts += c.id + ',';
+		});
+		if (o.userData.ambParts !== parts) {
+			o.userData.ambParts = parts;
+			delete o.userData.ambAllHooked;
+			delete o.userData.lightCentre;
+		}
+		if (o.userData.ambAllHooked) return;
+		let pending = false, hooked = 0, meshes = 0;
+		o.traverse(c => {
+			const mesh = c as THREE.Mesh;
+			if (mesh.isMesh) meshes++;
+			if (!mesh.isMesh || mesh.userData.ambHooked) return;
+			const shared = mesh.material as THREE.Material;
+			if (!shared.userData?.ambientLit) return;
+			// once the shared material has its texture: a copy of it for this mesh
+			if (!(shared as THREE.MeshLambertMaterial).map && !shared.userData.textureless) {
+				pending = true;
+				return;
+			}
+			mesh.material = ownLitMaterial(shared);
+			mesh.userData.ambHooked = true;
+			useModelLighting(mesh);
+			hooked++;
+		});
+		// done once its model has loaded and every part is hooked
+		// (or it has nothing lit this way: brush models, beams)
+		if (!pending && (hooked || o.userData.ambSomeHooked || meshes)) o.userData.ambAllHooked = true;
+		if (hooked) {
+			o.userData.ambSomeHooked = true;
+			// (lit again: the new copies take its reflection)
+			delete o.userData.lightingKey;
+			delete o.userData.envPath;
+		}
+	}
+
 	private lightModels() {
-		const amb = this.bsp?.ambient;
-		if (!amb) return;
-		const hookMeshes = (o: THREE.Object3D) => {
-			// (looked at again whenever its meshes change, at any depth: a model
-			// replacing its placeholder box inside the object's group)
-			let parts = '';
-			o.traverse(c => {
-				if ((c as THREE.Mesh).isMesh) parts += c.id + ',';
-			});
-			if (o.userData.ambParts !== parts) {
-				o.userData.ambParts = parts;
-				delete o.userData.ambAllHooked;
-				delete o.userData.lightCentre;
-			}
-			if (o.userData.ambAllHooked) return;
-			let pending = false, hooked = 0, meshes = 0;
-			o.traverse(c => {
-				const mesh = c as THREE.Mesh;
-				if (mesh.isMesh) meshes++;
-				if (!mesh.isMesh || mesh.userData.ambHooked) return;
-				const shared = mesh.material as THREE.Material;
-				if (!shared.userData?.ambientLit) return;
-				// once the shared material has its texture: a copy of it for this mesh
-				if (!(shared as THREE.MeshLambertMaterial).map && !shared.userData.textureless) {
-					pending = true;
-					return;
-				}
-				mesh.material = ownLitMaterial(shared);
-				mesh.userData.ambHooked = true;
-				useModelLighting(mesh);
-				hooked++;
-			});
-			// done once its model has loaded and every part is hooked
-			// (or it has nothing lit this way: brush models, beams)
-			if (!pending && (hooked || o.userData.ambSomeHooked || meshes)) o.userData.ambAllHooked = true;
-			if (hooked) {
-				o.userData.ambSomeHooked = true;
-				// (lit again: the new copies take its reflection)
-				delete o.userData.lightingKey;
-				delete o.userData.envPath;
-			}
-		};
-		const p = new THREE.Vector3();
-		const light = (o: THREE.Object3D, at: THREE.Vector3) => {
-			// (again when a switchable light changes)
-			const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)},${this.styleGen}`;
-			if (o.userData.lightingKey === key) return;
-			o.userData.lightingKey = key;
-			o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches, this.styleNow);
-			this.reflectAt(o, at);
-		};
-		const apply = (o: THREE.Object3D) => {
-			hookMeshes(o);
-			// (fresh world matrix: held objects are placed by hand each frame)
-			o.updateWorldMatrix(true, false);
-			// where it's lit from, in its own space: its model's illumination
-			// position, as the engine lights it; else (players, brushes) its
-			// centre once it has loaded
-			let local = o.userData.lightCentre as THREE.Vector3 | undefined;
-			const illum = (o.userData.asset as ModelAsset | undefined)?.model.illumPosition;
-			if (!local && illum) local = o.userData.lightCentre = new THREE.Vector3(...illum);
-			if (!local) {
-				o.updateMatrixWorld(true);
-				const box = new THREE.Box3().setFromObject(o);
-				local = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld.clone().invert());
-				if (o.userData.ambAllHooked) o.userData.lightCentre = local;
-			}
-			light(o, p.copy(local).applyMatrix4(o.matrixWorld));
-		};
-		for (const o of this.objects.values()) if (o.visible) apply(o);
-		for (const o of this.propGroup.children) if (!o.userData.ambAllHooked) apply(o);
+		if (!this.bsp?.ambient) return;
+		for (const o of this.objects.values()) if (o.visible) this.lightModel(o);
+		for (const o of this.propGroup.children) if (!o.userData.ambAllHooked) this.lightModel(o);
 		if (this.vmShown) {
 			// the view model is lit where the eye is
-			light(this.vmShown, this.camera.position);
-			hookMeshes(this.vmShown);
+			this.lightModelAt(this.vmShown, this.camera.position);
+			this.hookModelLighting(this.vmShown);
 		}
+	}
+
+	// The static props lit ahead (as lightModels would on the first frame),
+	// a few at a time, once a map's props are placed and merged
+	private prelightProps(token: number) {
+		if (!this.bsp?.ambient) return;
+		const todo = this.propGroup.children.filter(o => !o.userData.ambAllHooked);
+		const step = () => {
+			if (token !== this.mapToken) return;
+			const end = performance.now() + 8;
+			while (todo.length && performance.now() < end) this.lightModel(todo.pop()!);
+			if (todo.length) later(step, 0);
+			// (their lit copies are new materials: compiled too)
+			else this.precompile();
+		};
+		step();
+	}
+
+	// an object lit by the map's light at its illumination point
+	private lightModel(o: THREE.Object3D) {
+		this.hookModelLighting(o);
+		// (fresh world matrix: held objects are placed by hand each frame)
+		o.updateWorldMatrix(true, false);
+		// where it's lit from, in its own space: its model's illumination
+		// position, as the engine lights it; else (players, brushes) its
+		// centre once it has loaded
+		let local = o.userData.lightCentre as THREE.Vector3 | undefined;
+		const illum = (o.userData.asset as ModelAsset | undefined)?.model.illumPosition;
+		if (!local && illum) local = o.userData.lightCentre = new THREE.Vector3(...illum);
+		if (!local) {
+			o.updateMatrixWorld(true);
+			const box = new THREE.Box3().setFromObject(o);
+			local = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3()).applyMatrix4(o.matrixWorld.clone().invert());
+			if (o.userData.ambAllHooked) o.userData.lightCentre = local;
+		}
+		this.lightModelAt(o, local.clone().applyMatrix4(o.matrixWorld));
+	}
+
+	private lightModelAt(o: THREE.Object3D, at: THREE.Vector3) {
+		const amb = this.bsp?.ambient;
+		if (!amb) return;
+		// (again when a switchable light changes)
+		const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)},${this.styleGen}`;
+		if (o.userData.lightingKey === key) return;
+		o.userData.lightingKey = key;
+		o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches, this.styleNow);
+		this.reflectAt(o, at);
 	}
 
 	// An entity's origin and angles at a (fractional) tick: between network

@@ -12,7 +12,7 @@ import type {BspMap} from './game/bsp.ts';
 import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
-import {later} from './core/later.ts';
+import {later, soon} from './core/later.ts';
 import {Materials} from './game/materials.ts';
 import type {MaterialInfo} from './game/materials.ts';
 import {Zip} from './game/zip.ts';
@@ -268,6 +268,12 @@ view3d.onLoaded = () => {
 	later(redraw, 100);
 };
 let mapToken = 0;
+// the segment the 3D view holds (-1: none): it's loaded as soon as a segment
+// is shown, in any view, so switching to 3D finds it ready
+let segIn3d = -1;
+let segLoading = -1;  // the segment a load is under way for
+let gameFilesReady: Promise<void> | null = null;
+let cancelBackgroundLoad: (() => void) | undefined;
 
 function entitiesFor(index: number): EntityTimeline | null {
 	if (!pb) return null;
@@ -303,6 +309,7 @@ async function connectGame() {
 			gameFS = fs;
 			gameFiles = null;
 			mapCache.clear();
+			segIn3d = segLoading = -1;
 			load3dMap();
 		}
 	} catch (e) {
@@ -311,10 +318,13 @@ async function connectGame() {
 }
 
 async function load3dMap() {
-	if (!pb || viewMode !== '3d' || currentSeg < 0) return;  // render() calls back once a segment is shown
+	if (!pb || currentSeg < 0 || segIn3d === currentSeg || segLoading === currentSeg) return;  // render() calls back once a segment is shown
 	const seg = pb.tracks[currentSeg].seg;
+	// (out of the 3D view, only with a game folder that needs no asking for)
+	const background = viewMode !== '3d';
 	gameFS ??= await devGameFS();
 	if (!gameFS) {
+		if (background) return;
 		message3d(`<h2>The 3D view uses your own copy of the game</h2>
 			Pick your <b>Portal 2</b> folder (the one with portal2.exe, usually in steamapps/common).
 			The map is read from it in this page; nothing is uploaded.
@@ -324,16 +334,24 @@ async function load3dMap() {
 	}
 	const token = ++mapToken;
 	const fs = gameFS;
+	segLoading = currentSeg;
 	if (!gameFiles || gameFiles.fs !== fs) {
-		message3d('Reading the game file index…');
-		gameFiles = new GameFiles(fs);
-		await gameFiles.init(pb.run.gameDir);
-		materials = new Materials(gameFiles);
+		const files = gameFiles = new GameFiles(fs);
+		gameFilesReady = files.init(pb.run.gameDir).then(() => {
+			materials = new Materials(files);
+		});
 	}
+	message3d('Reading the game file index…');
+	await gameFilesReady;
+	if (token !== mapToken) return;
 	const files = gameFiles;
 	const mats = materials!;
 	let promise = mapCache.get(seg.map);
-	if (!promise) {
+	if (promise) {
+		// (most recent last)
+		mapCache.delete(seg.map);
+		mapCache.set(seg.map, promise);
+	} else {
 		message3d(`Loading ${seg.map}…`);
 		promise = (async () => {
 			for (const path of mapPaths(seg.map, pb!.run.gameDir)) {
@@ -355,6 +373,11 @@ async function load3dMap() {
 		})();
 		mapCache.set(seg.map, promise);
 		promise.catch(() => mapCache.delete(seg.map));
+		// (the last two maps kept: one back and forth across a level change)
+		for (const key of [...mapCache.keys()].slice(0, -2)) {
+			mapCache.delete(key);
+			mapPaks.delete(key);
+		}
 	}
 	try {
 		const bsp = await promise;
@@ -367,10 +390,13 @@ async function load3dMap() {
 		t = performance.now();
 		view3d.setSegment(pb.tracks[currentSeg], ents);
 		timing('setSegment', t);
-		showViewAs();
+		segIn3d = currentSeg;
+		segLoading = -1;
+		if (viewMode === '3d') showViewAs();
 		message3d(null);
 		render();
 	} catch (e) {
+		if (token === mapToken) segLoading = -1;
 		if (token === mapToken) message3d(`<h2>Couldn't load the map</h2>${(e as Error).message}<br><button class="primary" id="connect-game">Choose another folder</button>`);
 		const b = document.getElementById('connect-game');
 		if (b) b.onclick = connectGame;
@@ -396,11 +422,15 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 		panels.setRun(run, i => seekTo(pb!.tracks[i].start));
 		timeline.pb = pb;
 		currentSeg = -1;
+		segIn3d = segLoading = -1;
 		entityCache.clear();
 		t = 0;
 		setPlaying(false);
 		document.title = `${run.fileName} · SAR Run Viewer`;
 		requestAnimationFrame(() => render());
+		// (and now, where frames don't come, a hidden tab: the first render
+		// starts the 3D view loading in the background)
+		soon(() => currentSeg < 0 && render());
 	} catch (e) {
 		showError(`Couldn't open ${name}: ${(e as Error).message}`);
 	}
@@ -539,10 +569,13 @@ function render() {
 		pathView.setTrack(loc.track);
 		speedGraph.setTrack(loc.track);
 		panels.setSegment(loc.index, seg);
-		if (viewMode === '3d') {
-			view3d.setMap(null);
-			load3dMap();
-		}
+		view3d.setMap(null);
+		segIn3d = segLoading = -1;
+		// (out of the 3D view, once the segment stays: not for each one
+		// scrubbed past)
+		cancelBackgroundLoad?.();
+		if (viewMode === '3d') load3dMap();
+		else cancelBackgroundLoad = later(load3dMap, 500);
 	}
 	const view = viewAt(loc.track, loc.tick);
 	const cmd = cmdAt(loc.track, loc.tick);
@@ -615,8 +648,10 @@ $('view-mode').onclick = e => {
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
 	$('path-line').hidden = !is3d;
-	if (is3d) load3dMap();
-	else pathView.setMode(viewMode as 'top' | 'side');
+	if (is3d) {
+		if (segIn3d === currentSeg) showViewAs();
+		load3dMap();
+	} else pathView.setMode(viewMode as 'top' | 'side');
 	render();
 };
 // co-op: which player the camera follows
