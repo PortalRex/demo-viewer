@@ -89,6 +89,32 @@ function eased(keys: EntityKey[], j: number): THREE.Vector3 {
 	return at.multiplyScalar(2).add(new THREE.Vector3(...a.origin)).add(new THREE.Vector3(...c.origin)).multiplyScalar(0.25);
 }
 
+// Where an entity is between updates j and j+1 (joined): straight between
+// them when they're a tick apart; where they come every few ticks, along a
+// curve through the eased updates (cubic Hermite, each update's velocity
+// from its neighbours'), so its speed changes smoothly rather than in steps
+// at each update
+function between(keys: EntityKey[], j: number, tick: number): THREE.Vector3 {
+	const k = keys[j], n = keys[j + 1];
+	const h = n.tick - k.tick;
+	const f = Math.min(1, Math.max(0, (tick - k.tick) / h));
+	const p0 = eased(keys, j), p1 = eased(keys, j + 1);
+	if (h < 2) return p0.lerp(p1, f);
+	// (velocity in units a tick: across both neighbours, or the one side)
+	const velocity = (m: number, at: THREE.Vector3) => {
+		const a = joined(keys[m - 1], keys[m]) ? m - 1 : m, b = joined(keys[m], keys[m + 1]) ? m + 1 : m;
+		if (a === b) return new THREE.Vector3();
+		const from = a === m ? at : eased(keys, a), to = b === m ? at : eased(keys, b);
+		return to.clone().sub(from).divideScalar(keys[b].tick - keys[a].tick);
+	};
+	const v0 = velocity(j, p0).multiplyScalar(h), v1 = velocity(j + 1, p1).multiplyScalar(h);
+	const f2 = f * f, f3 = f2 * f;
+	return p0.clone().multiplyScalar(2 * f3 - 3 * f2 + 1)
+		.addScaledVector(v0, f3 - 2 * f2 + f)
+		.addScaledVector(p1, -2 * f3 + 3 * f2)
+		.addScaledVector(v1, f3 - f2);
+}
+
 // (rendered to set three's clipping state before a compile: see precompile)
 const EMPTY_SCENE = new THREE.Scene();
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
@@ -3720,7 +3746,7 @@ export class View3D {
 		const origin = new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]);
 		if (!joined(k, n)) return {origin, angles: k.angles};
 		const f = Math.min(1, Math.max(0, (tick - k.tick) / (n.tick - k.tick)));
-		origin.copy(eased(t.keys, Math.max(0, i))).lerp(eased(t.keys, i + 1), f);
+		origin.copy(between(t.keys, Math.max(0, i), tick));
 		const lerpAngle = (a: number, b: number) => {
 			const d = ((b - a + 540) % 360) - 180;
 			return a + d * f;

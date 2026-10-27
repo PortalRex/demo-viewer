@@ -114,12 +114,32 @@ export function viewAt(track: SegmentTrack, tick: number): ViewState | null {
 		return {origin: a.origin, angles: a.angles, speed: track.speeds[i], viewIndex: i};
 	}
 	const f = Math.min(1, (tick - a.tick) / (b.tick - a.tick));
+	const angles: Vec3 = [lerp(a.angles[0], b.angles[0], f), lerpAngle(a.angles[1], b.angles[1], f), lerp(a.angles[2], b.angles[2], f)];
+	// Where views are ticks apart (a co-op client's recording, P-body's
+	// usually, writes one per snapshot), the aim between them is each tick's
+	// user command's, which carries it exactly (it matches the views where
+	// they meet); the roll, which commands don't have, stays the views'
+	if (b.tick - a.tick > 1) {
+		const aim = cmdAim(track.seg.userCmds, tick);
+		if (aim) [angles[0], angles[1]] = aim;
+	}
 	return {
 		origin: [lerp(a.origin[0], b.origin[0], f), lerp(a.origin[1], b.origin[1], f), lerp(a.origin[2], b.origin[2], f)],
-		angles: [lerp(a.angles[0], b.angles[0], f), lerpAngle(a.angles[1], b.angles[1], f), lerp(a.angles[2], b.angles[2], f)],
+		angles,
 		speed: lerp(track.speeds[i], track.speeds[i + 1], f),
 		viewIndex: i,
 	};
+}
+
+// the pitch and yaw the user commands aimed at a (fractional) tick, from the
+// commands either side of it a tick apart (none where they aren't)
+function cmdAim(cmds: UserCmd[], tick: number): [number, number] | null {
+	const i = lastAtOrBefore(cmds, Math.floor(tick));
+	const c = cmds[i], n = cmds[i + 1];
+	if (!c || c.tick !== Math.floor(tick)) return null;
+	if (!n || n.tick !== c.tick + 1) return tick === c.tick ? [c.viewAngles[0], c.viewAngles[1]] : null;
+	const f = tick - c.tick;
+	return [lerp(c.viewAngles[0], n.viewAngles[0], f), lerpAngle(c.viewAngles[1], n.viewAngles[1], f)];
 }
 
 export function cmdAt(track: SegmentTrack, tick: number): UserCmd | null {
