@@ -172,11 +172,18 @@ const CLIP_PLANE = new THREE.Plane();
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
 const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
+// another run's player and path, as the view is asked to show them
+export interface GhostSpec {
+	view: {origin: Vec3; angles: Vec3} | null;
+	color: string;
+	path: SegmentTrack | null;
+}
+
 // A raced run's player: a glowing see-through body (brightest at its
 // edges) with a pointer where it looks
 function makeGhost(body: THREE.BufferGeometry): THREE.Group {
 	const material = new THREE.ShaderMaterial({
-		uniforms: {color: {value: new THREE.Color(1, 0.55, 0.15)}, exposure: {value: 1}},
+		uniforms: {color: {value: new THREE.Color()}, exposure: {value: 1}},
 		vertexShader: `
 			varying vec3 vNormal;
 			varying vec3 vView;
@@ -215,6 +222,23 @@ function makeGhost(body: THREE.BufferGeometry): THREE.Group {
 	group.userData.material = material;
 	group.visible = false;
 	return group;
+}
+
+// a run's path through a segment as line segments, broken at teleports
+function pathLine(track: SegmentTrack, color: THREE.ColorRepresentation): THREE.LineSegments {
+	const views = track.seg.views;
+	const pts: number[] = [];
+	for (let i = 1; i < views.length; i++) {
+		if (track.teleports[i]) continue;
+		pts.push(...views[i - 1].origin, ...views[i].origin);
+	}
+	const g = new THREE.BufferGeometry();
+	g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+	return new THREE.LineSegments(g, new THREE.LineBasicMaterial({color, transparent: true, opacity: 0.7}));
+}
+function disposeLine(line: THREE.LineSegments) {
+	line.geometry.dispose();
+	(line.material as THREE.Material).dispose();
 }
 
 const toEuler = (a: Vec3) => new THREE.Euler(a[2] * Math.PI / 180, a[0] * Math.PI / 180, a[1] * Math.PI / 180, 'ZYX');
@@ -892,10 +916,13 @@ export class View3D {
 	private pathLine: THREE.LineSegments | null = null;
 	private pathShown = true;
 	private player: THREE.Mesh;
-	// another run raced against this one: where its player's eye is and
-	// where it looks this frame (null: none, or it's not on this map)
-	private ghost: THREE.Group;
-	ghostView: {origin: Vec3; angles: Vec3} | null = null;
+	// other runs raced against this one: where each one's player's eye is
+	// and where it looks this frame (null: not on this map now), in its
+	// colour, and its segment on this map where its path is to be drawn
+	ghosts: GhostSpec[] = [];
+	private ghostBody: THREE.BufferGeometry;
+	private ghostGroup = new THREE.Group();
+	private ghostPaths = new Map<SegmentTrack, THREE.LineSegments>();
 	private bsp: BspMap | null = null;
 	private entities: EntityTimeline | null = null;
 	private objects = new Map<EntityTrack, THREE.Object3D>();
@@ -1135,8 +1162,9 @@ export class View3D {
 		body.translate(0, 0, 36);
 		this.player = new THREE.Mesh(body, new THREE.MeshLambertMaterial({color: 0x5aa9ff, transparent: true, opacity: 0.85}));
 		this.scene.add(this.player);
-		this.ghost = makeGhost(body);
-		this.scene.add(this.ghost);
+		this.ghostBody = body;
+		this.ghostGroup.name = 'ghosts';
+		this.scene.add(this.ghostGroup);
 		const vmHemi = new THREE.HemisphereLight(0xffffff, 0x3a3f48, 0.55);
 		vmHemi.position.set(0, 0, 1);
 		const vmSun = new THREE.DirectionalLight(0xffffff, 0.4);
@@ -2295,18 +2323,9 @@ export class View3D {
 		// the path as line segments, broken at teleports
 		if (this.pathLine) {
 			this.scene.remove(this.pathLine);
-			this.pathLine.geometry.dispose();
-			(this.pathLine.material as THREE.Material).dispose();
+			disposeLine(this.pathLine);
 		}
-		const views = track.seg.views;
-		const pts: number[] = [];
-		for (let i = 1; i < views.length; i++) {
-			if (track.teleports[i]) continue;
-			pts.push(...views[i - 1].origin, ...views[i].origin);
-		}
-		const g = new THREE.BufferGeometry();
-		g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-		this.pathLine = new THREE.LineSegments(g, new THREE.LineBasicMaterial({color: 0x47c17b, transparent: true, opacity: 0.7}));
+		this.pathLine = pathLine(track, 0x47c17b);
 		this.pathLine.visible = this.pathShown;
 		this.scene.add(this.pathLine);
 		this.lastTarget = null;
@@ -4598,7 +4617,7 @@ export class View3D {
 			if (this.skyCamera) this.sky.visible = false;
 			// nor do the viewer's own overlays (the path line is bright enough
 			// to set the exposure by itself)
-			const overlays = ([this.pathLine, this.player] as (THREE.Object3D | null)[]).filter((o): o is THREE.Object3D => !!o && o.visible);
+			const overlays = ([this.pathLine, this.player, ...this.ghostPaths.values()] as (THREE.Object3D | null)[]).filter((o): o is THREE.Object3D => !!o && o.visible);
 			for (const o of overlays) o.visible = false;
 			const frameTarget = r.getRenderTarget();
 			r.setRenderTarget(this.meter);
@@ -4917,7 +4936,7 @@ export class View3D {
 		if (ents) this.updatePaintBlobs(tick);
 		if (ents) this.updateRopes(tick);
 		if (ents) this.updateMovies(tick);
-		this.placeGhost();
+		this.placeGhosts();
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
@@ -4985,17 +5004,42 @@ export class View3D {
 		this.render();
 	}
 
-	// (its body from its eye down, turned to its aim, the marker on its
-	// front tilted with the pitch)
-	private placeGhost() {
-		const v = this.ghostView;
-		this.ghost.visible = !!v;
-		if (!v) return;
-		this.ghost.position.set(v.origin[0], v.origin[1], v.origin[2] - DEFAULT_EYE);
-		this.ghost.rotation.set(0, 0, v.angles[1] * Math.PI / 180);
-		const aim = this.ghost.userData.aim as THREE.Object3D;
-		aim.rotation.set(0, v.angles[0] * Math.PI / 180, 0);
-		(this.ghost.userData.material as THREE.ShaderMaterial).uniforms.exposure.value = this.exposure;
+	// (each body from its eye down, turned to its aim, the marker on its
+	// front tilted with the pitch; and the paths asked for, made once per
+	// segment and freed when no longer asked for)
+	private placeGhosts() {
+		const bodies = this.ghostGroup.children.filter(o => o.name === 'ghost');
+		const shown = this.ghosts.filter(g => g.view);
+		while (bodies.length < shown.length) {
+			const ghost = makeGhost(this.ghostBody);
+			this.ghostGroup.add(ghost);
+			bodies.push(ghost);
+		}
+		bodies.forEach((ghost, i) => {
+			const g = shown[i];
+			ghost.visible = !!g;
+			if (!g?.view) return;
+			const v = g.view;
+			ghost.position.set(v.origin[0], v.origin[1], v.origin[2] - DEFAULT_EYE);
+			ghost.rotation.set(0, 0, v.angles[1] * Math.PI / 180);
+			(ghost.userData.aim as THREE.Object3D).rotation.set(0, v.angles[0] * Math.PI / 180, 0);
+			const u = (ghost.userData.material as THREE.ShaderMaterial).uniforms;
+			u.color.value.set(g.color);
+			u.exposure.value = this.exposure;
+		});
+		const wanted = new Set(this.ghosts.map(g => g.path).filter((t): t is SegmentTrack => !!t));
+		for (const [track, line] of this.ghostPaths) {
+			if (wanted.has(track)) continue;
+			this.ghostGroup.remove(line);
+			disposeLine(line);
+			this.ghostPaths.delete(track);
+		}
+		for (const g of this.ghosts) {
+			if (!g.path || this.ghostPaths.has(g.path)) continue;
+			const line = pathLine(g.path, g.color);
+			this.ghostPaths.set(g.path, line);
+			this.ghostGroup.add(line);
+		}
 	}
 
 	// The projected spotlight lighting the view: the active
@@ -5196,6 +5240,7 @@ export class View3D {
 		leaveOut.forEach(hide);
 		hide(this.sky);
 		hide(this.pathLine);
+		for (const line of this.ghostPaths.values()) hide(line);
 		hide(this.player);
 		hide(this.particleRenderer?.group);
 		hide(this.ropes?.group);
@@ -5847,7 +5892,7 @@ export class View3D {
 
 		const frameTarget = r.getRenderTarget();
 		const size = this.viewSize(r).multiplyScalar(0.5).floor();
-		const hidden = ([this.player, this.pathLine, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
+		const hidden = ([this.player, this.pathLine, ...this.ghostPaths.values(), ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
 			.filter((o): o is THREE.Object3D => !!o && o.visible);
 		for (const o of hidden) o.visible = false;
 		const dither = ditherUniforms.ditherOn.value;
@@ -5925,7 +5970,7 @@ export class View3D {
 
 		const frameTarget = r.getRenderTarget();
 		const size = this.viewSize(r).multiplyScalar(0.5).floor();
-		const hidden = ([this.player, this.pathLine, ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
+		const hidden = ([this.player, this.pathLine, ...this.ghostPaths.values(), ...this.waterMeshes] as (THREE.Object3D | null | undefined)[])
 			.filter((o): o is THREE.Object3D => !!o && o.visible);
 		for (const o of hidden) o.visible = false;
 		const dither = ditherUniforms.ditherOn.value;

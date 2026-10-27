@@ -122,9 +122,11 @@ computer.
   and shadow detail) for slower machines.
 
 **Share and compare**
-- **Ghost race:** load another run of the same map and its player is drawn as
-  a glowing ghost beside yours. A live readout shows how far ahead or behind
-  you are, measured where the ghost passed the same spot.
+- **Ghost race:** load other runs of the same map, as many as you like. Each
+  one's player is drawn as a glowing ghost in its own colour beside yours,
+  with a live readout of how far ahead or behind you are, measured where it
+  passed the same spot. Each can be hidden, have its path drawn through the
+  map, or be taken off again.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the
@@ -198,7 +200,7 @@ These toggles in the 3D view are remembered per browser:
 | **Bright** | Brightens dark maps the way autorender does. |
 | **Quality** | High, Medium or Low: resolution, antialiasing, bloom and shadow detail. |
 
-The 3D toolbar also has **Ghost** (race another run of the map) and
+The 3D toolbar also has **Ghost** (race other runs of the map) and
 **Export** (save an MP4). The **Link** button next to the clock copies a link
 to the current moment.
 

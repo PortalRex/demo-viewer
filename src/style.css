@@ -140,8 +140,13 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .export-dialog progress { width: 100%; }
 .export-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .export-buttons button.primary { margin-top: 0; }
-.ghost-hud { position: absolute; z-index: 1; right: 16px; top: 16px; padding: 5px 10px; background: rgba(0, 0, 0, 0.55); color: #fff; font: 700 13px/1.35 Arial, Helvetica, sans-serif; text-align: right; pointer-events: none; }
-.ghost-name { color: #ffb36b; font-weight: 400; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ghost-hud { position: absolute; z-index: 1; right: 16px; top: 16px; max-height: calc(100% - 32px); overflow-y: auto; color: #fff; font: 700 13px/1.35 Arial, Helvetica, sans-serif; text-align: right; }
+.ghost-row { margin-bottom: 6px; padding: 5px 10px; background: rgba(0, 0, 0, 0.55); border-right: 3px solid var(--ghost); }
+.ghost-row.away { opacity: 0.45; }
+.ghost-row.away .ghost-delta { display: none; }
+.ghost-name { color: var(--ghost); font-weight: 400; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ghost-buttons { display: flex; gap: 4px; justify-content: flex-end; margin-top: 3px; }
+.ghost-buttons button { font-size: 11px; padding: 1px 6px; }
 .ghost-delta { font-size: 20px; font-variant-numeric: tabular-nums; }
 .ghost-delta.ahead { color: var(--ok); }
 .ghost-delta.behind { color: var(--bad); }

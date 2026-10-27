@@ -630,10 +630,9 @@ function render() {
 	const view = viewAt(loc.track, loc.tick);
 	const cmd = cmdAt(loc.track, loc.tick);
 	showBright(viewMode === '3d' ? seg.map : null);
-	view3d.ghostView = viewMode === '3d' ? ghostAt(loc) : null;
+	showRacers(loc, view);
 	if (viewMode === '3d') view3d.update(view, loc.tick);
 	else pathView.draw(view, loc.tick, seg.sar);
-	showGhost(loc, view);
 	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null);
 	showHudText(loc.tick);
 	timeline.draw(t, loc.index);
@@ -790,38 +789,47 @@ window.addEventListener('drop', async e => {
 });
 
 // ---- ghost race ----
-// Another run of the same map, played alongside: its player drawn as a
-// ghost from the moment each run's segment starts, and the difference
-// between them, from when the ghost was where this run's player is now
-let ghost: {pb: Playback; name: string} | null = null;
-// the ghost's segment for one of this run's: the one on the same map (the
+// Other runs of the same maps, played alongside: each one's player drawn as
+// a ghost in its own colour from the moment each run's segment starts (its
+// path too, where asked), and the difference between it and this run, from
+// when it was where this run's player is now. Each can be hidden, have its
+// path shown, or be taken off
+interface Racer {
+	pb: Playback;
+	name: string;
+	color: string;
+	shown: boolean;  // its player drawn
+	path: boolean;   // its path drawn
+	row: HTMLElement;
+}
+const RACER_COLORS = ['#ff8c26', '#d45cff', '#3fd6c8', '#ffd84a', '#ff5c7a', '#7a9cff', '#9be34a', '#ff9ad5'];
+let racers: Racer[] = [];
+// a racer's segment for one of this run's: the one on the same map (the
 // same one of them, where a run visits a map more than once)
-function ghostTrack(loc: Located): SegmentTrack | null {
-	if (!ghost || !pb) return null;
+function racerTrack(r: Racer, loc: Located): SegmentTrack | null {
+	if (!pb) return null;
 	const map = loc.track.seg.map;
 	const visit = pb.tracks.slice(0, loc.index).filter(tr => tr.seg.map === map).length;
-	return ghost.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
+	return r.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
 }
-// (the ghost's tick as many seconds into its segment as this run is into its own)
-function ghostTick(loc: Located, track: SegmentTrack) {
+// (a racer's tick as many seconds into its segment as this run is into its own)
+function racerTick(loc: Located, track: SegmentTrack) {
 	const seconds = (loc.tick - loc.track.seg.firstTick) * loc.track.seg.intervalPerTick;
 	return track.seg.firstTick + seconds / track.seg.intervalPerTick;
 }
-function ghostAt(loc: Located): {origin: [number, number, number]; angles: [number, number, number]} | null {
-	const track = ghostTrack(loc);
-	if (!track) return null;
-	const tick = ghostTick(loc, track);
+function racerAt(loc: Located, track: SegmentTrack): {origin: [number, number, number]; angles: [number, number, number]} | null {
+	const tick = racerTick(loc, track);
 	// (gone once its segment's over: finished, or loaded out)
 	if (tick > track.seg.lastTick) return null;
 	const v = viewAt(track, tick);
 	return v && {origin: v.origin, angles: v.angles};
 }
-// seconds behind the ghost (negative: ahead): when the ghost was closest to
-// where this run's player is, within a few seconds of the same time
-function ghostDelta(loc: Located, view: {origin: number[]} | null, track: SegmentTrack): number | null {
+// seconds behind the racer (negative: ahead): when it was closest to where
+// this run's player is, within a few seconds of the same time
+function racerDelta(loc: Located, view: {origin: number[]} | null, track: SegmentTrack): number | null {
 	if (!view) return null;
 	const views = track.seg.views;
-	const at = ghostTick(loc, track);
+	const at = racerTick(loc, track);
 	const window = 6 / track.seg.intervalPerTick;
 	let i = Math.max(0, lastAtOrBefore(views, at - window));
 	let best = -1, bestD = Infinity;
@@ -837,24 +845,66 @@ function ghostDelta(loc: Located, view: {origin: number[]} | null, track: Segmen
 	if (best < 0 || bestD > 256 ** 2) return null;
 	return (at - views[best].tick) * track.seg.intervalPerTick;
 }
-function showGhost(loc: Located, view: {origin: number[]} | null) {
-	const track = viewMode === '3d' ? ghostTrack(loc) : null;
-	$('ghost-hud').hidden = !track;
-	if (!track || !ghost) return;
-	$('ghost-name').textContent = `Ghost: ${ghost.name}`;
-	const d = ghostDelta(loc, view, track);
-	const el = $('ghost-delta');
-	el.textContent = d === null ? '—' : `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d).toFixed(2)}`;
-	el.classList.toggle('behind', d !== null && d > 0.005);
-	el.classList.toggle('ahead', d !== null && d < -0.005);
+// what the 3D view draws of them, and each one's row (with its difference)
+function showRacers(loc: Located, view: {origin: number[]} | null) {
+	const is3d = viewMode === '3d';
+	$('ghost-hud').hidden = !is3d || !racers.length;
+	view3d.ghosts = [];
+	for (const r of racers) {
+		const track = is3d ? racerTrack(r, loc) : null;
+		r.row.classList.toggle('away', !track);
+		if (!track) continue;
+		view3d.ghosts.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null});
+		const d = racerDelta(loc, view, track);
+		const el = r.row.querySelector('.ghost-delta') as HTMLElement;
+		el.textContent = d === null ? '—' : `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d).toFixed(2)}`;
+		el.classList.toggle('behind', d !== null && d > 0.005);
+		el.classList.toggle('ahead', d !== null && d < -0.005);
+	}
 }
-$('ghost').onclick = () => {
-	if (ghost) {
-		ghost = null;
-		$('ghost').classList.remove('on');
+// a racer's row: its name in its colour, its difference, and its toggles
+function racerRow(r: Racer): HTMLElement {
+	const row = document.createElement('div');
+	row.className = 'ghost-row';
+	row.style.setProperty('--ghost', r.color);
+	row.title = `${r.name}: how far ahead (−) or behind (+) this run is, where it was at this spot`;
+	const name = document.createElement('div');
+	name.className = 'ghost-name';
+	name.textContent = r.name;
+	const delta = document.createElement('div');
+	delta.className = 'ghost-delta';
+	const toggle = (label: string, title: string, get: () => boolean, set: (on: boolean) => void) => {
+		const b = document.createElement('button');
+		b.className = 'toggle';
+		b.textContent = label;
+		b.title = title;
+		b.classList.toggle('on', get());
+		b.onclick = () => {
+			set(!get());
+			b.classList.toggle('on', get());
+			render();
+		};
+		return b;
+	};
+	const remove = document.createElement('button');
+	remove.textContent = '×';
+	remove.title = 'Take this run off';
+	remove.onclick = () => {
+		racers = racers.filter(x => x !== r);
+		row.remove();
+		$('ghost').classList.toggle('on', racers.length > 0);
 		render();
-	} else ($('ghost-input') as HTMLInputElement).click();
-};
+	};
+	const buttons = document.createElement('div');
+	buttons.className = 'ghost-buttons';
+	buttons.append(
+		toggle('Ghost', 'Show its player', () => r.shown, on => (r.shown = on)),
+		toggle('Path', 'Draw its path through the map', () => r.path, on => (r.path = on)),
+		remove);
+	row.append(name, delta, buttons);
+	return row;
+}
+$('ghost').onclick = () => ($('ghost-input') as HTMLInputElement).click();
 $<HTMLInputElement>('ghost-input').onchange = async e => {
 	const input = e.target as HTMLInputElement;
 	const list = [...(input.files ?? [])];
@@ -864,7 +914,12 @@ $<HTMLInputElement>('ghost-input').onchange = async e => {
 		const run = await loadRuns(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
 		const maps = new Set(pb?.run.segments.map(s => s.map));
 		if (!run.segments.some(s => maps.has(s.map) && s.views.length)) throw new Error('it has none of the maps this run plays.');
-		ghost = {pb: new Playback(run), name: run.fileName.replace(/\.[^.]+$/, '')};
+		// (the first colour not taken)
+		const color = RACER_COLORS.find(c => !racers.some(r => r.color === c)) ?? RACER_COLORS[racers.length % RACER_COLORS.length];
+		const r: Racer = {pb: new Playback(run), name: run.fileName.replace(/\.[^.]+$/, ''), color, shown: true, path: false, row: null!};
+		r.row = racerRow(r);
+		racers.push(r);
+		$('ghost-list').append(r.row);
 		$('ghost').classList.add('on');
 		render();
 	} catch (err) {

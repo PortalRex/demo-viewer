@@ -50,7 +50,7 @@
 					<button id="titles-toggle" class="toggle on" hidden title="Show the game's on-screen text (chapter titles)">Titles</button>
 					<button id="pip-toggle" class="toggle on" hidden title="Show the co-op partner's view in the corner, as autorender's co-op renders do">Partner</button>
 					<button id="bright-toggle" class="toggle" hidden title="Brighten dark maps as autorender does (mat_ambient_light 0.05; on by default where autorender uses it)">Bright</button>
-					<button id="ghost" class="toggle" hidden title="Race another run of this map: its player shown as a ghost, with how far ahead or behind this one is">Ghost</button>
+					<button id="ghost" class="toggle" hidden title="Race other runs of this map (as many as you like): each one's player shown as a ghost in its own colour, with how far ahead or behind this one is; each can be hidden, have its path drawn or be taken off">Ghost</button>
 					<input id="ghost-input" type="file" accept=".sarp,.dem" multiple hidden>
 					<button id="export" hidden title="Save part of the run as an MP4 video, drawn as the 3D view shows it">Export</button>
 					<select id="quality" hidden title="3D quality: resolution, antialiasing, bloom and shadow detail (lower runs faster)">
@@ -67,9 +67,8 @@
 				<div id="view3d" class="view3d" hidden>
 					<div id="view3d-msg" class="view3d-msg" hidden></div>
 					<canvas id="hud-text" class="hud-text"></canvas>
-					<div id="ghost-hud" class="ghost-hud" hidden title="The ghost run: how far ahead (−) or behind (+) this run is, where the ghost was at this spot">
-						<div class="ghost-name" id="ghost-name"></div>
-						<div class="ghost-delta" id="ghost-delta"></div>
+					<div id="ghost-hud" class="ghost-hud" hidden>
+						<div id="ghost-list"></div>
 					</div>
 					<div id="cm-hud" class="cm-hud" hidden title="The challenge mode HUD, from the recording's own stats">
 						<div><span>Portals:</span><b id="cm-portals"></b></div>
