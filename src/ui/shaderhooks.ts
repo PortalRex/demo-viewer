@@ -6,6 +6,7 @@
 //   the line of sight
 import * as THREE from 'three';
 import {MODEL_LIGHTS} from '../game/ambient.ts';
+import type {Eyeball} from '../game/mdl.ts';
 
 export const paintUniforms = {
 	paintMap: {value: null as THREE.Texture | null},
@@ -459,27 +460,84 @@ const AMBIENT_FRAGMENT = `
 	}
 `;
 
-// An eye (EyeRefract): the iris texture sampled with the pupil widened by
-// the dilation (its coordinates, already the iris projection, pulled in
-// towards the centre within the iris's 0.2 radius), and the light shaded by
-// the occlusion texture, on the mesh's own coordinates
+// An eye (Eyes, EyeRefract): the iris projected onto it from where the
+// eyeball is as it's drawn (see placeEye: its rows map a world position to
+// u and v), EyeRefract's at half that (its iris texture holds the cornea's
+// surroundings too) with the pupil widened by the dilation, and the light
+// shaded by the occlusion texture on the mesh's own coordinates
+const EYE_VERTEX_HEAD = `
+uniform vec4 eyeIrisU;
+uniform vec4 eyeIrisV;
+varying vec2 vIrisUv;
+`;
+const EYE_VERTEX = `
+	{
+		vec4 eyeWorld = modelMatrix * vec4(transformed, 1.0);
+		vIrisUv = vec2(dot(eyeIrisU.xyz, eyeWorld.xyz) + eyeIrisU.w, dot(eyeIrisV.xyz, eyeWorld.xyz) + eyeIrisV.w);
+	}
+`;
 const EYE_FRAGMENT_HEAD = `
 uniform float eyeDilation;
 uniform sampler2D eyeAoMap;
 uniform vec3 eyeAoColor;
-varying vec2 vEyeAoUv;
+varying vec2 vIrisUv;
 `;
 const EYE_MAP_FRAGMENT = `
-	vec2 eyeUv = vMapUv - 0.5;
+	vec2 eyeUv = vIrisUv;
+#ifdef EYE_REFRACT
+	eyeUv = eyeUv * 0.5 + 0.25 - 0.5;
 	eyeUv *= mix(1.0, clamp(length(eyeUv) / 0.2, 0.0, 1.0), clamp(eyeDilation, 0.0, 1.0) * 2.5 - 1.25);
 	eyeUv += 0.5;
+#endif
+	// (held to the texture, the white of the eye past its edge)
+	eyeUv = clamp(eyeUv, 0.0, 1.0);
+	vec2 eyeMeshUv = vMapUv;
 #define vMapUv eyeUv
 #include <map_fragment>
 #undef vMapUv
 `;
 const EYE_AO_FRAGMENT = `
-	reflectedLight.indirectDiffuse *= mix(eyeAoColor, vec3(1.0), texture2D(eyeAoMap, vEyeAoUv).rgb);
+	reflectedLight.indirectDiffuse *= mix(eyeAoColor, vec3(1.0), texture2D(eyeAoMap, eyeMeshUv).rgb);
 `;
+
+// An eye's iris projection where it's drawn (R_StudioEyeballPosition): from
+// the eyeball's centre and up on its bone as posed (or in the pose its mesh
+// was baked in), looking at the point its object's eyeTarget says (else
+// along its own forward, turned around, as the engine does without one),
+// turned its zoffset aside; rows of -right and -up over the iris's size,
+// through 0.5 at the centre
+const eyeOrg = new THREE.Vector3(), eyeUp = new THREE.Vector3(), eyeFwd = new THREE.Vector3(), eyeRight = new THREE.Vector3(), eyeBone = new THREE.Matrix4();
+function placeEye(mesh: THREE.Object3D, e: Eyeball, u: Record<string, {value: unknown}>) {
+	let anim: {poseBones?: readonly THREE.Matrix4[]} | undefined, target: THREE.Vector3 | undefined;
+	for (let o: THREE.Object3D | null = mesh; o; o = o.parent) {
+		anim ??= o.userData.anim;
+		target ??= o.userData.eyeTarget;
+	}
+	const bone = (mesh as THREE.SkinnedMesh).isSkinnedMesh ? anim?.poseBones?.[e.bone] : undefined;
+	if (bone) {
+		eyeBone.multiplyMatrices(mesh.matrixWorld, bone);
+		eyeOrg.fromArray(e.org).applyMatrix4(eyeBone);
+		eyeUp.fromArray(e.up).transformDirection(eyeBone);
+		eyeFwd.fromArray(e.forward).transformDirection(eyeBone);
+	} else {
+		eyeOrg.fromArray(e.bindOrg).applyMatrix4(mesh.matrixWorld);
+		eyeUp.fromArray(e.bindUp).transformDirection(mesh.matrixWorld);
+		eyeFwd.fromArray(e.bindForward).transformDirection(mesh.matrixWorld);
+	}
+	if (target) eyeFwd.copy(target).sub(eyeOrg).normalize();
+	else eyeFwd.negate();
+	eyeRight.crossVectors(eyeFwd, eyeUp).normalize();
+	eyeFwd.addScaledVector(eyeRight, 2 * e.zoffset).normalize();
+	eyeRight.crossVectors(eyeFwd, eyeUp).normalize();
+	eyeUp.crossVectors(eyeRight, eyeFwd).normalize();
+	const row = (v: unknown, axis: THREE.Vector3) => {
+		const r = v as THREE.Vector4;
+		r.set(-axis.x * e.irisScale, -axis.y * e.irisScale, -axis.z * e.irisScale, 0);
+		r.w = -(r.x * eyeOrg.x + r.y * eyeOrg.y + r.z * eyeOrg.z) + 0.5;
+	};
+	row(u.eyeIrisU.value, eyeRight);
+	row(u.eyeIrisV.value, eyeUp);
+}
 
 const NEUTRAL: ModelLighting = {cube: new Array(18).fill(0.1), lights: []};
 
@@ -522,6 +580,8 @@ export function useModelLighting(mesh: THREE.Object3D) {
 			// (lights given already attenuated: no further falloff)
 			att[i].set(...(light?.atten ?? [1, 0, 0]));
 		}
+		const eye = (material as THREE.Material).userData.eye ? (mesh as THREE.Mesh).geometry?.userData.eyeball as Eyeball | undefined : undefined;
+		if (eye && u.eyeIrisU) placeEye(mesh, eye, u);
 		(material as THREE.Material & {uniformsNeedUpdate: boolean}).uniformsNeedUpdate = true;
 	};
 	mesh.onAfterRender = () => {
@@ -913,10 +973,14 @@ function hook(material: THREE.Material, paint: boolean) {
 		}
 		// an eye (EyeRefract): its pupil widened by the dilation, and its light
 		// shaded towards the occlusion colour where that texture is dark
-		const eye = material.userData.eye as {ao: THREE.Texture | null; aoColor: [number, number, number]; dilation: number} | undefined;
+		const eye = material.userData.eye as {ao: THREE.Texture | null; aoColor: [number, number, number]; dilation: number; refract: boolean} | undefined;
 		if (eye) {
-			Object.assign(material.userData.ambUniforms, {eyeDilation: {value: eye.dilation}, eyeAoMap: {value: eye.ao}, eyeAoColor: {value: new THREE.Vector3(...eye.aoColor)}});
+			Object.assign(material.userData.ambUniforms, {
+				eyeIrisU: {value: new THREE.Vector4()}, eyeIrisV: {value: new THREE.Vector4()},
+				eyeDilation: {value: eye.dilation}, eyeAoMap: {value: eye.ao}, eyeAoColor: {value: new THREE.Vector3(...eye.aoColor)},
+			});
 			material.defines = {...material.defines, EYE: ''};
+			if (eye.refract) material.defines.EYE_REFRACT = '';
 			if (eye.ao) material.defines.EYE_AO = '';
 		}
 		const si = material.userData.selfIllum as {tint: [number, number, number]; mask: THREE.Texture | null} | undefined;
@@ -994,11 +1058,9 @@ function hook(material: THREE.Material, paint: boolean) {
 				'#include <lights_fragment_end>\n' + AMBIENT_FRAGMENT,
 			);
 			if (material.defines?.EYE !== undefined) {
+				shader.vertexShader = EYE_VERTEX_HEAD + shader.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n' + EYE_VERTEX);
 				shader.fragmentShader = EYE_FRAGMENT_HEAD + shader.fragmentShader.replace('#include <map_fragment>', EYE_MAP_FRAGMENT);
-				if (material.defines.EYE_AO !== undefined) {
-					shader.vertexShader = 'attribute vec2 uv1;\nvarying vec2 vEyeAoUv;\n' + shader.vertexShader.replace('#include <project_vertex>', '#include <project_vertex>\n\tvEyeAoUv = uv1;');
-					shader.fragmentShader = shader.fragmentShader.replace('#include <aomap_fragment>', '#include <aomap_fragment>\n' + EYE_AO_FRAGMENT);
-				}
+				if (material.defines.EYE_AO !== undefined) shader.fragmentShader = shader.fragmentShader.replace('#include <aomap_fragment>', '#include <aomap_fragment>\n' + EYE_AO_FRAGMENT);
 			}
 			if (env) {
 				Object.assign(shader.uniforms, material.userData.envUniforms);
@@ -1016,7 +1078,7 @@ function hook(material: THREE.Material, paint: boolean) {
 			.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + DITHER_FRAGMENT)
 			.replace('#include <map_fragment>', '#include <map_fragment>\n' + WATER_ALBEDO + (paint ? PAINT_FRAGMENT : '') + BACKFACE_FRAGMENT);
 	};
-	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DECAL_MODULATE !== undefined ? '+modulate' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.WORLD_SELFILLUM !== undefined ? '+wglow' : '') + (material.defines?.BLEND2 !== undefined ? '+blend2' + (material.defines.BLEND2_MODULATE !== undefined ? 'm' : '') : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + (material.defines?.EYE !== undefined ? '+eye' + (material.defines.EYE_AO !== undefined ? 'ao' : '') : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
+	material.customProgramCacheKey = () => (paint ? 'world+paint+dither' : 'dither') + (lit ? '+amb' : '') + (material.userData.vertexLit ? '+vlit' : '') + (material.defines?.BACKFACE_SHADE !== undefined ? '+back' : '') + (material.defines?.BUMPLIGHT !== undefined ? '+bump' : '') + (material.defines?.SSBUMP !== undefined ? '+ss' : '') + (material.defines?.REFRACT_TINT !== undefined ? '+refract' : '') + (material.defines?.REFRACT_ENV !== undefined ? '+renv' : '') + (material.defines?.REFRACT_UNSCALED !== undefined ? '+unscaled' : '') + (material.defines?.DECAL_MODULATE !== undefined ? '+modulate' : '') + (material.defines?.REFRACT_LOCAL !== undefined ? '+local' : '') + (material.defines?.WORLD_SELFILLUM !== undefined ? '+wglow' : '') + (material.defines?.BLEND2 !== undefined ? '+blend2' + (material.defines.BLEND2_MODULATE !== undefined ? 'm' : '') : '') + (material.defines?.DETAIL_MODE !== undefined ? '+detail' + material.defines.DETAIL_MODE : '') + (material.defines?.SELFILLUM !== undefined ? '+si' : '') + (material.defines?.PHONG !== undefined ? '+phong' : '') + (material.defines?.PHONG_BASEMASK !== undefined ? '+phmask' : '') + (material.defines?.PHONG_BUMPMASK !== undefined ? '+phbump' : '') + (material.defines?.PHONG_EXPMAP !== undefined ? '+phexp' : '') + (material.defines?.SELFILLUM_MASK !== undefined ? '+simask' : '') + (material.defines?.EYE !== undefined ? '+eye' + (material.defines.EYE_REFRACT !== undefined ? 'r' : '') + (material.defines.EYE_AO !== undefined ? 'ao' : '') : '') + Object.keys(material.defines ?? {}).filter(k => k.startsWith('ENV') || k.startsWith('WATER')).sort().join('+');
 }
 
 export const hookWorldMaterial = (m: THREE.Material) => hook(m, true);

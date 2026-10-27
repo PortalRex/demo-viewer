@@ -81,7 +81,7 @@ export interface MaterialInfo {
 	envLightScale: number;   // $envmaplightscale: reflections darkened where the light is
 	// eyes (EyeRefract): $ambientoccltexture (on the mesh's own coordinates),
 	// the colour it shades the eye's light towards, and how wide the pupil is
-	eye: {ao: string; aoColor: [number, number, number]; dilation: number} | null;
+	eye: {ao: string; aoColor: [number, number, number]; dilation: number; refract: boolean} | null;
 	selfIllum: boolean;      // $selfillum (VertexLitGeneric): unlit where the mask (or base alpha) says
 	selfIllumMask: string;
 	selfIllumTint: [number, number, number];
@@ -270,6 +270,7 @@ export class Materials {
 				ao: texturePath(p.get('$ambientoccltexture')),
 				aoColor: (parseColor(p.get('$ambientocclcolor')) ?? [0.33, 0.33, 0.33]) as [number, number, number],
 				dilation: p.has('$dilation') ? Number(p.get('$dilation')) || 0 : 0.5,
+				refract: shader === 'eyerefract',
 			} : null,
 			selfIllum: truthy(p.get('$selfillum')),
 			// (some name the mask with a .tga extension; the engine finds the .vtf)

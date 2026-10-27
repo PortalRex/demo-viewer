@@ -11,7 +11,7 @@ import {MODEL_LIGHTS} from '../game/ambient.ts';
 import type {Materials, MaterialInfo, WaterParams} from '../game/materials.ts';
 import {readVtfCube, decodeVtf, VtfFormat} from '../game/vtf.ts';
 import {loadModel} from '../game/mdl.ts';
-import type {StudioModel, ModelGroup} from '../game/mdl.ts';
+import type {StudioModel, ModelGroup, Eyeball} from '../game/mdl.ts';
 import {loadSkeleton, referencePose, samplePose, sequenceRate} from '../game/anim.ts';
 import type {Gesture, Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
@@ -42,6 +42,8 @@ export type CameraMode = 'eyes' | 'orbit' | 'free' | 'chase';
 // Portal 2's 90° horizontal FOV at 4:3, as a vertical FOV (widescreen keeps it)
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
+// how far ahead of a player their eyes look (the point both turn to)
+const EYE_TARGET_DISTANCE = 128;
 const VIEW_NEARZ = 7;
 const PIP_SCALE = 0.3, PIP_INSET = 25 / 720;  // ss_pipscale, ss_pip_right/bottom_offset (at autorender's 720p)
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
@@ -292,7 +294,15 @@ function geometry(m: MeshData) {
 	if (m.uv) g.setAttribute('uv', new THREE.BufferAttribute(m.uv, 2));
 	if (m.lightUv) g.setAttribute('uv1', new THREE.BufferAttribute(m.lightUv, 2));
 	if (m.blend) g.setAttribute('blend', new THREE.BufferAttribute(m.blend, 1));
+	// (an eye's: where its iris is projected from as it's drawn)
+	if ((m as ModelGroup).eyeball) g.userData.eyeball = (m as ModelGroup).eyeball;
 	return g;
+}
+
+// an eyeball's reference-pose numbers moved by a bone's skinning matrix
+function posedEyeball(e: Eyeball, m: THREE.Matrix4): Eyeball {
+	const at = (v: number[], w: number) => (w ? new THREE.Vector3(...v).applyMatrix4(m) : new THREE.Vector3(...v).transformDirection(m)).toArray();
+	return {...e, bindOrg: at(e.bindOrg, 1), bindUp: at(e.bindUp, 0), bindForward: at(e.bindForward, 0)};
 }
 
 // How bright the baked lighting is drawn. three's basic material divides
@@ -464,7 +474,7 @@ class MaterialLibrary {
 		const eyeAo = mat.userData.ambientLit && info.eye?.ao ? this.textures.get(info.eye.ao) : Promise.resolve(null);
 		Promise.all([this.textures.get(info.baseTexture, false, frame), envMask, glowMask, phongMask, phongExp, eyeAo]).then(([tex, maskMap, glow, phMask, phExp, ao]) => {
 			if (!tex) return;
-			if (mat.userData.ambientLit && info.eye) mat.userData.eye = {ao, aoColor: info.eye.aoColor, dilation: info.eye.dilation};
+			if (mat.userData.ambientLit && info.eye) mat.userData.eye = {ao, aoColor: info.eye.aoColor, dilation: info.eye.dilation, refract: info.eye.refract};
 			// (with neither a mask nor alpha in the base texture, the engine drops it)
 			if (modelLit && info.selfIllum && (glow || tex.userData.hasAlpha)) {
 				mat.userData.selfIllum = {tint: info.selfIllumTint, mask: glow};
@@ -1328,6 +1338,8 @@ export class View3D {
 					const raw = geometry(g);
 					const posed = mats ? bakePose(g, mats) : null;
 					const baked = posed ? geometry({...g, positions: posed.positions, normals: posed.normals}) : raw;
+					// (an eye drawn in that pose: its eyeball moved with it)
+					if (posed && g.eyeball) baked.userData.eyeball = posedEyeball(g.eyeball, mats![g.eyeball.bone]);
 					raw.userData.shared = baked.userData.shared = true;  // (the model cache's: not freed with objects)
 					return {group: g, raw, baked, name: `${name} ${g.materialCandidates[0]}`};
 				});
@@ -5195,6 +5207,13 @@ export class View3D {
 					o.position.copy(pose.origin);
 					// players face where their feet point (see playerMotion) and don't tilt
 					o.rotation.copy(toEuler(t.className === 'CPortal_Player' ? [0, feetYaw ?? pose.angles[1], 0] : pose.angles));
+					// (their eyes look where they aim: a point ahead of the eye)
+					if (t.className === 'CPortal_Player') {
+						const ang = toEuler([pose.angles[0], pose.angles[1], 0]);
+						const target = (o.userData.eyeTarget as THREE.Vector3 | undefined) ?? (o.userData.eyeTarget = new THREE.Vector3());
+						target.set(EYE_TARGET_DISTANCE, 0, 0).applyEuler(ang).add(pose.origin);
+						target.z += k.eyeZ ?? DEFAULT_EYE;
+					}
 					if (o.userData.portalSurface) {
 						const e = k.extra ?? {};
 						const surface = o.userData.portalSurface as THREE.Mesh;

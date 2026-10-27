@@ -14,6 +14,22 @@ export interface ModelGroup extends MeshData {
 	meshVertex: Uint32Array;
 	skinIndex: Uint16Array;   // 4 bones per vertex (studio bone numbers)
 	skinWeight: Float32Array; // their weights
+	eyeball?: Eyeball;        // an eye's meshes: the iris is projected onto them as drawn
+}
+
+// An eyeball (mstudioeyeball_t): its centre, up and forward on its bone (and
+// in the reference pose, for models drawn unposed), how far it's turned
+// off its forward, and the iris's size (iris_scale: uv per unit)
+export interface Eyeball {
+	bone: number;
+	org: number[];
+	up: number[];
+	forward: number[];
+	bindOrg: number[];
+	bindUp: number[];
+	bindForward: number[];
+	zoffset: number;
+	irisScale: number;
 }
 
 export interface StudioModel {
@@ -95,7 +111,7 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 	}
 	const vertex = (i: number) => vertexStart + (vertexIds ? vertexIds[i] : i) * VVD_VERTEX;
 
-	const groups = new Map<number, {pos: number[]; nrm: number[]; col: number[]; uv: number[]; ownUv: number[]; mv: number[]; si: number[]; sw: number[]}>();
+	const groups = new Map<number, {pos: number[]; nrm: number[]; col: number[]; uv: number[]; mv: number[]; si: number[]; sw: number[]; eyeball?: Eyeball}>();
 	const meshList: {vertexCount: number}[] = [];
 	const bodyParts = m.getInt32(232, true), bodyPartOffset = m.getInt32(236, true);
 	const vtxBodyParts = x.getInt32(28, true), vtxBodyPartOffset = x.getInt32(32, true);
@@ -131,16 +147,16 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 		for (let mi = 0; mi < Math.min(meshes, vMeshes); mi++) {
 			const mesh = meshOffset + mi * 116;
 			const ref = m.getInt32(mesh, true);
-			// an eyeball (materialtype 1): its texture coordinates are the iris
-			// projected along the eye's right and up axes
-			const eye = m.getInt32(mesh + 24, true) === 1 ? eyeballProjection(m, model, m.getInt32(mesh + 28, true)) : null;
+			// an eyeball (materialtype 1)
+			const eye = m.getInt32(mesh + 24, true) === 1 ? eyeballOf(m, model, m.getInt32(mesh + 28, true)) : null;
 			const meshVertexBase = modelVertexBase + m.getInt32(mesh + 12, true);
 			const meshListIndex = firstMesh + mi;
 			let g = groups.get(ref);
 			if (!g) {
-				g = {pos: [], nrm: [], col: [], uv: [], ownUv: [], mv: [], si: [], sw: []};
+				g = {pos: [], nrm: [], col: [], uv: [], mv: [], si: [], sw: []};
 				groups.set(ref, g);
 			}
+			if (eye) g.eyeball = eye;
 			const vMesh = vMeshOffset + mi * 9;
 			const nGroups = x.getInt32(vMesh, true);
 			const groupOffset = vMesh + x.getInt32(vMesh + 4, true);
@@ -162,15 +178,7 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 						const vo = vertex(meshVertexBase + orig);
 						g.pos.push(d.getFloat32(vo + 16, true), d.getFloat32(vo + 20, true), d.getFloat32(vo + 24, true));
 						g.nrm.push(d.getFloat32(vo + 28, true), d.getFloat32(vo + 32, true), d.getFloat32(vo + 36, true));
-						if (eye) {
-							const px = d.getFloat32(vo + 16, true), py = d.getFloat32(vo + 20, true), pz = d.getFloat32(vo + 24, true);
-							// (held to the texture's edge, the white of the eye: wrapped
-							// round, its far side showed bits of iris again)
-							const clamp = (v: number) => Math.min(1, Math.max(0, v));
-							g.uv.push(clamp(eye[0][0] * px + eye[0][1] * py + eye[0][2] * pz + eye[0][3]), clamp(eye[1][0] * px + eye[1][1] * py + eye[1][2] * pz + eye[1][3]));
-							// (and its own, for its occlusion texture)
-							g.ownUv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
-						} else g.uv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
+						g.uv.push(d.getFloat32(vo + 40, true), d.getFloat32(vo + 44, true));
 						const nb = Math.min(3, d.getUint8(vo + 15));
 						for (let k = 0; k < 4; k++) {
 							g.si.push(k < nb ? d.getUint8(vo + 12 + k) : 0);
@@ -192,52 +200,36 @@ export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, co
 			materialCandidates: candidates(ref),
 			positions: new Float32Array(g.pos), normals: new Float32Array(g.nrm), colors: new Float32Array(g.col),
 			uv: new Float32Array(g.uv), meshVertex: new Uint32Array(g.mv),
-			// (an eye's own coordinates, where the uv are its projected iris)
-			...(g.ownUv.length === g.uv.length ? {lightUv: new Float32Array(g.ownUv)} : {}),
 			skinIndex: new Uint16Array(g.si), skinWeight: new Float32Array(g.sw),
+			...(g.eyeball ? {eyeball: g.eyeball} : {}),
 		});
 	}
 	if (!out.length) return null;
 	return {groups: out, min: hull(104), max: hull(116), meshes: meshList, checksum: m.getUint32(8, true), illumPosition: hull(92), bytes: mdl};
 }
 
-// Strip group headers are 25 bytes, or 33 in files with topology data
-// (newer branches). Pick the size whose second group has sane offsets.
-// An eyeball's iris projection (as R_StudioEyeballPosition, looking where
-// the eye points): rows mapping model-space positions to u and v, from the
-// eyeball (mstudioeyeball_t) brought out of its bone into the bind pose
-function eyeballProjection(m: DataView, model: number, index: number): number[][] | null {
+// An eyeball's numbers (mstudioeyeball_t), and the same brought out of its
+// bone into the reference pose
+function eyeballOf(m: DataView, model: number, index: number): Eyeball | null {
 	if (index < 0 || index >= m.getInt32(model + 100, true)) return null;
 	const e = model + m.getInt32(model + 104, true) + index * 172;
 	const f = (o: number) => m.getFloat32(e + o, true);
 	const bone = m.getInt32(e + 4, true);
-	if (bone < 0 || bone >= m.getInt32(156, true)) return null;
+	if (bone < 0 || bone >= m.getInt32(156, true) || !f(60)) return null;
 	// pose-to-bone (3x4) of the bone, inverted: bone space -> model space
 	const b = m.getInt32(160, true) + bone * 216 + 96;
 	const p = Array.from({length: 12}, (_, k) => m.getFloat32(b + k * 4, true));
 	const rot = (v: number[]) => [0, 1, 2].map(i => p[i] * v[0] + p[4 + i] * v[1] + p[8 + i] * v[2]);  // R^T v
-	const org = rot([f(8) - p[3], f(12) - p[7], f(16) - p[11]]);
-	const up0 = rot([f(28), f(32), f(36)]), fwd0 = rot([f(40), f(44), f(48)]).map(x => -x);
-	const norm = (v: number[]) => {
-		const l = Math.hypot(v[0], v[1], v[2]) || 1;
-		return v.map(x => x / l);
+	const org = [f(8), f(12), f(16)], up = [f(28), f(32), f(36)], forward = [f(40), f(44), f(48)];
+	return {
+		bone, org, up, forward,
+		bindOrg: rot([org[0] - p[3], org[1] - p[7], org[2] - p[11]]), bindUp: rot(up), bindForward: rot(forward),
+		zoffset: f(20), irisScale: f(60),
 	};
-	const cross = (a: number[], c: number[]) => [a[1] * c[2] - a[2] * c[1], a[2] * c[0] - a[0] * c[2], a[0] * c[1] - a[1] * c[0]];
-	let right = norm(cross(fwd0, up0));
-	const zoffset = f(20);
-	const fwd = norm(fwd0.map((x, i) => x + 2 * zoffset * right[i]));
-	right = norm(cross(fwd, up0));
-	const up = norm(cross(right, fwd));
-	const irisScale = f(60);
-	if (!irisScale) return null;
-	const scale = irisScale;  // 1 / (1 / iris_scale)
-	const row = (axis: number[]) => {
-		const r = axis.map(x => -x * scale);
-		return [r[0], r[1], r[2], -(r[0] * org[0] + r[1] * org[1] + r[2] * org[2]) + 0.5];
-	};
-	return [row(right), row(up)];
 }
 
+// Strip group headers are 25 bytes, or 33 in files with topology data
+// (newer branches). Pick the size whose second group has sane offsets.
 function guessStripGroupSize(x: DataView, bodyPartOffset: number): number {
 	try {
 		const vModel = bodyPartOffset + x.getInt32(bodyPartOffset + 4, true);
