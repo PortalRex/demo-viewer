@@ -2141,6 +2141,22 @@ export class View3D {
 		return [...seen.values()];
 	}
 
+	// where the other co-op players' eyes are at a tick (the recording's own
+	// view gives its player's), so raced runs compare player with player
+	otherEyes(tick: number): number[][] {
+		const ents = this.entities;
+		if (!ents) return [];
+		const out: number[][] = [];
+		for (const t of ents.tracks) {
+			if (t.className !== 'CPortal_Player' || t === ents.player) continue;
+			const k = keyAt(t, tick);
+			if (!k || k.removed) continue;
+			const o = this.entityPose(t, tick).origin;
+			out.push([o.x, o.y, o.z + (k.eyeZ ?? DEFAULT_EYE)]);
+		}
+		return out;
+	}
+
 	// The camera as a link keeps it: its mode, and where a free camera is
 	// and looks, or where an orbiting one sits from the player
 	cameraState(): CameraState {

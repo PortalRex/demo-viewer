@@ -14,15 +14,15 @@ function devGameFiles(): Plugin {
 		name: 'dev-game-files',
 		apply: 'serve',
 		configureServer(server) {
-			// debugging: POST a PNG data URL to /__shot?name=x to save it in fixtures/shots
+			// debugging: POST a data URL (PNG; ext=jpg or ext=mp4 for those) to /__shot?name=x to save it in fixtures/shots
 			server.middlewares.use('/__shot', (req, res) => {
 				const name = (/name=([\w/-]+)/.exec(req.url ?? '')?.[1]) ?? 'shot';
-				const ext = /ext=jpg/.test(req.url ?? '') ? 'jpg' : 'png';
+				const ext = /ext=(jpg|mp4)/.exec(req.url ?? '')?.[1] ?? 'png';
 				const parts: Buffer[] = [];
 				req.on('data', (c: Buffer) => parts.push(c));
 				req.on('end', () => {
 					mkdirSync(`fixtures/shots/${name}`.replace(/\/[^/]*$/, ''), {recursive: true});
-					const data = Buffer.concat(parts).toString().replace(/^data:image\/\w+;base64,/, '');
+					const data = Buffer.concat(parts).toString().replace(/^data:\w+\/[\w-]+;base64,/, '');
 					writeFileSync(`fixtures/shots/${name}.${ext}`, Buffer.from(data, 'base64'));
 					res.end('ok');
 				});

@@ -1,6 +1,7 @@
 import {loadRuns} from './core/load.ts';
 import {Playback, viewAt, cmdAt, lastAtOrBefore} from './player/playback.ts';
 import type {SegmentTrack, Located} from './player/playback.ts';
+import type {Segment} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
@@ -801,7 +802,7 @@ interface Racer {
 	path: boolean;   // its path drawn
 	row: HTMLElement;
 }
-const RACER_COLORS = ['#ff8c26', '#d45cff', '#3fd6c8', '#ffd84a', '#ff5c7a', '#7a9cff', '#9be34a', '#ff9ad5'];
+const RACER_COLORS = ['#ff8c26', '#4cb8ff', '#d45cff', '#3fd6c8', '#ffd84a', '#ff5c7a', '#9be34a', '#ff9ad5'];
 let racers: Racer[] = [];
 // a racer's segment for one of this run's: the one on the same map (the
 // same one of them, where a run visits a map more than once)
@@ -811,10 +812,30 @@ function racerTrack(r: Racer, loc: Located): SegmentTrack | null {
 	const visit = pb.tracks.slice(0, loc.index).filter(tr => tr.seg.map === map).length;
 	return r.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
 }
-// (a racer's tick as many seconds into its segment as this run is into its own)
+// where a segment's run finishes (the challenge mode flags, as the board's
+// runs record them) and how many ticks SAR's timer gave it, where known
+function finishOf(seg: Segment): {tick: number; ticks: number | null} | null {
+	let tick: number | null = null, ticks: number | null = null;
+	for (const e of seg.sar) {
+		if (e.kind === 'cmFlags' && ticks === null) tick = e.tick;
+		if (e.kind === 'speedrunTime') {
+			tick = e.tick;
+			ticks = e.splits.reduce((n, s) => n + s.segments.reduce((m, x) => m + x.ticks, 0), 0) || null;
+		}
+	}
+	return tick === null ? null : {tick, ticks};
+}
+// (a racer's tick as many seconds into its run as this one is into its own:
+// from where each run's timer started, the finish less its time (the other
+// run's where one has none, so their finishes meet), as each player's demo
+// of a co-op run starts recording at its own moment; else from where each
+// segment starts)
 function racerTick(loc: Located, track: SegmentTrack) {
-	const seconds = (loc.tick - loc.track.seg.firstTick) * loc.track.seg.intervalPerTick;
-	return track.seg.firstTick + seconds / track.seg.intervalPerTick;
+	const a = finishOf(loc.track.seg), b = finishOf(track.seg);
+	const startA = a && b ? a.tick - (a.ticks ?? b.ticks ?? 0) : loc.track.seg.firstTick;
+	const startB = a && b ? b.tick - (b.ticks ?? a.ticks ?? 0) : track.seg.firstTick;
+	const seconds = (loc.tick - startA) * loc.track.seg.intervalPerTick;
+	return startB + seconds / track.seg.intervalPerTick;
 }
 function racerAt(loc: Located, track: SegmentTrack): {origin: [number, number, number]; angles: [number, number, number]} | null {
 	const tick = racerTick(loc, track);
@@ -824,17 +845,18 @@ function racerAt(loc: Located, track: SegmentTrack): {origin: [number, number, n
 	return v && {origin: v.origin, angles: v.angles};
 }
 // seconds behind the racer (negative: ahead): when it was closest to where
-// this run's player is, within a few seconds of the same time
-function racerDelta(loc: Located, view: {origin: number[]} | null, track: SegmentTrack): number | null {
-	if (!view) return null;
+// this run's player is, within a few seconds of the same time; and how
+// close that came (squared)
+function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack): {delta: number; d2: number} | null {
+	if (!at) return null;
 	const views = track.seg.views;
-	const at = racerTick(loc, track);
+	const tick = racerTick(loc, track);
 	const window = 6 / track.seg.intervalPerTick;
-	let i = Math.max(0, lastAtOrBefore(views, at - window));
+	let i = Math.max(0, lastAtOrBefore(views, tick - window));
 	let best = -1, bestD = Infinity;
-	for (; i < views.length && views[i].tick <= at + window; i++) {
+	for (; i < views.length && views[i].tick <= tick + window; i++) {
 		const o = views[i].origin;
-		const d = (o[0] - view.origin[0]) ** 2 + (o[1] - view.origin[1]) ** 2 + (o[2] - view.origin[2]) ** 2;
+		const d = (o[0] - at[0]) ** 2 + (o[1] - at[1]) ** 2 + (o[2] - at[2]) ** 2;
 		if (d < bestD) {
 			bestD = d;
 			best = i;
@@ -842,18 +864,22 @@ function racerDelta(loc: Located, view: {origin: number[]} | null, track: Segmen
 	}
 	// (nowhere near: the routes went different ways)
 	if (best < 0 || bestD > 256 ** 2) return null;
-	return (at - views[best].tick) * track.seg.intervalPerTick;
+	return {delta: (tick - views[best].tick) * track.seg.intervalPerTick, d2: bestD};
 }
 // what the views draw of them, and each one's row (with its difference)
 function showRacers(loc: Located, view: {origin: number[]} | null) {
 	$('ghost-hud').hidden = !racers.length;
 	const marks: GhostSpec[] = [];
+	const others = racers.length ? view3d.otherEyes(loc.tick) : [];
 	for (const r of racers) {
 		const track = racerTrack(r, loc);
 		r.row.classList.toggle('away', !track);
 		if (!track) continue;
 		marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null});
-		const d = racerDelta(loc, view, track);
+		// (in co-op, against whichever of this run's players it follows: the
+		// recording one or their partner)
+		const d = [view?.origin ?? null, ...others].map(at => racerDelta(loc, at, track))
+			.reduce<{delta: number; d2: number} | null>((a, b) => !b || (a && a.d2 <= b.d2) ? a : b, null)?.delta ?? null;
 		const el = r.row.querySelector('.ghost-delta') as HTMLElement;
 		el.textContent = d === null ? '—' : `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d).toFixed(2)}`;
 		el.classList.toggle('behind', d !== null && d > 0.005);
@@ -867,7 +893,7 @@ function racerRow(r: Racer): HTMLElement {
 	const row = document.createElement('div');
 	row.className = 'ghost-row';
 	row.style.setProperty('--ghost', r.color);
-	row.title = `${r.name}: how far ahead (−) or behind (+) this run is, where it was at this spot`;
+	row.title = `${r.name} (${r.pb.run.fileName}): how far ahead (−) or behind (+) this run is, where it was at this spot`;
 	const name = document.createElement('div');
 	name.className = 'ghost-name';
 	name.textContent = r.name;
@@ -916,7 +942,8 @@ $<HTMLInputElement>('ghost-input').onchange = async e => {
 		if (!run.segments.some(s => maps.has(s.map) && s.views.length)) throw new Error('it has none of the maps this run plays.');
 		// (the first colour not taken)
 		const color = RACER_COLORS.find(c => !racers.some(r => r.color === c)) ?? RACER_COLORS[racers.length % RACER_COLORS.length];
-		const r: Racer = {pb: new Playback(run), name: run.fileName.replace(/\.[^.]+$/, ''), color, shown: true, path: false, row: null!};
+		// (named after its player, as the demo records them)
+		const r: Racer = {pb: new Playback(run), name: run.player || run.fileName.replace(/\.[^.]+$/, ''), color, shown: true, path: false, row: null!};
 		r.row = racerRow(r);
 		racers.push(r);
 		$('ghost-list').append(r.row);
@@ -994,6 +1021,31 @@ function drawCmHud(g: OffscreenCanvasRenderingContext2D, stats: {portals: number
 		g.fillText(value, x + bw - 9 * s, ty);
 	});
 }
+// the raced runs' rows, as the page shows them (each one's name in its
+// colour and how far ahead or behind this run is), top right
+function drawRacers(g: OffscreenCanvasRenderingContext2D, w: number, h: number) {
+	const s = h / 540;
+	let y = 16 * s;
+	for (const row of document.querySelectorAll<HTMLElement>('#ghost-list .ghost-row')) {
+		if (row.classList.contains('away')) continue;
+		const name = row.querySelector('.ghost-name')!.textContent ?? '';
+		const deltaEl = row.querySelector('.ghost-delta')!;
+		const color = row.style.getPropertyValue('--ghost');
+		const bw = 190 * s, bh = 46 * s, x = w - 16 * s - bw;
+		g.fillStyle = 'rgba(0, 0, 0, 0.55)';
+		g.fillRect(x, y, bw, bh);
+		g.fillStyle = color;
+		g.fillRect(x + bw - 3 * s, y, 3 * s, bh);
+		g.textAlign = 'right';
+		g.textBaseline = 'alphabetic';
+		g.font = `400 ${13 * s}px Arial, Helvetica, sans-serif`;
+		g.fillText(name, x + bw - 13 * s, y + 17 * s, bw - 20 * s);
+		g.fillStyle = deltaEl.classList.contains('ahead') ? '#47c17b' : deltaEl.classList.contains('behind') ? '#ff5d5d' : '#fff';
+		g.font = `700 ${20 * s}px Arial, Helvetica, sans-serif`;
+		g.fillText(deltaEl.textContent ?? '', x + bw - 13 * s, y + 39 * s);
+		y += bh + 6 * s;
+	}
+}
 $('export-go').onclick = async () => {
 	if (!pb || exporting) return;
 	const range = ($('export-range') as HTMLSelectElement).value;
@@ -1039,6 +1091,7 @@ $('export-go').onclick = async () => {
 				}
 				const stats = view3d.mode === 'eyes' && cmShown ? view3d.cmStats(loc.tick) : null;
 				if (stats) drawCmHud(g, stats, width, height);
+				if (racers.length) drawRacers(g, width, height);
 				return out;
 			},
 			progress: done => {
