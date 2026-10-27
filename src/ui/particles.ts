@@ -156,6 +156,26 @@ export function settleTime(def: ParticleSystemDef, lib: ParticleLibrary, most: n
 	return Math.min(most, longest + 0.1);
 }
 
+// The initializers the engine runs as a second tier, after all the rest
+// (their InitMultipleOverride: they modify what the first tier set, so a
+// remap scaling a radius listed before the random radius still scales it)
+const MODIFIERS = new Set([
+	'position modify offset random', 'position modify place on ground', 'position modify warp random', 'velocity random',
+	'velocity noise', 'vector component random', 'sequence from control point', 'remap initial scalar',
+	'remap particle count to scalar', 'velocity inherit from control point', 'velocity set from control point',
+	'lifetime pre-age noise', 'lifetime from sequence', 'remap scalar to vector', 'offset vector to vector',
+	'velocity repulse from world', 'rotation yaw flip random', 'remap control point to scalar', 'remap control point to vector',
+	'inherit initial value from parent particle', 'remap initial distance to control point to scalar',
+	'lifetime from time to impact', 'normal modify offset random', 'remap speed to scalar',
+]);
+function isModifier(o: ParticleOperator): boolean {
+	if (MODIFIERS.has(o.fn)) return true;
+	// (these two only when they move what's already placed)
+	if (o.fn === 'position in epitrochoid') return !!num(o, 'offset from existing position', 0);
+	if (o.fn === 'move particles between 2 control points') return !!num(o, 'bias lifetime by trail length', 0);
+	return false;
+}
+
 // ---- particles ----
 
 // particle fields as the operators address them
@@ -282,7 +302,8 @@ export class ParticleInstance {
 	// the parent particle each "inherit attribute from parent particle" reads
 	// next: it carries on from step to step
 	private inheritNext = new Map<ParticleOperator, number>();
-	// initializers that read a particle's position run after those that set it
+	// the initializers in the engine's order: those that set a value first,
+	// then those that modify one (see isModifier)
 	private initOrder: ParticleOperator[];
 	// "restart effect after duration": when the emitters next fire again,
 	// and the time their start times count from
@@ -296,8 +317,7 @@ export class ParticleInstance {
 		const rng: Rng = {a: seed >>> 0};
 		this.rng = rng;
 		this.rand = () => nextRandom(rng);
-		const late = (o: ParticleOperator) => o.fn.startsWith('position modify') || o.fn === 'remap initial distance to control point to scalar';
-		this.initOrder = [...def.initializers.filter(o => !late(o)), ...def.initializers.filter(late)];
+		this.initOrder = [...def.initializers.filter(o => !isModifier(o)), ...def.initializers.filter(isModifier)];
 		if (depth < 4) {
 			def.children.forEach((c, i) => {
 				const d = lib.get(c.name);
