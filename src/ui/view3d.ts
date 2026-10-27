@@ -47,8 +47,8 @@ const VIEW_NEARZ = 7;
 // normals from screen derivatives), floors, walls and ceilings in their own
 // greys with a 64 unit grid on them (as dev textures), lit from above,
 // dimmer with distance; drawn at a fixed brightness whatever the exposure
-const simpleMaterial = new THREE.ShaderMaterial({
-	uniforms: {sceneExposure: exposureUniforms.sceneExposure},
+const simpleShader = (tint: number) => new THREE.ShaderMaterial({
+	uniforms: {sceneExposure: exposureUniforms.sceneExposure, tint: {value: new THREE.Color(tint)}},
 	side: THREE.DoubleSide,
 	clipping: true,
 	vertexShader: `
@@ -71,13 +71,14 @@ const simpleMaterial = new THREE.ShaderMaterial({
 	fragmentShader: `
 		#include <clipping_planes_pars_fragment>
 		uniform float sceneExposure;
+		uniform vec3 tint;
 		varying vec3 vWorld;
 		void main() {
 			#include <clipping_planes_fragment>
 			vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
 			vec3 toEye = cameraPosition - vWorld;
 			if (dot(n, toEye) < 0.0) n = -n;
-			vec3 base = n.z > 0.7 ? vec3(0.40, 0.41, 0.43) : n.z < -0.7 ? vec3(0.30) : vec3(0.58, 0.58, 0.57);
+			vec3 base = (n.z > 0.7 ? vec3(0.40, 0.41, 0.43) : n.z < -0.7 ? vec3(0.30) : vec3(0.58, 0.58, 0.57)) * tint;
 			float light = 0.55 + 0.3 * max(dot(n, normalize(vec3(0.35, 0.25, 1.0))), 0.0) + 0.15 * abs(n.x);
 			// (the grid on the plane the surface faces most, its lines a pixel or so wide)
 			vec3 a = abs(n);
@@ -88,6 +89,9 @@ const simpleMaterial = new THREE.ShaderMaterial({
 			gl_FragColor = vec4(pow(c, vec3(2.2)) / max(sceneExposure, 1e-3), 1.0);
 		}`,
 });
+const simpleMaterial = simpleShader(0xffffff);
+// players in the simple view: a cylinder each, in their team's colour
+const SIMPLE_PLAYER = new THREE.CylinderGeometry(16, 16, 72, 20).rotateX(Math.PI / 2).translate(0, 0, 36);
 const PIP_SCALE = 0.3, PIP_INSET = 25 / 720;  // ss_pipscale, ss_pip_right/bottom_offset (at autorender's 720p)
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 // The view model's field of view: Portal's client mode takes cl_viewmodelfov
@@ -1889,6 +1893,11 @@ export class View3D {
 	}
 
 	private clearEntities() {
+		for (const body of this.simplePlayers.values()) {
+			this.scene.remove(body);
+			(body.material as THREE.Material).dispose();
+		}
+		this.simplePlayers.clear();
 		this.particleRuns.clear();
 		this.particlesShown = [];
 		this.fpParticlesShown = [];
@@ -4859,11 +4868,35 @@ export class View3D {
 		hide(this.fpParticleRenderer?.group);
 		hide(this.sprites?.group);
 		this.ownMaterial.length = 0;
+		// players (and the guns they carry, the first-person one too) as
+		// plain cylinders, as tall as they stand or crouch; not the one the
+		// camera looks out of
+		hide(this.vmShown);
+		const ents = this.entities, tick = this.meterTick;
+		for (const t of ents?.tracks ?? []) {
+			if (t.className !== 'CPortal_Player' && t.className !== 'CWeaponPortalgun') continue;
+			hide(this.objects.get(t));
+			const k = t.className === 'CPortal_Player' ? keyAt(t, tick) : undefined;
+			if (!k || k.removed || (this.mode === 'eyes' && t === this.followTrack && !this.pip?.taunt)) continue;
+			let body = this.simplePlayers.get(t);
+			if (!body) {
+				const team = Number(k.extra?.m_iTeamNum ?? 0);
+				body = new THREE.Mesh(SIMPLE_PLAYER, simpleShader(team === 2 ? 0xffa060 : 0x80b8ff));
+				body.frustumCulled = false;
+				this.simplePlayers.set(t, body);
+				this.scene.add(body);
+			}
+			body.position.copy(this.entityPose(t, tick).origin);
+			body.scale.set(1, 1, ((k.eyeZ ?? DEFAULT_EYE) + 8) / 72);
+			body.visible = true;
+			this.ownMaterial.push(body);
+		}
 		for (const root of [this.scene, this.vmScene]) {
 			root.traverse(o => {
 				const m = o as THREE.Mesh;
 				if (!m.isMesh || !m.visible) return;
 				if (m.userData.portal) this.ownMaterial.push(m);
+				else if (m.geometry === SIMPLE_PLAYER) return;
 				else if ([m.material].flat().every(x => x.transparent || x.blending === THREE.AdditiveBlending)) {
 					hide(m);
 					let e: THREE.Object3D | null = m;
@@ -4878,10 +4911,12 @@ export class View3D {
 		} finally {
 			this.scene.overrideMaterial = this.vmScene.overrideMaterial = null;
 			for (const o of hidden) o.visible = true;
+			for (const body of this.simplePlayers.values()) body.visible = false;
 			this.ownMaterial.length = 0;
 		}
 	}
 	private ownMaterial: THREE.Mesh[] = [];
+	private simplePlayers = new Map<EntityTrack, THREE.Mesh>();
 
 	// (simple view: the portals over their grey stand-ins and the entities'
 	// see-through effects, as themselves)
