@@ -29,7 +29,6 @@ import {Ropes, type RopeSpec} from './ropes.ts';
 import {MovieScreens, type ScreenSpec} from './movies.ts';
 import {ProgressSigns} from './signs.ts';
 import {Sprites, type SpriteSpec, type BeamSpec} from './sprites.ts';
-import {SimpleScene, type SimpleBox, type SimplePlayer} from './simplescene.ts';
 import type {EntityTimeline, EntityTrack, EntityKey} from '../net/entities.ts';
 import {keyAt, keyIndexAt, type ScreenFade, type HudMessage} from '../net/entities.ts';
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
@@ -43,7 +42,6 @@ export type CameraMode = 'eyes' | 'orbit' | 'free';
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
 const VIEW_NEARZ = 7;
-
 const PIP_SCALE = 0.3, PIP_INSET = 25 / 720;  // ss_pipscale, ss_pip_right/bottom_offset (at autorender's 720p)
 const PORTAL_HALF_W = 32, PORTAL_HALF_H = 56;
 // The view model's field of view: Portal's client mode takes cl_viewmodelfov
@@ -71,38 +69,6 @@ const HIDDEN_CLASSES = new Set([
 
 // effects placed in world space from their props, not the entity's transform
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
-
-// the simple view (see SimpleScene): what isn't drawn as a box, and the
-// boxes' colours
-const SIMPLE_SKIP = new Set(['CWeaponPortalgun', 'CPredictedViewModel', 'CBaseViewModel', 'CTriggerPortalCleanser', 'CFuncAreaPortalWindow', 'CSprite', 'CParticleSystem',
-	'CEnvProjectedTexture', 'CPointCamera', 'CFogController', 'CRopeKeyframe', 'CInfoOverlayAccessor', 'CEntityFlame', 'CVGuiScreen', 'CMovieDisplay', 'CBeamSpotlight']);
-const SIMPLE_OWN = new Set(['CProp_Portal', 'CTriggerPortalCleanser']);
-const SIMPLE_BACKGROUND = new THREE.Color(0x16181c);
-const SIMPLE_PROP = new THREE.Color(0xc8c8c0), SIMPLE_BRUSH = new THREE.Color(0xa8acb0);
-const SIMPLE_COLORS: Record<string, THREE.Color> = {
-	CPropWeightedCube: new THREE.Color(0x9cc4ff), CPhysicsProp: new THREE.Color(0xb8c8d8), CPhysicsPropMultiplayer: new THREE.Color(0xb8c8d8),
-	CNPC_Portal_FloorTurret: new THREE.Color(0xff9a9a), CPropFloorButton: new THREE.Color(0xff7a6a), CPropFloorCubeButton: new THREE.Color(0xff7a6a),
-	CPropFloorBallButton: new THREE.Color(0xff7a6a), CPropButton: new THREE.Color(0xff7a6a), CPropUnderFloorButton: new THREE.Color(0xff7a6a),
-	CPropUnderButton: new THREE.Color(0xff7a6a), CPortalLaserCatcher: new THREE.Color(0xffb070), CPropLaserCatcher: new THREE.Color(0xffb070),
-	CPropLaserRelay: new THREE.Color(0xffb070), CPropPaintBomb: new THREE.Color(0x9cff9c),
-};
-// a model's bounds: its hull, or (with none) its geometry's
-function modelBounds(a: ModelAsset): {min: number[]; max: number[]} {
-	const {min, max} = a.model;
-	if (max[0] - min[0] > 1 && max[1] - min[1] > 1 && max[2] - min[2] > 1) return {min, max};
-	const box = new THREE.Box3();
-	for (const part of a.parts) {
-		part.raw.computeBoundingBox();
-		if (part.raw.boundingBox) box.union(part.raw.boundingBox);
-	}
-	return box.isEmpty() ? {min, max} : {min: box.min.toArray(), max: box.max.toArray()};
-}
-// the unit box to bounds placed by a matrix
-function boxMatrix(b: {min: number[]; max: number[]}, place: THREE.Matrix4): THREE.Matrix4 {
-	const size = [0, 1, 2].map(i => Math.max(1, b.max[i] - b.min[i]));
-	const centre = [0, 1, 2].map(i => (b.max[i] + b.min[i]) / 2);
-	return place.clone().multiply(new THREE.Matrix4().makeTranslation(centre[0], centre[1], centre[2])).multiply(new THREE.Matrix4().makeScale(size[0], size[1], size[2]));
-}
 const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
 const toEuler = (a: Vec3) => new THREE.Euler(a[2] * Math.PI / 180, a[0] * Math.PI / 180, a[1] * Math.PI / 180, 'ZYX');
@@ -1122,9 +1088,6 @@ export class View3D {
 		this.accessedOverlays.clear();
 		this.particleRenderer?.dispose();
 		this.fpParticleRenderer?.dispose();
-		this.simpleScene.dispose();
-		for (const rt of this.simpleTargets.values()) rt.dispose();
-		this.simpleTargets.clear();
 		const token = ++this.mapToken;
 		if (!bsp || !files || !materials) {
 			// (no map: nothing to carry over)
@@ -1980,7 +1943,6 @@ export class View3D {
 			surface.position.x = 0.6;
 			group.add(surface);
 			group.userData.portalSurface = surface;
-			surface.userData.portal = true;
 			return group;
 		}
 		if (t.className === 'CPortalLaser') {
@@ -4185,9 +4147,7 @@ export class View3D {
 	private frameNumber = 0;
 	update(view: ViewState | null, tick: number) {
 		// (the partner's view first, so what's left set up is the main view's)
-		const simple = this.simple;
-		if (simple) this.pipShown = false;
-		else if (!this.pip) this.pipShown = this.updatePip(view, tick);
+		if (!this.pip) this.pipShown = this.updatePip(view, tick);
 		this.meterTick = tick;
 		this.frameNumber++;
 		this.seenCache.clear();
@@ -4199,7 +4159,7 @@ export class View3D {
 			for (const m of this.fizzlers.values()) m.uniforms.time.value = time;
 			waterUniforms.waterTime.value = time;
 			this.paint?.seek(tick);
-			if (!simple) this.updateLightStyles(tick);
+			this.updateLightStyles(tick);
 			// what players hold: the server hides it from its holder (the game
 			// draws a copy in front of the view instead), so it's shown here
 			for (const o of this.windowed) o.visible = tick >= o.userData.window[0] && tick < o.userData.window[1];
@@ -4218,13 +4178,6 @@ export class View3D {
 					continue;
 				}
 				if (this.frozen.has(t)) continue;  // (drawn with the static props)
-				// (the simple view draws only portals and effects as themselves;
-				// the rest are its boxes)
-				if (simple && !SIMPLE_OWN.has(t.className) && !WORLD_SPACE.has(t.className)) {
-					const o = this.objects.get(t);
-					if (o) o.visible = false;
-					continue;
-				}
 				const show = !!k && (this.shows(t, k) || (held.has(t) && t.model.endsWith('.mdl')));
 				const o = show ? this.objectFor(t, k?.skin ?? 0, Number(k?.extra?.m_nBody ?? 0), k?.model ?? t.model) : this.objects.get(t);
 				if (!o) continue;
@@ -4281,13 +4234,11 @@ export class View3D {
 		let ambient: [number, number, number] = [this.extraAmbient, this.extraAmbient, this.extraAmbient];
 		for (const a of this.ambientLight) if (a.tick <= tick) ambient = a.rgb;
 		modelAmbientUniforms.modelAmbient.value.set(...ambient);
-		if (ents && !simple) this.placeAttached(tick);
+		if (ents) this.placeAttached(tick);
 		if (ents) this.updateTurretLasers(tick);
-		if (ents && !simple) {
-			this.updatePaintBlobs(tick);
-			this.updateRopes(tick);
-			this.updateMovies(tick);
-		}
+		if (ents) this.updatePaintBlobs(tick);
+		if (ents) this.updateRopes(tick);
+		if (ents) this.updateMovies(tick);
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
@@ -4339,13 +4290,11 @@ export class View3D {
 		}
 		// after the camera: the view model and what the recording player
 		// holds follow this frame's view
-		if (!simple) {
-			this.updateViewModel(tick);
-			if (ents) this.placeHeld(tick);
-			this.updateParticles(tick);
-			this.updateFlashlight(tick);
-			this.lightModels();
-		}
+		this.updateViewModel(tick);
+		if (ents) this.placeHeld(tick);
+		this.updateParticles(tick);
+		this.updateFlashlight(tick);
+		this.lightModels();
 		this.render();
 	}
 
@@ -4842,138 +4791,7 @@ export class View3D {
 	private compositeScene = new THREE.Scene().add(Object.assign(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.composite), {frustumCulled: false}));
 	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-	// the simple view (see SimpleScene)
-	simple = false;
 	render() {
-		if (this.simple) this.renderSimple();
-		else this.renderFrame();
-	}
-
-	private simpleScene = new SimpleScene();
-	private simpleBuilding = -1;
-	private simpleTargets = new Map<THREE.Object3D, THREE.WebGLRenderTarget>();
-	private simplePortalCam = new THREE.PerspectiveCamera();
-
-	// the world merged and the static props' boxes, once a map (the props
-	// as their models load)
-	private buildSimple() {
-		const token = this.mapToken, bsp = this.bsp;
-		if (!bsp || this.simpleScene.built === token || this.simpleBuilding === token) return;
-		const meshes: THREE.Mesh[] = [];
-		this.mapGroup.traverse(o => {
-			const m = o as THREE.Mesh;
-			if (m.isMesh && m.name.startsWith('brush ')) meshes.push(m);
-		});
-		if (!meshes.length) return;
-		this.simpleBuilding = token;
-		this.simpleScene.setWorld(meshes, token);
-		Promise.all(bsp.staticProps.map(p => this.model(p.model, p.skin).then(a =>
-			a ? boxMatrix(modelBounds(a), new THREE.Matrix4().compose(new THREE.Vector3(...p.origin), new THREE.Quaternion().setFromEuler(toEuler(p.angles)), new THREE.Vector3(1, 1, 1))) : null,
-		))).then(list => {
-			if (token !== this.mapToken) return;
-			this.simpleScene.setProps(list.filter((m): m is THREE.Matrix4 => !!m));
-			this.onLoaded();
-		});
-	}
-
-	// everything that moves, as boxes from its bounds; players as cylinders
-	private placeSimple(tick: number) {
-		const boxes: SimpleBox[] = [], players: SimplePlayer[] = [];
-		for (const t of this.entities?.tracks ?? []) {
-			const k = keyAt(t, tick);
-			if (!k || k.removed || !(k.visible || (k.dormant && !k.nodraw))) continue;
-			if (t.className === 'CPortal_Player') {
-				if (this.mode === 'eyes' && t === this.followTrack && !this.pip?.taunt) continue;
-				players.push({position: this.entityPose(t, tick).origin, height: (k.eyeZ ?? DEFAULT_EYE) + 8, orange: Number(k.extra?.m_iTeamNum ?? 0) === 2});
-				continue;
-			}
-			if (SIMPLE_SKIP.has(t.className) || WORLD_SPACE.has(t.className) || t.className === 'CProp_Portal') continue;
-			if (!t.model.endsWith('.mdl') && !t.model.startsWith('*')) continue;
-			if (t.model.endsWith('.mdl') && !this.shows(t, k)) continue;
-			if (Math.max(t.maxs[0] - t.mins[0], t.maxs[1] - t.mins[1], t.maxs[2] - t.mins[2]) < 2) continue;
-			const place = this.worldMatrix(t, k, tick, 0);
-			if (!place) continue;
-			boxes.push({
-				matrix: boxMatrix({min: t.mins, max: t.maxs}, place),
-				color: SIMPLE_COLORS[t.className] ?? (t.model.startsWith('*') ? SIMPLE_BRUSH : SIMPLE_PROP),
-			});
-		}
-		this.simpleScene.setBoxes(boxes);
-		this.simpleScene.setPlayers(players);
-	}
-
-	// The simple view's frame: straight to the screen, no exposure, bloom or
-	// post passes; the portals' views are the simple scene too (at half size)
-	private renderSimple() {
-		const r = this.renderer;
-		if (!r) return;
-		const near = this.mode === 'eyes' ? VIEW_NEARZ : 1;
-		if (this.camera.near !== near) {
-			this.camera.near = near;
-			this.camera.updateProjectionMatrix();
-		}
-		this.camera.updateMatrixWorld();
-		this.buildSimple();
-		this.placeSimple(this.meterTick);
-		exposureUniforms.sceneExposure.value = 1;
-		const scene = this.simpleScene.scene, size = r.getDrawingBufferSize(new THREE.Vector2());
-		const seen = new Set<THREE.Object3D>();
-		for (const p of this.portals.values()) {
-			const material = (p.obj.userData.portalSurface as THREE.Mesh | undefined)?.material as THREE.ShaderMaterial | undefined;
-			if (!material) continue;
-			material.uniforms.exposure.value = 1;
-			const linked = this.portals.get(p.link);
-			if (!linked || !p.obj.visible) {
-				material.uniforms.hasView.value = 0;
-				continue;
-			}
-			const w = Math.max(1, size.x >> 1), h = Math.max(1, size.y >> 1);
-			let rt = this.simpleTargets.get(p.obj);
-			if (!rt) this.simpleTargets.set(p.obj, rt = new THREE.WebGLRenderTarget(w, h));
-			else if (rt.width !== w || rt.height !== h) rt.setSize(w, h);
-			seen.add(p.obj);
-			p.obj.updateMatrixWorld(true);
-			linked.obj.updateMatrixWorld(true);
-			const cam = this.simplePortalCam;
-			cam.fov = this.camera.fov;
-			cam.aspect = this.camera.aspect;
-			cam.far = this.camera.far;
-			cam.near = 1;
-			cam.updateProjectionMatrix();
-			this.portalTransform(p.obj, linked.obj).multiply(this.camera.matrixWorld).decompose(cam.position, cam.quaternion, cam.scale);
-			cam.updateMatrixWorld(true);
-			const normal = new THREE.Vector3(1, 0, 0).transformDirection(linked.obj.matrixWorld);
-			const at = new THREE.Vector3().setFromMatrixPosition(linked.obj.matrixWorld);
-			r.clippingPlanes = [new THREE.Plane(normal, -normal.dot(at) - 0.25)];
-			r.setRenderTarget(rt);
-			r.setClearColor(SIMPLE_BACKGROUND);
-			r.clear();
-			r.render(scene, cam);
-			material.uniforms.view.value = rt.texture;
-			material.uniforms.hasView.value = 1;
-			material.uniforms.resolution.value.copy(size);
-		}
-		for (const [o, rt] of this.simpleTargets) {
-			if (seen.has(o)) continue;
-			rt.dispose();
-			this.simpleTargets.delete(o);
-		}
-		r.clippingPlanes = [];
-		r.setRenderTarget(null);
-		r.setClearColor(SIMPLE_BACKGROUND);
-		r.clear();
-		r.render(scene, this.camera);
-		// portals, light bridges, funnels, lasers and fizzlers as themselves
-		const auto = r.autoClear;
-		r.autoClear = false;
-		for (const [t, o] of this.objects) {
-			if (o.visible && (WORLD_SPACE.has(t.className) || t.className === 'CProp_Portal' || t.className === 'CTriggerPortalCleanser')) r.render(o, this.camera);
-		}
-		for (const laser of this.turretLasers.values()) if (laser.group.visible) r.render(laser.group, this.camera);
-		r.autoClear = auto;
-	}
-
-	private renderFrame() {
 		const r = this.renderer;
 		if (!r) return;
 		// orbit: the camera stays on the player's side of walls, as a game's

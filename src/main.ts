@@ -453,22 +453,6 @@ $('pip-toggle').onclick = () => {
 	view3d.pipEnabled = pipShown;
 	render();
 };
-// the 3D view as plain geometry (View3D.simple); remembered per browser
-let simpleShown = false;
-try {
-	simpleShown = localStorage.getItem('simpleView') === 'on';
-} catch {}
-view3d.simple = simpleShown;
-$('simple-toggle').classList.toggle('on', simpleShown);
-$('simple-toggle').onclick = () => {
-	simpleShown = !simpleShown;
-	try {
-		localStorage.setItem('simpleView', simpleShown ? 'on' : 'off');
-	} catch {}
-	$('simple-toggle').classList.toggle('on', simpleShown);
-	view3d.simple = simpleShown;
-	render();
-};
 let hudText: HudText | null = null;
 function showHudText(tick: number) {
 	const hud = viewMode === '3d' ? view3d.hudMessages() : null;
@@ -631,7 +615,6 @@ $('view-mode').onclick = e => {
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
 	$('path-line').hidden = !is3d;
-	$('simple-toggle').hidden = !is3d;
 	if (is3d) load3dMap();
 	else pathView.setMode(viewMode as 'top' | 'side');
 	render();
