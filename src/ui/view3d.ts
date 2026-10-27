@@ -1044,7 +1044,7 @@ export class View3D {
 		const token = ++this.precompileToken;
 		// (for the HDR frame, which is what scenes are drawn into: made now if
 		// nothing's been drawn yet, sized when it is)
-		this.frame ??= new THREE.WebGLRenderTarget(1, 1, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: this.quality.samples});
+		this.frame ??= this.hdrFrame(1, 1);
 		type Step = () => void;
 		const steps: Step[] = [];
 		// (three takes the plane count from the last render: an empty one
@@ -5557,6 +5557,17 @@ export class View3D {
 		afterFrame();
 	}
 
+	// The HDR frame scenes are drawn into. Antialiased, only its colour is
+	// resolved after each draw: nothing reads its depth or stencil after, and
+	// resolving those (a shader pass on Direct3D) took most of the frame's
+	// GPU time (3.4 of 4.1 ms at 1080p)
+	private hdrFrame(width: number, height: number): THREE.WebGLRenderTarget {
+		const frame = new THREE.WebGLRenderTarget(width, height, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: this.quality.samples});
+		frame.resolveDepthBuffer = false;
+		frame.resolveStencilBuffer = false;
+		return frame;
+	}
+
 	private renderFrame() {
 		const r = this.renderer;
 		if (!r) return;
@@ -5578,7 +5589,7 @@ export class View3D {
 		if (this.pip) size.set(Math.max(1, Math.round(size.x * PIP_SCALE)), Math.max(1, Math.round(size.y * PIP_SCALE)));
 		let frame = this.pip ? this.pipFrame : this.frame;
 		if (!frame) {
-			frame = new THREE.WebGLRenderTarget(size.x, size.y, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: this.quality.samples});
+			frame = this.hdrFrame(size.x, size.y);
 			if (this.pip) this.pipFrame = frame;
 			else this.frame = frame;
 		} else if (frame.width !== size.x || frame.height !== size.y) frame.setSize(size.x, size.y);
