@@ -1050,6 +1050,8 @@ async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frame
 	view3d.setCaptureSize([width, height]);
 	// (effects animate by the recording's time, not by how fast frames are drawn)
 	view3d.clock = () => t * track.seg.intervalPerTick;
+	// (the route line is the page's, not the game's: left out of reference shots)
+	view3d.setPathShown(false);
 	try {
 		progress('Getting the first frame ready…', 0);
 		await exportSettle(from);
@@ -1078,6 +1080,7 @@ async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frame
 	} finally {
 		view3d.setCaptureSize(null);
 		view3d.clock = null;
+		view3d.setPathShown(pathShown);
 		render();
 	}
 }

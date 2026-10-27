@@ -110,6 +110,10 @@ class MaterialBuilder:
         self.images = images  # texture id -> bpy image (or None)
         self.scale = scale
         self.cache = {}
+        # the projected light (env_projectedtexture), when there is one: the
+        # opaque materials take it as a real light (see Importer.flash)
+        self.flash = False
+        self._flash_albedo = None
 
     def get(self, mid, cube=None):
         key = (mid, cube)
@@ -130,7 +134,7 @@ class MaterialBuilder:
             color = g.env(img, view)
         else:
             color = g.vec(0, 0, 0)
-        emit = g.node('ShaderNodeEmission', {'Color': color, 'Strength': 1.0}).outputs[0]
+        emit = g.node('ShaderNodeEmission', {'Color': color, 'Strength': self.seen(g)}).outputs[0]
         if sky.get('skybox'):
             hole = g.node('ShaderNodeHoldout').outputs[0]
             in_sky = g.attr('p2_sky', kind='INSTANCER', out='Fac')
@@ -140,6 +144,15 @@ class MaterialBuilder:
         g.link(shader, g.out().inputs['Surface'])
 
     # ---- shared pieces ----
+
+    def seen(self, g):
+        """How strongly a surface's colour shows: fully to the camera (and
+        through glass and portals, which keep the ray a camera ray). With the
+        projected light there are diffuse surfaces, and nothing but that light
+        may light them: emission isn't a light here."""
+        if not self.flash:
+            return 1.0
+        return g.node('ShaderNodeLightPath').outputs['Is Camera Ray']
 
     def tex(self, g, tid, uv='UVMap', ext='REPEAT'):
         img = self.images.get(tid) if tid is not None else None
@@ -210,7 +223,12 @@ class MaterialBuilder:
             alpha = g.mul(alpha, opacity)
         elif alpha is None and opacity != 1.0:
             alpha = g.value(opacity)
-        emit = g.node('ShaderNodeEmission', {'Color': color, 'Strength': 1.0}).outputs[0]
+        emit = g.node('ShaderNodeEmission', {'Color': color, 'Strength': self.seen(g)}).outputs[0]
+        if self.flash and self._flash_albedo is not None and blend in ('opaque', 'clip'):
+            # (the projected light, as the viewer adds it: albedo x 1.5 x its
+            # light; the 1.5 is in the light)
+            diffuse = g.node('ShaderNodeBsdfDiffuse', {'Color': self._flash_albedo}).outputs[0]
+            emit = g.node('ShaderNodeAddShader', {0: emit, 1: diffuse}).outputs[0]
         shader = emit
         transparent = False
         if blend == 'clip' and alpha is not None:
@@ -224,7 +242,7 @@ class MaterialBuilder:
             transparent = True
         elif blend == 'add':
             c = g.vscale(color, alpha) if alpha is not None else color
-            emit = g.node('ShaderNodeEmission', {'Color': c, 'Strength': 1.0}).outputs[0]
+            emit = g.node('ShaderNodeEmission', {'Color': c, 'Strength': self.seen(g)}).outputs[0]
             clear = g.node('ShaderNodeBsdfTransparent').outputs[0]
             shader = g.node('ShaderNodeAddShader', {0: clear, 1: emit}).outputs[0]
             transparent = True
@@ -242,12 +260,23 @@ class MaterialBuilder:
             behind = g.node('ShaderNodeBsdfTransparent', {'Color': g.splat(g.sub(1.0, alpha)) if alpha is not None else (0, 0, 0)}).outputs[0]
             shader = g.node('ShaderNodeAddShader', {0: behind, 1: emit}).outputs[0]
             transparent = True
+        # one-sided faces: Cycles ignores backface culling, so their backs are
+        # left clear. And shadows from the projected light are cast as the
+        # viewer's light-facing depth pass draws them: by faces that face the
+        # light, i.e. those a shadow ray (towards the light) meets from behind
+        # (alpha-tested double-sided ones cast either way, by their alpha)
+        back = g.geometry().outputs['Backfacing']
+        front = g.sub(1.0, back)
+        shadow_ray = g.node('ShaderNodeLightPath').outputs['Is Shadow Ray'] if self.flash else None
+        clear_t = None
         if desc.get('side') == 'front':
-            # (Cycles ignores backface culling: the backs are left clear)
-            back = g.geometry().outputs['Backfacing']
-            clear = g.node('ShaderNodeBsdfTransparent').outputs[0]
-            shader = g.node('ShaderNodeMixShader', {0: back, 1: shader, 2: clear}).outputs[0]
+            clear_t = g.mixf(back, front, shadow_ray) if shadow_ray is not None else back
             mat.use_backface_culling = True
+        elif shadow_ray is not None and blend != 'clip':
+            clear_t = g.mul(shadow_ray, front)
+        if clear_t is not None:
+            clear = g.node('ShaderNodeBsdfTransparent').outputs[0]
+            shader = g.node('ShaderNodeMixShader', {0: clear_t, 1: shader, 2: clear}).outputs[0]
         g.link(shader, g.out().inputs['Surface'])
         mat.surface_render_method = 'BLENDED' if transparent and blend not in ('clip',) else 'DITHERED'
         mat.use_transparency_overlap = True
@@ -262,6 +291,12 @@ class MaterialBuilder:
         kind = desc['kind']
         mat = bpy.data.materials.new(f"p2_{desc['id']}_{desc.get('shader', kind).split(':')[0]}")
         mat.use_nodes = True
+        # (emission here is what's seen, not a light: nothing is lit by it)
+        try:
+            mat.cycles.emission_sampling = 'NONE'
+        except AttributeError:
+            pass
+        self._flash_albedo = None
         mat.node_tree.nodes.clear()
         g = Graph(mat.node_tree)
         if kind == 'skymask':
@@ -347,6 +382,8 @@ class MaterialBuilder:
                     albedo = g.vmix(albedo, g.vmul(albedo, dc), k)
         # the light: the light map (or vrad's three bumped ones, by the normal map)
         lm, _ = self.tex(g, desc.get('lightmap'), 'Lightmap', 'EXTEND')
+        if lm is not None:
+            self._flash_albedo = albedo
         bump_alpha = None
         if lm is not None:
             bump = desc.get('bump')
@@ -408,6 +445,7 @@ class MaterialBuilder:
             ec, _ = self.tex(g, phong['expMap'])
             if ec is not None:
                 exponent = g.add(1.0, g.mul(149.0, g.xyz(ec)[0]))
+        self._flash_albedo = albedo
         lit = g.group(model_light_group(self.scale), {'Exponent': exponent})
         amb = lit.outputs['Light']
         color = g.vscale(g.vmul(albedo, amb), scale)
@@ -448,6 +486,8 @@ class MaterialBuilder:
         col = desc.get('color', (1, 1, 1))
         if base is not None:
             color = g.vadd(color, g.vmul(g.vmul(base, col), glob.outputs['Ambient']))
+            # (its colour holds the 1.5 the projected light carries itself)
+            self._flash_albedo = g.vmul(base, [c / 1.5 for c in col])
         si = desc.get('selfIllum')
         if si and base is not None:
             glow = None

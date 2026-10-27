@@ -11,7 +11,7 @@ import type {GameFiles} from '../game/files.ts';
 import {vtfLevel, vtfMips, decodeVtf, readVtfCube, VtfFormat} from '../game/vtf.ts';
 import {encodePng, encodeExr, encodeDds, cubeToEquirect} from './encode.ts';
 // (the shader-wide values the hooks share, set by the view each frame)
-import {modelAmbientUniforms, fogUniforms} from '../ui/shaderhooks.ts';
+import {modelAmbientUniforms, fogUniforms, flashUniforms} from '../ui/shaderhooks.ts';
 
 // where the bundle's files go (a folder on disk, through the dev server or
 // the browser's folder access)
@@ -205,6 +205,10 @@ export class BlenderCapture {
 	private skyCamera = new Track(10 + 3);
 	private globals = new Track(10);  // (see finish: globals.layout)
 	private fog = new Track(6);
+	// the projected light (env_projectedtexture): on, position, rotation,
+	// fov, near, far, colour, shadows; and its cookie
+	private flash = new Track(15);
+	private flashCookie: number | null = null;
 	private frames = 0;
 	private unsupported = new Map<string, number>();
 	private files: GameFiles;
@@ -279,6 +283,13 @@ export class BlenderCapture {
 		const ambient = modelAmbientUniforms.modelAmbient.value.toArray();
 		const bloom = v.quality?.bloom ? v.bloomOverride ?? v.bloomScale : 0;
 		this.globals.push(f, [v.exposure, fade.rgb[0], fade.rgb[1], fade.rgb[2], fade.alpha, fade.modulate ? 1 : 0, ...ambient, bloom]);
+		const fu = flashUniforms;
+		const fc = v.flashCam as THREE.PerspectiveCamera;
+		if (fu.flashOn.value > 0.5 && fu.flashCookie.value) {
+			this.flashCookie ??= this.tex(fu.flashCookie.value);
+			fc.updateMatrixWorld();
+			this.flash.push(f, [1, ...decompose(fc.matrixWorld, null).slice(0, 7), fc.fov, fc.near, fc.far, ...fu.flashColor.value.toArray(), fu.flashShadows.value]);
+		} else this.flash.push(f, new Array(15).fill(0));
 		const fog = v.worldFog as THREE.Fog | null;
 		this.fog.push(f, fog ? [fog.color.r, fog.color.g, fog.color.b, fog.near, fog.far, fogUniforms.fogMaxDensity.value] : [0, 0, 0, 0, 0, 0]);
 	}
@@ -868,6 +879,7 @@ export class BlenderCapture {
 			sky2d,
 			globals: {layout: ['exposure', 'fadeR', 'fadeG', 'fadeB', 'fadeA', 'fadeModulate', 'ambientR', 'ambientG', 'ambientB', 'bloom'], track: tracks(this.globals)},
 			fog: {layout: ['r', 'g', 'b', 'start', 'end', 'maxDensity'], track: tracks(this.fog)},
+			flash: this.flashCookie !== null ? {cookie: this.flashCookie, layout: ['on', 'x', 'y', 'z', 'qw', 'qx', 'qy', 'qz', 'fov', 'near', 'far', 'r', 'g', 'b', 'shadows'], track: tracks(this.flash)} : null,
 			unsupported: Object.fromEntries(this.unsupported),
 		};
 		await this.sink.write('data.bin', concatParts(bin.parts, bin.size));

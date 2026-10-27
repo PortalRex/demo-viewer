@@ -15,6 +15,7 @@ from mathutils import Matrix, Quaternion, Vector
 from . import compositor
 from .geonodes import frame_filter_group, rope_group
 from .materials import MaterialBuilder, globals_group
+from .nodes import Graph
 
 INTERP = {'CONSTANT': 0, 'LINEAR': 1}
 
@@ -103,11 +104,12 @@ def key_vectors(idb, path, frames, values, interp='LINEAR', group=None):
 # ---- the importer ----
 
 class Importer:
-    def __init__(self, path, scale=0.0254, engine='CYCLES', samples=32):
+    def __init__(self, path, scale=0.0254, engine='CYCLES', samples=32, projected_light=True):
         self.b = Bundle(path)
         self.S = scale
         self.engine = engine
         self.samples = samples
+        self.projected_light = projected_light
         self.meshes = {}
         self.armatures = {}
         self.log = []
@@ -135,11 +137,13 @@ class Importer:
         self.note(f'images {time.time() - t0:.1f}s')
         self.mats = MaterialBuilder(b.scene, self.images, self.S)
         self.mats.sky = self.sky_setup()
+        self.mats.flash = self.projected_light and bool(b.scene.get('flash'))
         self.globals()
         self.objects()
         self.dynamics()
         self.note(f'objects {time.time() - t0:.1f}s')
         self.cameras(scene)
+        self.flash()
         self.viewmodel_scene(context)
         self.overlay_scene()
         self.sky_scene()
@@ -181,7 +185,9 @@ class Importer:
             nt.links.new(env.outputs['Color'], bg.inputs['Color'])
         else:
             bg.inputs['Color'].default_value = (0, 0, 0, 1)
-        bg.inputs['Strength'].default_value = 1.0
+        # (seen, never a light: the projected light alone lights diffuse parts)
+        path = nt.nodes.new('ShaderNodeLightPath')
+        nt.links.new(path.outputs['Is Camera Ray'], bg.inputs['Strength'])
         sky.world = world
         for key in ('map', 'props'):
             inst = bpy.data.objects.new(f'skybox {key}', None)
@@ -359,6 +365,8 @@ class Importer:
         # (Blender takes no faces with a corner twice)
         ok = (tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 0] != tris[:, 2])
         tris = tris[ok]
+        if normal is not None:
+            tris = wound_by_normals(tris, pos, normal)
         idx = tris.ravel()
         if offset and normal is not None:
             # (overlays lie on the faces they mark: lifted off them a little)
@@ -405,6 +413,10 @@ class Importer:
             always = len(vf) == 1 and vv[0, 0] > 0.5
             col = self.layer_collection(rec['scene'], rec.get('group', 'entities'))
             col.objects.link(obj)
+            # (what casts shadows from the projected light: the solid scene,
+            # not glass, effects or the sky, as the viewer's shadow pass)
+            if desc.get('blend', 'opaque') not in ('opaque', 'clip') or desc['kind'] in ('shader', 'skymask') or rec.get('group') == 'effects':
+                obj.visible_shadow = False
             obj.rotation_mode = 'QUATERNION'
             loc = tv[:, 0:3] * self.S
             obj.location = loc[0]
@@ -541,6 +553,7 @@ class Importer:
         me.materials.append(self.mats.get(d['material']))
         obj = bpy.data.objects.new(f'{d["name"][:50]} (frames)', me)
         self.layer_collection(d['scene'], d.get('group', 'effects')).objects.link(obj)
+        obj.visible_shadow = False
         if 'ropeTangent' in attrs and 'ropeSide' in attrs:
             mod = obj.modifiers.new('Rope', 'NODES')
             mod.node_group = rope_group(S)
@@ -682,8 +695,84 @@ class Importer:
         vm.collection.children.link(self.cols['viewmodel'])
         cams = bpy.data.collections.new('viewmodel camera')
         vm.collection.children.link(cams)
+        light = bpy.data.objects.get('P2 Projected Light')
+        if light is not None:
+            cams.objects.link(light)
         vm.camera = self.camera('P2 Viewmodel Eyes', self.b['vmCamera'], cams)
         self.vm_scene = vm
+
+    def flash(self):
+        """The projected light (env_projectedtexture), as the viewer draws it:
+        its cookie projected from it, its colour, a linear falloff
+        (100 / distance, at most 1), faded out towards its far plane, N.L and
+        shadows (here ray traced: Cycles). The materials take it through a
+        diffuse part (MaterialBuilder.finish); its strength makes that
+        albedo x 1.5 x the light, as the viewer adds it."""
+        fl = self.b.scene.get('flash')
+        if not fl or not self.projected_light:
+            return
+        frames, v = self.b.track(fl['track'])
+        col = {name: v[:, i] for i, name in enumerate(fl['layout'])}
+        on = col['on'] > 0.5
+        if not on.any():
+            return
+        S = self.S
+        first = int(np.argmax(on))
+        data = bpy.data.lights.new('P2 Projected Light', 'SPOT')
+        data.spot_blend = 0.0
+        data.shadow_soft_size = 1.0 * S
+        data.energy = 1.0
+        data.use_shadow = bool(col['shadows'][first] > 0.5)
+        data.use_nodes = True
+        nt = data.node_tree
+        nt.nodes.clear()
+        g = Graph(nt)
+        # (the direction from the light, in its own space: -z ahead, y up)
+        d = g.node('ShaderNodeTexCoord').outputs['Normal']
+        dx, dy, dz = g.xyz(d)
+        fov = g.value(float(col['fov'][first]), 'FOV')
+        t = g.math('TANGENT', g.mul(fov, math.pi / 360))
+        ahead = g.max(g.mul(dz, -1.0), 1e-6)
+        u = g.add(g.mul(g.div(g.div(dx, ahead), t), 0.5), 0.5)
+        vv = g.add(g.mul(g.div(g.div(dy, ahead), t), 0.5), 0.5)
+        img = self.images.get(fl['cookie'])
+        cookie = (1, 1, 1)
+        if img is not None:
+            cookie, _ = g.image(img, g.vec(u, g.sub(1.0, vv), 0.0), extension='CLIP')
+        color = g.vec(g.value(float(col['r'][first]), 'R'), g.value(float(col['g'][first]), 'G'), g.value(float(col['b'][first]), 'B'))
+        fall = g.node('ShaderNodeLightFalloff', {'Strength': 1.0})
+        dist, dist2 = fall.outputs['Linear'], fall.outputs['Constant']
+        far = g.value(float(col['far'][first]), 'Far')
+        d_src = g.div(dist, S)
+        fade = g.sat(g.div(g.sub(d_src, far), g.mul(far, -0.4)))
+        # (atten x d^2: min(100 / d, 1) in game units, d^2 undoing Cycles' own falloff)
+        atten = g.min(g.mul(100.0 * S, dist), dist2)
+        strength = g.mul(g.mul(fade, atten), 6.0 * math.pi * math.pi)
+        emit = g.node('ShaderNodeEmission', {'Color': g.vmul(cookie, color), 'Strength': strength})
+        out = g.node('ShaderNodeOutputLight')
+        g.link(emit.outputs[0], out.inputs['Surface'])
+        light = bpy.data.objects.new('P2 Projected Light', data)
+        self.cols['cameras'].objects.link(light)
+        light.rotation_mode = 'QUATERNION'
+        loc = np.stack([col['x'], col['y'], col['z']], axis=1) * S
+        quat = np.stack([col['qw'], col['qx'], col['qy'], col['qz']], axis=1)
+        light.location = loc[first]
+        light.rotation_quaternion = quat[first]
+        # (its cone wide enough for the square frustum's corners)
+        spot = 2 * np.arctan(np.tan(np.radians(col['fov']) / 2) * math.sqrt(2))
+        data.spot_size = float(spot[first])
+        if len(frames) > 1:
+            # (where it's off, it holds its last place)
+            idx = np.maximum.accumulate(np.where(on, np.arange(len(on)), 0))
+            key_vectors(light, 'location', frames, loc[idx])
+            key_vectors(light, 'rotation_quaternion', frames, quat[idx])
+            keys(data, 'energy', frames, on.astype(np.float32), 'CONSTANT')
+            for name, node in (('fov', 'FOV'), ('far', 'Far'), ('r', 'R'), ('g', 'G'), ('b', 'B')):
+                vals = col[name][idx]
+                if np.ptp(vals) > 0:
+                    keys(nt, f'nodes["{node}"].outputs[0].default_value', frames, vals, 'LINEAR', name='P2 Projected Light nodes')
+            if np.ptp(spot[idx]) > 0:
+                keys(data, 'spot_size', frames, spot[idx])
 
     def overlay_scene(self):
         """What the viewer draws over everything without depth (glows): a
@@ -710,6 +799,21 @@ class Importer:
         layout = self.b['globals']['layout']
         values = {name: v[:, i].astype(np.float64) for i, name in enumerate(layout)}
         compositor.build(scene, (scene, self.vm_scene, self.sky, self.overlay), frames, values, keys)
+
+
+def wound_by_normals(tris, pos, normal):
+    """Triangles turned to face where their vertex normals do. Models come
+    wound either way (the viewer draws them double-sided), but Cycles judges
+    a face's front by its winding and turns the shading normal round on the
+    back: a model wound inside out would be lit from behind."""
+    a, b, c = pos[tris[:, 0]], pos[tris[:, 1]], pos[tris[:, 2]]
+    face = np.cross(b - a, c - a)
+    vn = normal[tris[:, 0]] + normal[tris[:, 1]] + normal[tris[:, 2]]
+    flip = np.einsum('ij,ij->i', face, vn) < 0
+    if flip.any():
+        tris = tris.copy()
+        tris[flip] = tris[flip][:, [0, 2, 1]]
+    return tris
 
 
 UV_LAYERS = {'uv': 'UVMap', 'uv1': 'Lightmap', 'uv2': 'UV2'}

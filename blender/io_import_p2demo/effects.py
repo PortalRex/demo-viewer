@@ -272,7 +272,7 @@ class EffectBuilder:
             flame_color = grad if grad is not None else g.vec(1.0, 0.5, 0.1)
         flame_color = self.unexposed(g.vscale(flame_color, self.u('colorScale')))
         alpha = g.sat(alpha)
-        emit = g.node('ShaderNodeEmission', {'Color': flame_color, 'Strength': 1.0}).outputs[0]
+        emit = g.node('ShaderNodeEmission', {'Color': flame_color, 'Strength': self.mats.seen(g)}).outputs[0]
         clear = g.node('ShaderNodeBsdfTransparent').outputs[0]
         # the way through: the ray goes on from the partner's side
         P = g.geometry().outputs['Position']
