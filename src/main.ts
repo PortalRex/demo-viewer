@@ -5,7 +5,7 @@ import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D, QUALITY} from './ui/view3d.ts';
-import type {CameraMode, CameraState} from './ui/view3d.ts';
+import type {CameraMode, CameraState, GhostSpec} from './ui/view3d.ts';
 import {decodeEntitySteps, keyAt} from './net/entities.ts';
 import {background} from './ui/background.ts';
 import type {EntityTimeline} from './net/entities.ts';
@@ -716,7 +716,6 @@ $('view-mode').onclick = e => {
 	$('path-line').hidden = !is3d;
 	$('quality').hidden = !is3d;
 	$('export').hidden = !is3d || !canExportVideo();
-	$('ghost').hidden = !is3d;
 	if (is3d) {
 		if (segIn3d === currentSeg) showViewAs();
 		load3dMap();
@@ -845,22 +844,23 @@ function racerDelta(loc: Located, view: {origin: number[]} | null, track: Segmen
 	if (best < 0 || bestD > 256 ** 2) return null;
 	return (at - views[best].tick) * track.seg.intervalPerTick;
 }
-// what the 3D view draws of them, and each one's row (with its difference)
+// what the views draw of them, and each one's row (with its difference)
 function showRacers(loc: Located, view: {origin: number[]} | null) {
-	const is3d = viewMode === '3d';
-	$('ghost-hud').hidden = !is3d || !racers.length;
-	view3d.ghosts = [];
+	$('ghost-hud').hidden = !racers.length;
+	const marks: GhostSpec[] = [];
 	for (const r of racers) {
-		const track = is3d ? racerTrack(r, loc) : null;
+		const track = racerTrack(r, loc);
 		r.row.classList.toggle('away', !track);
 		if (!track) continue;
-		view3d.ghosts.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null});
+		marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null});
 		const d = racerDelta(loc, view, track);
 		const el = r.row.querySelector('.ghost-delta') as HTMLElement;
 		el.textContent = d === null ? '—' : `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d).toFixed(2)}`;
 		el.classList.toggle('behind', d !== null && d > 0.005);
 		el.classList.toggle('ahead', d !== null && d < -0.005);
 	}
+	view3d.ghosts = marks;
+	pathView.racers = marks;
 }
 // a racer's row: its name in its colour, its difference, and its toggles
 function racerRow(r: Racer): HTMLElement {

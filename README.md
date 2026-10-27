@@ -123,7 +123,8 @@ computer.
 
 **Share and compare**
 - **Ghost race:** load other runs of the same map, as many as you like. Each
-  one's player is drawn as a glowing ghost in its own colour beside yours,
+  one's player is drawn in its own colour beside yours (a glowing ghost in
+  3D, a marker in the Top and Side views),
   with a live readout of how far ahead or behind you are, measured where it
   passed the same spot. Each can be hidden, have its path drawn through the
   map, or be taken off again.
@@ -200,7 +201,7 @@ These toggles in the 3D view are remembered per browser:
 | **Bright** | Brightens dark maps the way autorender does. |
 | **Quality** | High, Medium or Low: resolution, antialiasing, bloom and shadow detail. |
 
-The 3D toolbar also has **Ghost** (race other runs of the map) and
+The toolbar also has **Ghost** (race other runs of the map), and in 3D
 **Export** (save an MP4). The **Link** button next to the clock copies a link
 to the current moment.
 

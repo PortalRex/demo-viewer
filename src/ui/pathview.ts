@@ -5,11 +5,20 @@ import type {SarEvent, Vec3} from '../core/model.ts';
 
 type Mode = 'top' | 'side';
 
+// another run raced against this one: where its player is now (null: not
+// on this map now) and its segment on this map where its path is drawn
+export interface RacerMark {
+	view: {origin: Vec3; angles: Vec3} | null;
+	color: string;
+	path: SegmentTrack | null;
+}
+
 const GRID_STEPS = [64, 128, 256, 512, 1024, 2048, 4096];
 
 export class PathView {
 	mode: Mode = 'top';
 	follow = true;
+	racers: RacerMark[] = [];
 	private scale = 0.1;  // pixels per unit
 	private cx = 0;       // world (projected) coordinates at the canvas center
 	private cy = 0;
@@ -155,17 +164,28 @@ export class PathView {
 		}
 		g.setLineDash([]);
 
+		// the other runs' paths (as far as shown) and players, in their colours
+		g.lineWidth = 1.5;
+		g.globalAlpha = 0.7;
+		for (const r of this.racers) {
+			if (!r.path) continue;
+			g.strokeStyle = r.color;
+			this.strokePath(g, 0, r.path.seg.views.length - 1, r.path);
+		}
+		g.globalAlpha = 1;
+
 		this.drawPortals(g, events, tick);
+		for (const r of this.racers) if (r.view) this.drawRacer(g, r.view, r.color);
 		if (view) this.drawPlayer(g, view);
 		this.drawScale(g, w, h);
 	}
 
-	private strokePath(g: CanvasRenderingContext2D, from: number, to: number) {
-		const views = this.track!.seg.views;
+	private strokePath(g: CanvasRenderingContext2D, from: number, to: number, track = this.track!) {
+		const views = track.seg.views;
 		g.beginPath();
 		for (let i = from; i <= to; i++) {
 			const [x, y] = this.toScreen(...this.project(views[i].origin));
-			if (i === from || this.track!.teleports[i]) g.moveTo(x, y);
+			if (i === from || track.teleports[i]) g.moveTo(x, y);
 			else g.lineTo(x, y);
 		}
 		g.stroke();
@@ -236,18 +256,35 @@ export class PathView {
 		g.globalAlpha = 1;
 	}
 
+	// the way a view looks, as an angle on the canvas
+	private facing(angles: Vec3): number {
+		if (this.mode === 'top') return -angles[1] * Math.PI / 180;  // yaw: counter-clockwise from +x
+		// facing along the side axis or away from it, tilted by pitch
+		const yaw = angles[1] * Math.PI / 180;
+		const along = this.sideAxis === 0 ? Math.cos(yaw) : Math.sin(yaw);
+		const pitch = angles[0] * Math.PI / 180;
+		return Math.atan2(Math.sin(pitch), along * Math.cos(pitch));
+	}
+
+	// another run's player: a dot in its colour, pointing where it looks
+	private drawRacer(g: CanvasRenderingContext2D, view: {origin: Vec3; angles: Vec3}, color: string) {
+		const [x, y] = this.toScreen(...this.project(view.origin));
+		const dir = this.facing(view.angles);
+		g.strokeStyle = color;
+		g.lineWidth = 2;
+		g.beginPath();
+		g.moveTo(x, y);
+		g.lineTo(x + Math.cos(dir) * 20, y + Math.sin(dir) * 20);
+		g.stroke();
+		g.fillStyle = color;
+		g.beginPath();
+		g.arc(x, y, 4.5, 0, Math.PI * 2);
+		g.fill();
+	}
+
 	private drawPlayer(g: CanvasRenderingContext2D, view: ViewState) {
 		const [x, y] = this.toScreen(...this.project(view.origin));
-		let dir: number;
-		if (this.mode === 'top') {
-			dir = -view.angles[1] * Math.PI / 180;  // yaw: counter-clockwise from +x
-		} else {
-			// facing along the side axis or away from it, tilted by pitch
-			const yaw = view.angles[1] * Math.PI / 180;
-			const along = this.sideAxis === 0 ? Math.cos(yaw) : Math.sin(yaw);
-			const pitch = view.angles[0] * Math.PI / 180;
-			dir = Math.atan2(Math.sin(pitch), along * Math.cos(pitch));
-		}
+		const dir = this.facing(view.angles);
 		// view cone
 		const fov = 45 * Math.PI / 180;
 		g.fillStyle = 'rgba(90, 169, 255, 0.16)';
