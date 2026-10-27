@@ -136,7 +136,9 @@ computer.
   readout too. Pick a whole board's top runs at once: each file becomes its
   own run, and a co-op run's two demos (as the board names them) share one
   colour and one row. Demos from before the challenge-mode finish was recorded
-  are lined up by where their player reaches the finish.
+  are lined up by where their player reaches the finish. Click a run's row to
+  show or hide it, Ctrl-click it to show only that one (again for all), or use
+  **All**, **None** and **Paths** at the top of the list.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the

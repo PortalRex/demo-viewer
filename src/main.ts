@@ -1054,7 +1054,9 @@ function showRacers(loc: Located, view: {origin: number[]} | null) {
 	pathView.racers = marks;
 }
 const racerName = (r: Racer) => r.players.map(p => p.name).join(' & ');
-// a racer's row: its name in its colour, its difference, and its toggles
+// a racer's row: its name in its colour, its difference, and its toggles.
+// Clicking the row shows or hides its players; Ctrl- (or Alt-) clicking it
+// shows only it (all of them again, where it already was)
 function racerRow(r: Racer): HTMLElement {
 	const row = document.createElement('div');
 	row.className = 'ghost-row';
@@ -1063,37 +1065,75 @@ function racerRow(r: Racer): HTMLElement {
 	name.className = 'ghost-name';
 	const delta = document.createElement('div');
 	delta.className = 'ghost-delta';
-	const toggle = (label: string, title: string, get: () => boolean, set: (on: boolean) => void) => {
+	const toggle = (label: string, title: string, set: () => void) => {
 		const b = document.createElement('button');
 		b.className = 'toggle';
 		b.textContent = label;
 		b.title = title;
-		b.classList.toggle('on', get());
-		b.onclick = () => {
-			set(!get());
-			b.classList.toggle('on', get());
-			render();
+		b.onclick = e => {
+			e.stopPropagation();
+			set();
+			changedRacers();
 		};
 		return b;
 	};
 	const remove = document.createElement('button');
 	remove.textContent = '×';
 	remove.title = 'Take this run off';
-	remove.onclick = () => {
+	remove.onclick = e => {
+		e.stopPropagation();
 		racers = racers.filter(x => x !== r);
 		row.remove();
 		$('ghost').classList.toggle('on', racers.length > 0);
-		render();
+		changedRacers();
 	};
 	const buttons = document.createElement('div');
 	buttons.className = 'ghost-buttons';
 	buttons.append(
-		toggle('Ghost', 'Show its players', () => r.shown, on => (r.shown = on)),
-		toggle('Path', 'Draw its path through the map', () => r.path, on => (r.path = on)),
+		toggle('Ghost', 'Show its players', () => (r.shown = !r.shown)),
+		toggle('Path', 'Draw its path through the map', () => (r.path = !r.path)),
 		remove);
 	row.append(name, delta, buttons);
+	row.onclick = e => {
+		if (e.ctrlKey || e.altKey || e.metaKey) {
+			const solo = r.shown && racers.every(x => x === r || !x.shown);
+			for (const x of racers) x.shown = solo || x === r;
+		} else {
+			r.shown = !r.shown;
+		}
+		changedRacers();
+	};
 	return row;
 }
+// (each row's toggles and the head's count as they now are, and the views)
+function changedRacers() {
+	for (const r of racers) {
+		r.row.classList.toggle('off', !r.shown);
+		const [ghost, path] = r.row.querySelectorAll('.ghost-buttons .toggle');
+		ghost.classList.toggle('on', r.shown);
+		path.classList.toggle('on', r.path);
+	}
+	const shown = racers.filter(r => r.shown).length;
+	$('ghost-count').textContent = `${shown} of ${racers.length} shown`;
+	$('ghost-all').classList.toggle('on', shown === racers.length);
+	$('ghost-none').classList.toggle('on', shown === 0);
+	$('ghost-paths').classList.toggle('on', racers.length > 0 && racers.every(r => r.path));
+	render();
+}
+$('ghost-all').onclick = () => {
+	for (const r of racers) r.shown = true;
+	changedRacers();
+};
+$('ghost-none').onclick = () => {
+	for (const r of racers) r.shown = false;
+	changedRacers();
+};
+// (the paths of every shown run, or none)
+$('ghost-paths').onclick = () => {
+	const on = !racers.filter(r => r.shown).every(r => r.path);
+	for (const r of racers) r.path = on && r.shown;
+	changedRacers();
+};
 function nameRacerRow(r: Racer) {
 	r.row.querySelector('.ghost-name')!.textContent = racerName(r);
 	r.row.title = `${racerName(r)} (${r.players.map(p => p.pb.run.fileName).join(', ')}): how far ahead (−) or behind (+) this run is, where it was at this spot`;
@@ -1132,7 +1172,7 @@ $<HTMLInputElement>('ghost-input').onchange = async e => {
 		}
 	}
 	$('ghost').classList.toggle('on', racers.length > 0);
-	render();
+	changedRacers();
 };
 
 // ---- video export ----
@@ -1211,7 +1251,7 @@ function drawRacers(g: OffscreenCanvasRenderingContext2D, w: number, h: number) 
 	const bw = (compact ? 230 : 190) * s, bh = (compact ? 20 : 46) * s, gap = (compact ? 3 : 6) * s, x = w - 16 * s - bw;
 	let y = 16 * s;
 	for (const row of document.querySelectorAll<HTMLElement>('#ghost-list .ghost-row')) {
-		if (row.classList.contains('away') || y + bh > h - 16 * s) continue;
+		if (row.classList.contains('away') || row.classList.contains('off') || y + bh > h - 16 * s) continue;
 		const name = row.querySelector('.ghost-name')!.textContent ?? '';
 		const deltaEl = row.querySelector('.ghost-delta')!;
 		const deltaColor = deltaEl.classList.contains('ahead') ? '#47c17b' : deltaEl.classList.contains('behind') ? '#ff5d5d' : '#fff';

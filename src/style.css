@@ -143,7 +143,14 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .export-buttons button.primary { margin-top: 0; }
 .ghost-hud { position: absolute; z-index: 2; right: 16px; top: 16px; max-height: calc(100% - 32px); overflow-y: auto; color: #fff; font: 700 13px/1.35 Arial, Helvetica, sans-serif; text-align: right; }
 .ghost-row { margin-bottom: 6px; padding: 5px 10px; background: rgba(0, 0, 0, 0.55); border-right: 3px solid var(--ghost); }
+.ghost-row { cursor: pointer; }
 .ghost-row.away { opacity: 0.45; }
+/* hidden: dimmed, its bar hollow */
+.ghost-row.off { opacity: 0.4; border-right-style: dotted; }
+.ghost-row.off .ghost-name { text-decoration: line-through; }
+.ghost-head { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-bottom: 6px; padding: 3px 6px; background: rgba(0, 0, 0, 0.55); font-weight: 400; font-size: 12px; }
+.ghost-head span { margin-right: 4px; color: #ccc; }
+.ghost-head button { font-size: 11px; padding: 1px 6px; }
 .ghost-row.away .ghost-delta { display: none; }
 .ghost-name { color: var(--ghost); font-weight: 400; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ghost-buttons { display: flex; gap: 4px; justify-content: flex-end; margin-top: 3px; }
