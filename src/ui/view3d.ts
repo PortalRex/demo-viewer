@@ -172,6 +172,51 @@ const CLIP_PLANE = new THREE.Plane();
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
 const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
+// A raced run's player: a glowing see-through body (brightest at its
+// edges) with a pointer where it looks
+function makeGhost(body: THREE.BufferGeometry): THREE.Group {
+	const material = new THREE.ShaderMaterial({
+		uniforms: {color: {value: new THREE.Color(1, 0.55, 0.15)}, exposure: {value: 1}},
+		vertexShader: `
+			varying vec3 vNormal;
+			varying vec3 vView;
+			void main() {
+				vec4 p = modelViewMatrix * vec4(position, 1.0);
+				vNormal = normalize(normalMatrix * normal);
+				vView = normalize(-p.xyz);
+				gl_Position = projectionMatrix * p;
+			}`,
+		// (drawn into the HDR frame, which is exposed afterwards: divided by
+		// the exposure so it glows the same in a dark room as a bright one)
+		fragmentShader: `
+			uniform vec3 color;
+			uniform float exposure;
+			varying vec3 vNormal;
+			varying vec3 vView;
+			void main() {
+				float rim = 1.0 - abs(dot(normalize(vNormal), normalize(vView)));
+				float a = 0.05 + 0.6 * pow(rim, 3.0);
+				gl_FragColor = vec4(color * a * 0.4 / max(exposure, 0.05), 1.0);
+			}`,
+		transparent: true,
+		depthWrite: false,
+		blending: THREE.AdditiveBlending,
+	});
+	const group = new THREE.Group();
+	group.name = 'ghost';
+	group.add(new THREE.Mesh(body, material));
+	// (the pointer at eye height, swinging with the pitch)
+	const aim = new THREE.Group();
+	aim.position.z = DEFAULT_EYE;
+	const cone = new THREE.Mesh(new THREE.ConeGeometry(5, 14, 12).rotateZ(-Math.PI / 2).translate(24, 0, 0), material);
+	aim.add(cone);
+	group.add(aim);
+	group.userData.aim = aim;
+	group.userData.material = material;
+	group.visible = false;
+	return group;
+}
+
 const toEuler = (a: Vec3) => new THREE.Euler(a[2] * Math.PI / 180, a[0] * Math.PI / 180, a[1] * Math.PI / 180, 'ZYX');
 // held objects sit about 70 units in front of the eye; further than this
 // they're held through a portal (see placeHeld)
@@ -847,6 +892,10 @@ export class View3D {
 	private pathLine: THREE.LineSegments | null = null;
 	private pathShown = true;
 	private player: THREE.Mesh;
+	// another run raced against this one: where its player's eye is and
+	// where it looks this frame (null: none, or it's not on this map)
+	private ghost: THREE.Group;
+	ghostView: {origin: Vec3; angles: Vec3} | null = null;
 	private bsp: BspMap | null = null;
 	private entities: EntityTimeline | null = null;
 	private objects = new Map<EntityTrack, THREE.Object3D>();
@@ -1083,6 +1132,8 @@ export class View3D {
 		body.translate(0, 0, 36);
 		this.player = new THREE.Mesh(body, new THREE.MeshLambertMaterial({color: 0x5aa9ff, transparent: true, opacity: 0.85}));
 		this.scene.add(this.player);
+		this.ghost = makeGhost(body);
+		this.scene.add(this.ghost);
 		const vmHemi = new THREE.HemisphereLight(0xffffff, 0x3a3f48, 0.55);
 		vmHemi.position.set(0, 0, 1);
 		const vmSun = new THREE.DirectionalLight(0xffffff, 0.4);
@@ -4744,6 +4795,7 @@ export class View3D {
 		if (ents) this.updatePaintBlobs(tick);
 		if (ents) this.updateRopes(tick);
 		if (ents) this.updateMovies(tick);
+		this.placeGhost();
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
@@ -4809,6 +4861,19 @@ export class View3D {
 		this.updateFlashlight(tick);
 		this.lightModels();
 		this.render();
+	}
+
+	// (its body from its eye down, turned to its aim, the marker on its
+	// front tilted with the pitch)
+	private placeGhost() {
+		const v = this.ghostView;
+		this.ghost.visible = !!v;
+		if (!v) return;
+		this.ghost.position.set(v.origin[0], v.origin[1], v.origin[2] - DEFAULT_EYE);
+		this.ghost.rotation.set(0, 0, v.angles[1] * Math.PI / 180);
+		const aim = this.ghost.userData.aim as THREE.Object3D;
+		aim.rotation.set(0, v.angles[0] * Math.PI / 180, 0);
+		(this.ghost.userData.material as THREE.ShaderMaterial).uniforms.exposure.value = this.exposure;
 	}
 
 	// The projected spotlight lighting the view: the active

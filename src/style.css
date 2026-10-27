@@ -140,3 +140,8 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .export-dialog progress { width: 100%; }
 .export-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .export-buttons button.primary { margin-top: 0; }
+.ghost-hud { position: absolute; z-index: 1; right: 16px; top: 16px; padding: 5px 10px; background: rgba(0, 0, 0, 0.55); color: #fff; font: 700 13px/1.35 Arial, Helvetica, sans-serif; text-align: right; pointer-events: none; }
+.ghost-name { color: #ffb36b; font-weight: 400; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ghost-delta { font-size: 20px; font-variant-numeric: tabular-nums; }
+.ghost-delta.ahead { color: var(--ok); }
+.ghost-delta.behind { color: var(--bad); }

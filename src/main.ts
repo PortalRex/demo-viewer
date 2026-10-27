@@ -1,5 +1,6 @@
 import {loadRuns} from './core/load.ts';
-import {Playback, viewAt, cmdAt} from './player/playback.ts';
+import {Playback, viewAt, cmdAt, lastAtOrBefore} from './player/playback.ts';
+import type {SegmentTrack, Located} from './player/playback.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
@@ -629,8 +630,10 @@ function render() {
 	const view = viewAt(loc.track, loc.tick);
 	const cmd = cmdAt(loc.track, loc.tick);
 	showBright(viewMode === '3d' ? seg.map : null);
+	view3d.ghostView = viewMode === '3d' ? ghostAt(loc) : null;
 	if (viewMode === '3d') view3d.update(view, loc.tick);
 	else pathView.draw(view, loc.tick, seg.sar);
+	showGhost(loc, view);
 	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null);
 	showHudText(loc.tick);
 	timeline.draw(t, loc.index);
@@ -714,6 +717,7 @@ $('view-mode').onclick = e => {
 	$('path-line').hidden = !is3d;
 	$('quality').hidden = !is3d;
 	$('export').hidden = !is3d || !canExportVideo();
+	$('ghost').hidden = !is3d;
 	if (is3d) {
 		if (segIn3d === currentSeg) showViewAs();
 		load3dMap();
@@ -784,6 +788,89 @@ window.addEventListener('drop', async e => {
 	const list = [...(e.dataTransfer?.files ?? [])].filter(x => /\.(sarp|dem)$/i.test(x.name));
 	if (list.length) open(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
 });
+
+// ---- ghost race ----
+// Another run of the same map, played alongside: its player drawn as a
+// ghost from the moment each run's segment starts, and the difference
+// between them, from when the ghost was where this run's player is now
+let ghost: {pb: Playback; name: string} | null = null;
+// the ghost's segment for one of this run's: the one on the same map (the
+// same one of them, where a run visits a map more than once)
+function ghostTrack(loc: Located): SegmentTrack | null {
+	if (!ghost || !pb) return null;
+	const map = loc.track.seg.map;
+	const visit = pb.tracks.slice(0, loc.index).filter(tr => tr.seg.map === map).length;
+	return ghost.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
+}
+// (the ghost's tick as many seconds into its segment as this run is into its own)
+function ghostTick(loc: Located, track: SegmentTrack) {
+	const seconds = (loc.tick - loc.track.seg.firstTick) * loc.track.seg.intervalPerTick;
+	return track.seg.firstTick + seconds / track.seg.intervalPerTick;
+}
+function ghostAt(loc: Located): {origin: [number, number, number]; angles: [number, number, number]} | null {
+	const track = ghostTrack(loc);
+	if (!track) return null;
+	const tick = ghostTick(loc, track);
+	// (gone once its segment's over: finished, or loaded out)
+	if (tick > track.seg.lastTick) return null;
+	const v = viewAt(track, tick);
+	return v && {origin: v.origin, angles: v.angles};
+}
+// seconds behind the ghost (negative: ahead): when the ghost was closest to
+// where this run's player is, within a few seconds of the same time
+function ghostDelta(loc: Located, view: {origin: number[]} | null, track: SegmentTrack): number | null {
+	if (!view) return null;
+	const views = track.seg.views;
+	const at = ghostTick(loc, track);
+	const window = 6 / track.seg.intervalPerTick;
+	let i = Math.max(0, lastAtOrBefore(views, at - window));
+	let best = -1, bestD = Infinity;
+	for (; i < views.length && views[i].tick <= at + window; i++) {
+		const o = views[i].origin;
+		const d = (o[0] - view.origin[0]) ** 2 + (o[1] - view.origin[1]) ** 2 + (o[2] - view.origin[2]) ** 2;
+		if (d < bestD) {
+			bestD = d;
+			best = i;
+		}
+	}
+	// (nowhere near: the routes went different ways)
+	if (best < 0 || bestD > 256 ** 2) return null;
+	return (at - views[best].tick) * track.seg.intervalPerTick;
+}
+function showGhost(loc: Located, view: {origin: number[]} | null) {
+	const track = viewMode === '3d' ? ghostTrack(loc) : null;
+	$('ghost-hud').hidden = !track;
+	if (!track || !ghost) return;
+	$('ghost-name').textContent = `Ghost: ${ghost.name}`;
+	const d = ghostDelta(loc, view, track);
+	const el = $('ghost-delta');
+	el.textContent = d === null ? '—' : `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d).toFixed(2)}`;
+	el.classList.toggle('behind', d !== null && d > 0.005);
+	el.classList.toggle('ahead', d !== null && d < -0.005);
+}
+$('ghost').onclick = () => {
+	if (ghost) {
+		ghost = null;
+		$('ghost').classList.remove('on');
+		render();
+	} else ($('ghost-input') as HTMLInputElement).click();
+};
+$<HTMLInputElement>('ghost-input').onchange = async e => {
+	const input = e.target as HTMLInputElement;
+	const list = [...(input.files ?? [])];
+	input.value = '';
+	if (!list.length) return;
+	try {
+		const run = await loadRuns(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
+		const maps = new Set(pb?.run.segments.map(s => s.map));
+		if (!run.segments.some(s => maps.has(s.map) && s.views.length)) throw new Error('it has none of the maps this run plays.');
+		ghost = {pb: new Playback(run), name: run.fileName.replace(/\.[^.]+$/, '')};
+		$('ghost').classList.add('on');
+		render();
+	} catch (err) {
+		showError(`Couldn't race ${list.length === 1 ? list[0].name : `${list.length} files`}: ${(err as Error).message}`);
+	}
+};
 
 // ---- video export ----
 // Part of the run drawn frame by frame at a video's size (each frame waits
