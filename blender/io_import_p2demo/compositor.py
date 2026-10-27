@@ -77,7 +77,7 @@ class Comp:
         return acc
 
 
-def build(scene, layers, frames, globals_values, keys):
+def build(scene, layers, frames, globals_values, keys, hud=None):
     """`layers`: (main scene, viewmodel, skybox, overlay scenes or None);
     `globals_values`: name -> per-key values (exposure, bloom, fade...)."""
     main, vm, sky, overlay = layers
@@ -156,6 +156,30 @@ def build(scene, layers, frames, globals_values, keys):
         a_mod = c.value('P2 Fade Modulate', float(alpha[0] * mod[0]))
         shown = c.mix('MIX', shown, color.outputs[0], fac=a_mix)
         shown = c.mix('MULTIPLY', shown, color.outputs[0], fac=a_mod)
+    if hud is not None:
+        # the game's on-screen text over it all (a picture each time it
+        # changed: the one for frame f is f + offset, keyed)
+        img = bpy.data.images.load(hud['first'], check_existing=True)
+        img.source = 'SEQUENCE'
+        img.colorspace_settings.name = 'Non-Color'  # (drawn in the picture's own gamma space)
+        node = c.node('CompositorNodeImage')
+        node.name = node.label = 'P2 Text'
+        node.image = img
+        node.frame_start = 1
+        node.frame_duration = int(hud['total']) + 1
+        node.use_cyclic = False
+        node.use_auto_refresh = True
+        over = c.node('CompositorNodeAlphaOver')
+        c.link(shown, over.inputs[1])
+        c.link(node.outputs['Image'], over.inputs[2])
+        shown = over.outputs[0]
+        fr, vals = [], []
+        k = hud['keys']
+        for i, (f, idx) in enumerate(k):
+            end = k[i + 1][0] - 1 if i + 1 < len(k) else hud['total'] - 1
+            fr += [f, max(f, end)]
+            vals += [idx - f, idx - max(f, end)]
+        keys(tree, 'nodes["P2 Text"].frame_offset', np.array(fr, dtype=np.float64), np.array(vals, dtype=np.float32), 'LINEAR', name='P2 Compositor')
     clamped = c.mix('MIX', shown, (0, 0, 0, 1), fac=0.0, clamp=True)
     linear = c.colorspace(clamped, 'sRGB', 'Linear Rec.709')
     out_img = linear

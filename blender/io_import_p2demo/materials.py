@@ -62,6 +62,22 @@ def globals_group():
     return tree
 
 
+def outward_normal(g):
+    """The surface's own normal, not turned to the viewer on its back: the
+    viewer lights models (cube, lights, phong) by it from either side (Cycles
+    and Eevee turn the shading normal round on back faces)."""
+    geo = g.geometry()
+    flip = g.sub(1.0, g.mul(geo.outputs['Backfacing'], 2.0))
+    return g.vscale(g.norm(geo.outputs['Normal']), flip)
+
+
+def viewer_back(g):
+    """1 on the faces the viewer sees from behind: by the model's own
+    winding, which the importer turned round on some faces (p2_wound)."""
+    w = g.attr('p2_wound', 'GEOMETRY', 'Fac')
+    return g.math('ABSOLUTE', g.sub(g.geometry().outputs['Backfacing'], w))
+
+
 def model_light_eevee_group():
     """Eevee's model light: the cube with the lights folded in (p2_e0..5):
     6 object properties, where Eevee reads no more than 8."""
@@ -74,7 +90,7 @@ def model_light_eevee_group():
     g = Graph(tree)
     out = g.node('NodeGroupOutput')
     out.location = (1000, 0)
-    n = g.norm(g.geometry().outputs['Normal'])
+    n = outward_normal(g)
     amb = None
     for axis, comp in enumerate(g.xyz(n)):
         side = g.vmix(g.attr(f'p2_e{axis * 2 + 1}', 'OBJECT'), g.attr(f'p2_e{axis * 2}', 'OBJECT'), g.math('GREATER_THAN', comp, -1e-9))
@@ -100,7 +116,7 @@ def model_light_group(scale):
     out = g.node('NodeGroupOutput')
     out.location = (1600, 0)
     geo = g.geometry()
-    n = g.norm(geo.outputs['Normal'])
+    n = outward_normal(g)
     p = geo.outputs['Position']
     eye = g.norm(geo.outputs['Incoming'])
     nx, ny, nz = g.xyz(n)
@@ -233,7 +249,10 @@ class MaterialBuilder:
             _, dg, db = g.xyz(dc)
             m7 = g.mul(2.0, g.mixf(dg, db, base_alpha))
             mask = m7 if mask is None else g.mul(mask, m7)
-        ndv = g.sat(g.dot(g.norm(geo.outputs['Normal']), g.norm(geo.outputs['Incoming'])))
+        # (models' by their own normal from either side, as the game's shaders
+        # and the viewer's two-sided glass: grazing from behind)
+        n = outward_normal(g) if desc.get('kind') == 'model' else g.norm(geo.outputs['Normal'])
+        ndv = g.sat(g.dot(n, g.norm(geo.outputs['Incoming'])))
         if env.get('fresnel') and desc.get('phong'):
             fr = desc['phong']['fresnel']
             f = g.mul(g.sub(1.0, ndv), g.sub(1.0, ndv))
@@ -310,7 +329,7 @@ class MaterialBuilder:
         # viewer's light-facing depth pass draws them: by faces that face the
         # light, i.e. those a shadow ray (towards the light) meets from behind
         # (alpha-tested double-sided ones cast either way, by their alpha)
-        back = g.geometry().outputs['Backfacing']
+        back = viewer_back(g)
         front = g.sub(1.0, back)
         shadow_ray = g.node('ShaderNodeLightPath').outputs['Is Shadow Ray'] if self.flash else None
         clear_t = None
@@ -582,7 +601,7 @@ class MaterialBuilder:
         if phong:
             spec = lit.outputs['Specular']
             geo = g.geometry()
-            ndv = g.sat(g.dot(g.norm(geo.outputs['Normal']), g.norm(geo.outputs['Incoming'])))
+            ndv = g.sat(g.dot(outward_normal(g), g.norm(geo.outputs['Incoming'])))
             f = g.mul(g.sub(1.0, ndv), g.sub(1.0, ndv))
             fr = phong['fresnel']
             fres = g.mixf(g.mixf(fr[0], fr[1], g.mul(2.0, f)), g.mixf(fr[1], fr[2], g.sub(g.mul(2.0, f), 1.0)), g.math('GREATER_THAN', f, 0.5))
@@ -605,7 +624,18 @@ class MaterialBuilder:
             if glow is not None:
                 color = g.vmix(color, g.vmul(albedo, si.get('tint', (1, 1, 1))), glow)
         if desc.get('env') and (cube is not None or desc['env'].get('cube') is not None):
-            spec = self.env(g, desc, desc['env'], g.vscale(amb, scale), alpha, None, None, cube if cube is not None else desc['env'].get('cube'))
+            if isinstance(cube, tuple):
+                # (the cubemap the object's p2_cube picks, frame by frame)
+                pick = g.attr('p2_cube', 'OBJECT', 'Fac')
+                spec = None
+                for i, c in enumerate(cube):
+                    one = self.env(g, desc, desc['env'], g.vscale(amb, scale), alpha, None, None, c)
+                    if one is None:
+                        continue
+                    one = g.vscale(one, g.math('COMPARE', pick, float(i), 0.5))
+                    spec = one if spec is None else g.vadd(spec, one)
+            else:
+                spec = self.env(g, desc, desc['env'], g.vscale(amb, scale), alpha, None, None, cube if cube is not None else desc['env'].get('cube'))
             if spec is not None:
                 color = g.vadd(color, spec)
         return color, alpha

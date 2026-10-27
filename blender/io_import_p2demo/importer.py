@@ -412,8 +412,9 @@ class Importer:
         # (Blender takes no faces with a corner twice)
         ok = (tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 0] != tris[:, 2])
         tris = tris[ok]
+        wound = None
         if normal is not None:
-            tris = wound_by_normals(tris, pos, normal)
+            tris, wound = wound_by_normals(tris, pos, normal)
         idx = tris.ravel()
         if offset and normal is not None:
             # (overlays lie on the faces they mark: lifted off them a little)
@@ -427,6 +428,10 @@ class Importer:
         me.polygons.foreach_set('loop_start', np.arange(0, len(idx), 3, dtype=np.int32))
         me.update(calc_edges=True)
         set_attributes(me, {name: attr(name) for name in attrs if name != 'position'}, idx, count)
+        if wound is not None:
+            # (the faces turned round, so materials can tell which side the
+            # viewer, going by the model's own winding, sees: p2_wound)
+            me.attributes.new('p2_wound', 'FLOAT', 'FACE').data.foreach_set('value', wound.astype(np.float32))
         mat = self.mats.get(mid) if mid is not None else None
         if mat:
             me.materials.append(mat)
@@ -444,17 +449,27 @@ class Importer:
             vf, vv = b.track(rec['visible'])
             if not (vv > 0.5).any():
                 continue
-            cube = None
+            cube, cube_keys = None, None
             if rec.get('cube'):
+                # (a model reflects the cubemap nearest it: one that moves can
+                # change cubemaps; then its material has each, picked by the
+                # keyed index p2_cube)
                 cf, cv = b.track(rec['cube'])
-                vals, counts = np.unique(cv[:, 0], return_counts=True)
-                best = int(vals[np.argmax(counts)])
-                cube = best if best >= 0 else None
+                used = sorted({int(x) for x in cv[:, 0] if x >= 0})
+                if len(used) == 1:
+                    cube = used[0]
+                elif used:
+                    cube = tuple(used)
+                    cube_keys = (cf, np.array([used.index(int(x)) if x >= 0 else -1 for x in cv[:, 0]], dtype=np.float32))
             if cube is not None or desc['kind'] == 'model' and desc.get('envPerObject'):
                 me = self.mesh_with(rec['geometry'], mid, cube, desc)
             else:
                 me = self.mesh(rec['geometry'], mid, offset=bool(desc.get('offset')))
             obj = bpy.data.objects.new(rec['name'][:60], me)
+            if cube_keys is not None:
+                obj['p2_cube'] = float(cube_keys[1][0])
+                if len(cube_keys[0]) > 1:
+                    keys(obj, '["p2_cube"]', cube_keys[0], cube_keys[1], 'CONSTANT')
             tf, tv = b.track(rec['transform'])
             moving = len(tf) > 1
             always = len(vf) == 1 and vv[0, 0] > 0.5
@@ -938,22 +953,27 @@ class Importer:
         frames, v = self.fades
         layout = self.b['globals']['layout']
         values = {name: v[:, i].astype(np.float64) for i, name in enumerate(layout)}
-        compositor.build(scene, (scene, self.vm_scene, self.sky, self.overlay), frames, values, keys)
+        hud = self.b.scene.get('hud')
+        if hud:
+            hud = {'first': os.path.join(self.b.dir, 'hud', '0001.png'), 'keys': self.b.view(hud['keys']).reshape(-1, 2), 'total': self.b['frames'] + 1}
+        compositor.build(scene, (scene, self.vm_scene, self.sky, self.overlay), frames, values, keys, hud)
 
 
 def wound_by_normals(tris, pos, normal):
     """Triangles turned to face where their vertex normals do. Models come
     wound either way (the viewer draws them double-sided), but Cycles judges
     a face's front by its winding and turns the shading normal round on the
-    back: a model wound inside out would be lit from behind."""
+    back: a model wound inside out would be lit from behind. Also gives the
+    faces turned (None if none were)."""
     a, b, c = pos[tris[:, 0]], pos[tris[:, 1]], pos[tris[:, 2]]
     face = np.cross(b - a, c - a)
     vn = normal[tris[:, 0]] + normal[tris[:, 1]] + normal[tris[:, 2]]
     flip = np.einsum('ij,ij->i', face, vn) < 0
-    if flip.any():
-        tris = tris.copy()
-        tris[flip] = tris[flip][:, [0, 2, 1]]
-    return tris
+    if not flip.any():
+        return tris, None
+    tris = tris.copy()
+    tris[flip] = tris[flip][:, [0, 2, 1]]
+    return tris, flip
 
 
 UV_LAYERS = {'uv': 'UVMap', 'uv1': 'Lightmap', 'uv2': 'UV2'}

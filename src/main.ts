@@ -16,6 +16,7 @@ import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
 import {recordMp4, canExportVideo} from './ui/export.ts';
 import {BlenderCapture} from './blender/capture.ts';
+import {encodePng} from './blender/encode.ts';
 import type {Sink} from './blender/capture.ts';
 import {later, soon} from './core/later.ts';
 import {installModelWorkers} from './game/mdlpool.ts';
@@ -1056,15 +1057,44 @@ async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frame
 	try {
 		progress('Getting the first frame ready…', 0);
 		await exportSettle(from);
+		// a quick pass over the part first: what loads when it's first shown
+		// (movie screens, models, effects' sprites) is in by the time its
+		// frames are recorded
+		for (let tick = from, n = 0; tick < to; tick += 30, n++) {
+			if (blenderCancelled) return null;
+			seekTo(tick);
+			if (n % 4 === 3) await new Promise(r => setTimeout(r, 0));
+		}
+		await exportSettle(from);
 		const capture = new BlenderCapture(view3d, sink, {
 			demo: pb.run.fileName, map: track.seg.map, fps, startTick: pb.locate(from).tick,
 			tickInterval: track.seg.intervalPerTick, ticksPerFrame: step, width, height,
 		});
 		await capture.prepare();
+		// the game's on-screen text (chapter titles, game_text), as the video
+		// export draws it: a picture each time it changes (hud/0001.png on)
+		const hud = gameFiles && titlesShown ? new HudText(gameFiles, document.createElement('canvas')) : null;
+		await hud?.load();
+		const hudKeys: number[] = [];
+		let hudLast = '', hudCount = 0;
+		const thumb = new OffscreenCanvas(96, 54).getContext('2d', {willReadFrequently: true})!;
 		for (let i = 0; i < frames; i++) {
 			if (blenderCancelled) return null;
 			seekTo(Math.min(to, from + i * step));
 			capture.capture();
+			if (hud) {
+				const messages = view3d.hudMessages();
+				hud.draw(messages?.messages ?? null, pb.locate(t).tick * (messages?.interval ?? 0), messages?.interval ?? 0, [width, height]);
+				thumb.clearRect(0, 0, 96, 54);
+				thumb.drawImage(hud.canvas, 0, 0, 96, 54);
+				const sig = thumb.getImageData(0, 0, 96, 54).data.join(',');
+				if (sig !== hudLast) {
+					hudLast = sig;
+					const px = hud.canvas.getContext('2d')!.getImageData(0, 0, width, height).data;
+					await sink.write(`hud/${String(++hudCount).padStart(4, '0')}.png`, await encodePng(width, height, new Uint8Array(px.buffer), true));
+					hudKeys.push(i, hudCount - 1);
+				}
+			}
 			if (job.reference?.includes(i) && view3d.canvas) {
 				// (copied straight after it's drawn: the canvas isn't kept)
 				const shot = new OffscreenCanvas(width, height);
@@ -1077,6 +1107,8 @@ async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frame
 			await capture.flush();
 			if (i % 30 === 29) await new Promise(r => setTimeout(r, 0));
 		}
+		// (only worth a layer if anything was ever shown)
+		capture.hud = hudCount > 1 ? {count: hudCount, keys: hudKeys} : null;
 		const out = await capture.finish(note => progress(note, 1));
 		return {name, frames, ...out};
 	} finally {

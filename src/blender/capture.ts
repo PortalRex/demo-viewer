@@ -249,6 +249,8 @@ export class BlenderCapture {
 	// the gel (its map, in light map coordinates, changes as it's painted)
 	private paint: {map: number | null; splat: number | null; tiles: number[]} | null = null;
 	private frames = 0;
+	// the on-screen text's pictures (hud/), and the frames each starts at
+	hud: {count: number; keys: number[]} | null = null;
 	private unsupported = new Map<string, number>();
 	private files: GameFiles;
 	readonly info: CaptureInfo;
@@ -535,12 +537,21 @@ export class BlenderCapture {
 		const range = g.drawRange;
 		const total = g.index ? g.index.count : pos.count;
 		const start = range.start, end = Math.min(total, range.start + (Number.isFinite(range.count) ? range.count : total));
+		// (a mirroring placement turns faces round, which the viewer allows for
+		// when it culls their backs: baked in, the corners go the other way)
+		const mirrored = world.determinant() < 0;
 		const order: number[] = [];
 		if (d.quads) {
-			for (let i = start; i + 5 < end; i += 6) order.push(i, i + 1, i + 2, i + 5);
+			for (let i = start; i + 5 < end; i += 6) {
+				if (mirrored) order.push(i, i + 5, i + 2, i + 1);
+				else order.push(i, i + 1, i + 2, i + 5);
+			}
 		} else {
-			for (let i = start; i < end; i++) order.push(g.index ? g.index.getX(i) : i);
-			order.length -= order.length % 3;
+			const at = (i: number) => (g.index ? g.index.getX(i) : i);
+			for (let i = start; i + 2 < end; i += 3) {
+				if (mirrored) order.push(at(i), at(i + 2), at(i + 1));
+				else order.push(at(i), at(i + 1), at(i + 2));
+			}
 		}
 		const count = order.length;
 		if (!count) return;
@@ -1078,6 +1089,7 @@ export class BlenderCapture {
 				sequence: t.live && t.live.count > 1 ? {count: t.live.count, keys: bin.add(new Float64Array(t.live.keys))} : undefined,
 			})),
 			paint: this.paint,
+			hud: this.hud ? {count: this.hud.count, keys: bin.add(new Float64Array(this.hud.keys))} : null,
 			geometries: this.geoList,
 			materials: this.matList,
 			skeletons,
