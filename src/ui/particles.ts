@@ -566,13 +566,19 @@ export class ParticleInstance {
 				break;
 			}
 			case 'position modify warp random': {
-				// stretches the particle's offset from the point, per local axis
+				// stretches the particle's offset from the point, per local axis,
+				// and its velocity with it (the engine warps its previous position
+				// too): a sphere's burst squashed flat stays flat
 				const m = this.cp(num(o, 'control point number', 0));
 				const lo = vec(o, 'warp min', [1, 1, 1]), hi = vec(o, 'warp max', [1, 1, 1]), k = this.rand();
+				const s = [0, 1, 2].map(i => lo[i] + (hi[i] - lo[i]) * k);
 				const inv = m.clone().invert();
 				const l = p.pos.clone().applyMatrix4(inv);
-				l.set(l.x * (lo[0] + (hi[0] - lo[0]) * k), l.y * (lo[1] + (hi[1] - lo[1]) * k), l.z * (lo[2] + (hi[2] - lo[2]) * k));
-				p.pos = l.applyMatrix4(m);
+				p.pos = l.set(l.x * s[0], l.y * s[1], l.z * s[2]).applyMatrix4(m);
+				const v = p.vel.clone().transformDirection(inv).multiplyScalar(p.vel.length());
+				v.set(v.x * s[0], v.y * s[1], v.z * s[2]);
+				const speed = v.length();
+				p.vel = v.transformDirection(m).multiplyScalar(speed);
 				break;
 			}
 			case 'position modify offset random': {
@@ -1227,9 +1233,9 @@ export class ParticleRenderer {
 	}
 
 	// A rope through the particles in spawn order, smoothed (Catmull-Rom),
-	// facing the camera (or, for $orientation 3 materials, widened across
+	// facing the camera (or, for $orientation 3 materials, widened along
 	// the particles' normals: those that "remap direction to cp to vector"
-	// points at a control point, so the rope faces it), its whole width each
+	// points at a control point), its whole width each
 	// particle's radius; the texture runs along it by distance and scrolls
 	private rope(b: Batch, inst: ParticleInstance, r: ParticleOperator, camPos: THREE.Vector3,
 		quad: (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][]) => void, orientation = 0) {
@@ -1266,9 +1272,15 @@ export class ParticleRenderer {
 			const len = dir.length();
 			if (len < 1e-4) continue;
 			dir.divideScalar(len);
-			const toward = aimAt ?? camPos;
-			const sideA = dir.clone().cross(toward.clone().sub(a.p)).normalize();
-			const sideZ = dir.clone().cross(toward.clone().sub(z.p)).normalize();
+			// (facing the camera; or, oriented, widened towards the control
+			// point the normals point at, lying flat in the plane that holds
+			// it: a portal's edge is a band in the portal's plane)
+			const across = (p: THREE.Vector3) => {
+				if (!aimAt) return dir.clone().cross(camPos.clone().sub(p)).normalize();
+				const to = aimAt.clone().sub(p);
+				return to.addScaledVector(dir, -to.dot(dir)).normalize();
+			};
+			const sideA = across(a.p), sideZ = across(z.p);
 			const u0 = dist * texel + scroll, u1 = (dist + len) * texel + scroll;
 			dist += len;
 			quad(b,
