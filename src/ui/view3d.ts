@@ -3363,6 +3363,19 @@ export class View3D {
 		const out: [THREE.Vector3, THREE.Vector3][] = [[start, end]];
 		let a = start, b = end;
 		for (let hop = 0; hop < 4; hop++) {
+			// (the end the server sends is past any portal the beam goes into,
+			// where it would be with the wall not there: the beam stops at the
+			// portal, and the rest of the line, through the pair, ends where it
+			// really does)
+			const crossing = this.portalCrossing(a, b);
+			if (crossing) {
+				out[out.length - 1] = [a, crossing.at];
+				const m = this.portalTransform(crossing.from, crossing.to);
+				a = crossing.at.clone().applyMatrix4(m);
+				b = b.clone().applyMatrix4(m);
+				out.push([a, b]);
+				continue;
+			}
 			const dir = b.clone().sub(a).normalize();
 			let through: {from: THREE.Object3D; to: THREE.Object3D} | null = null;
 			for (const p of this.portals.values()) {
@@ -3388,6 +3401,25 @@ export class View3D {
 			out.push([a, b]);
 		}
 		return out;
+	}
+
+	// where a line goes into the front of a linked portal, within its oval
+	// (the nearest one along it)
+	private portalCrossing(a: THREE.Vector3, b: THREE.Vector3): {at: THREE.Vector3; from: THREE.Object3D; to: THREE.Object3D} | null {
+		let best: {at: THREE.Vector3; from: THREE.Object3D; to: THREE.Object3D} | null = null, bestF = Infinity;
+		for (const p of this.portals.values()) {
+			const linked = this.portals.get(p.link);
+			if (!linked) continue;
+			const la = p.obj.worldToLocal(a.clone()), lb = p.obj.worldToLocal(b.clone());
+			// (an end on the portal itself is left to laserPath's trace)
+			if (la.x <= 0 || lb.x >= -1) continue;
+			const f = la.x / (la.x - lb.x);
+			const at = la.lerp(lb, f);
+			if ((at.y / p.halfW) ** 2 + (at.z / p.halfH) ** 2 > 1.05 || f >= bestF) continue;
+			bestF = f;
+			best = {at: p.obj.localToWorld(at), from: p.obj, to: linked.obj};
+		}
+		return best;
 	}
 
 	// a mesh's bounds on screen in pixels (from the top left), padded a
