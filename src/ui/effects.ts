@@ -304,7 +304,7 @@ export class Laser {
 
 	// segments: pairs of points (the beam, then its continuations through
 	// portals), drawn as ribbons turned towards the camera
-	set(points: [THREE.Vector3, THREE.Vector3][], camera: THREE.Vector3) {
+	set(points: [THREE.Vector3, THREE.Vector3][], camera: THREE.Vector3, time = performance.now() / 1000) {
 		while (this.segments.length < points.length) {
 			const g = new THREE.BufferGeometry();
 			g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(18), 3));
@@ -316,7 +316,7 @@ export class Laser {
 			this.segments.push(mesh);
 		}
 		const width = this.width;
-		this.material.uniforms.time.value = performance.now() / 1000;
+		this.material.uniforms.time.value = time;
 		this.segments.forEach((mesh, i) => {
 			const p = points[i];
 			mesh.visible = !!p;

@@ -27,6 +27,23 @@ function devGameFiles(): Plugin {
 					res.end('ok');
 				});
 			});
+			// a Blender bundle's file: POST /__blender?path=<bundle>/<file>, saved
+			// under fixtures/blender (the export's sink when the dev server runs it)
+			server.middlewares.use('/__blender', (req, res) => {
+				const rel = normalize(decodeURIComponent(/path=([^&]*)/.exec(req.url ?? '')?.[1] ?? '')).replace(/^([/\\])+/, '');
+				if (!rel || rel.startsWith('..') || req.method !== 'POST') {
+					res.statusCode = 403;
+					return res.end();
+				}
+				const parts: Buffer[] = [];
+				req.on('data', (c: Buffer) => parts.push(c));
+				req.on('end', () => {
+					const path = join('fixtures/blender', rel);
+					mkdirSync(join(path, '..'), {recursive: true});
+					writeFileSync(path, Buffer.concat(parts));
+					res.end('ok');
+				});
+			});
 			// a game folder's loose asset files (so the viewer doesn't probe for each)
 			server.middlewares.use('/__game/__list', (req, res) => {
 				const dir = normalize(decodeURIComponent(/dir=([^&]*)/.exec(req.url ?? '')?.[1] ?? '')).replace(/^([/\\])+/, '');

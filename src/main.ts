@@ -15,6 +15,8 @@ import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
 import {recordMp4, canExportVideo} from './ui/export.ts';
+import {BlenderCapture} from './blender/capture.ts';
+import type {Sink} from './blender/capture.ts';
 import {later, soon} from './core/later.ts';
 import {installModelWorkers} from './game/mdlpool.ts';
 import {Materials} from './game/materials.ts';
@@ -967,6 +969,8 @@ $('export-go').onclick = async () => {
 		await hud?.load();
 		note.textContent = 'Getting the first frame ready…';
 		view3d.setCaptureSize([width, height]);
+		// (effects animate by the recording's time, not by how fast frames are drawn)
+		view3d.clock = () => t * track.seg.intervalPerTick;
 		await exportSettle(from);
 		const video = await recordMp4({
 			width, height, fps, frames,
@@ -1007,10 +1011,86 @@ $('export-go').onclick = async () => {
 	} finally {
 		exporting = false;
 		view3d.setCaptureSize(null);
+		view3d.clock = null;
 		note.textContent = noteText;
 		render();
 	}
 };
+
+// ---- Blender export ----
+// Part of a segment recorded for Blender: drawn frame by frame as the video
+// export does, each frame's scene taken from the 3D view (see
+// blender/capture.ts) into a bundle folder the Blender add-on imports
+interface BlenderJob {
+	from?: number;   // global ticks (default: the segment)
+	to?: number;
+	fps?: number;
+	width?: number;  // the render's size (the cameras' aspect)
+	height?: number;
+	name?: string;   // the bundle's folder name
+	sink?: Sink;
+	progress?: (note: string, done: number) => void;
+	reference?: number[];  // frames whose picture the viewer drew is saved too (reference/), to compare against
+}
+let blenderCancelled = false;
+async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frames: number; bytes: number; unsupported: Record<string, number>} | null> {
+	if (!pb) throw new Error('no run open');
+	const track = pb.tracks[pb.locate(job.from ?? t).index];
+	const from = Math.max(track.start, job.from ?? track.start);
+	const to = Math.min(track.start + track.length, job.to ?? track.start + track.length);
+	const fps = job.fps ?? 60;
+	const step = 1 / fps / track.seg.intervalPerTick;
+	const frames = Math.max(1, Math.floor((to - from) / step) + 1);
+	const [width, height] = [job.width ?? 1920, job.height ?? 1080];
+	const name = job.name ?? `${pb.run.fileName.replace(/\.[^.]+$/, '')}_${Math.round(from)}-${Math.round(to)}`;
+	const sink = job.sink ?? devBlenderSink(name);
+	const progress = job.progress ?? (() => {});
+	setPlaying(false);
+	blenderCancelled = false;
+	view3d.setCaptureSize([width, height]);
+	// (effects animate by the recording's time, not by how fast frames are drawn)
+	view3d.clock = () => t * track.seg.intervalPerTick;
+	try {
+		progress('Getting the first frame ready…', 0);
+		await exportSettle(from);
+		const capture = new BlenderCapture(view3d, sink, {
+			demo: pb.run.fileName, map: track.seg.map, fps, startTick: pb.locate(from).tick,
+			tickInterval: track.seg.intervalPerTick, ticksPerFrame: step, width, height,
+		});
+		await capture.prepare();
+		for (let i = 0; i < frames; i++) {
+			if (blenderCancelled) return null;
+			seekTo(Math.min(to, from + i * step));
+			capture.capture();
+			if (job.reference?.includes(i) && view3d.canvas) {
+				// (copied straight after it's drawn: the canvas isn't kept)
+				const shot = new OffscreenCanvas(width, height);
+				shot.getContext('2d')!.drawImage(view3d.canvas, 0, 0, width, height);
+				const png = new Uint8Array(await (await shot.convertToBlob({type: 'image/png'})).arrayBuffer());
+				await sink.write(`reference/frame_${String(i + 1).padStart(4, '0')}.png`, png);
+			}
+			progress(`Frame ${i + 1} of ${frames}`, (i + 1) / frames);
+			// (the page kept responsive now and then)
+			if (i % 30 === 29) await new Promise(r => setTimeout(r, 0));
+		}
+		const out = await capture.finish(note => progress(note, 1));
+		return {name, frames, ...out};
+	} finally {
+		view3d.setCaptureSize(null);
+		view3d.clock = null;
+		render();
+	}
+}
+// (dev: the files go to fixtures/blender/<name> through the dev server)
+function devBlenderSink(name: string): Sink {
+	return {
+		async write(file, data) {
+			const r = await fetch(`/__blender?path=${encodeURIComponent(`${name}/${file}`)}`, {method: 'POST', body: data});
+			if (!r.ok) throw new Error(`couldn't save ${file}: ${r.status}`);
+		},
+	};
+}
+if (import.meta.env.DEV) (window as unknown as {exportBlender: typeof exportBlender}).exportBlender = exportBlender;
 
 // #load=<url> opens a recording from a URL (one served next to the page,
 // or anywhere that allows it)

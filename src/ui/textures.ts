@@ -60,6 +60,8 @@ export class TextureCache {
 		if (!p) {
 			if (this.files.mapPak?.has(`materials/${path.toLowerCase()}.vtf`)) this.fromMap.add(key);
 			const loading: Promise<THREE.Texture | null> = this.load(path.toLowerCase(), linear, frame).catch(() => null).then(t => {
+				// (where it came from: the Blender export reads it again at full size)
+				if (t) t.userData.source = {path: path.toLowerCase(), linear, frame};
 				if (this.cache.get(key) === loading) this.loaded.set(key, t);
 				return t;
 			});

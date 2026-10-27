@@ -2545,7 +2545,7 @@ export class View3D {
 		o.position.set(0, 0, 0);
 		o.rotation.set(0, 0, 0);
 		if (o.userData.laser) {
-			(o.userData.laser as Laser).set(this.laserPath(vec3(e.m_vStartPoint)!, vec3(e.m_vEndPoint)!), this.camera.position);
+			(o.userData.laser as Laser).set(this.laserPath(vec3(e.m_vStartPoint)!, vec3(e.m_vEndPoint)!), this.camera.position, time);
 		} else if (o.userData.bridge) {
 			// across the bridge: the entity's right (-Y), turned by its angles
 			const right = new THREE.Vector3(0, -1, 0).applyEuler(toEuler(k.angles));
@@ -3103,7 +3103,7 @@ export class View3D {
 				this.turretLasers.set(t, laser);
 			}
 			laser.group.visible = true;
-			laser.set(this.laserPath(start, end), this.camera.position);
+			laser.set(this.laserPath(start, end), this.camera.position, this.effectTime());
 			seen.add(t);
 		}
 		for (const [t, laser] of this.turretLasers) if (!seen.has(t)) laser.group.visible = false;
@@ -4760,6 +4760,14 @@ export class View3D {
 	}
 
 	private frameNumber = 0;
+	// What the effects' animations (scrolling textures, flicker, flow) run
+	// by: the wall clock, or, while a video or Blender export draws frame by
+	// frame, the recording's own time in seconds
+	clock: (() => number) | null = null;
+	private effectTime() {
+		return this.clock ? this.clock() : performance.now() / 1000;
+	}
+
 	update(view: ViewState | null, tick: number) {
 		// (the partner's view first, so what's left set up is the main view's)
 		if (!this.pip) this.pipShown = this.updatePip(view, tick);
@@ -4770,7 +4778,7 @@ export class View3D {
 		const ents = this.entities;
 		if (ents) {
 			this.portals.clear();
-			const time = performance.now() / 1000;
+			const time = this.effectTime();
 			for (const m of this.fizzlers.values()) m.uniforms.time.value = time;
 			for (const m of this.energyLive) animateEnergy(m, time);
 			waterUniforms.waterTime.value = time;
