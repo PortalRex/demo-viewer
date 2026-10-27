@@ -918,6 +918,7 @@ interface SpriteMaterial {
 	// $depthblend: faded where it meets what's behind it, over this many
 	// units ($depthblendscale), else 0
 	depthBlend: number;
+	height: number;       // the texture's height in texels (a rope's texture repeats every height x texel_size units)
 }
 
 // a blob-rendered system's particles this frame, and the blob shape
@@ -1072,7 +1073,8 @@ export class ParticleRenderer {
 		const sheet = bytes ? readVtfSheet(bytes) : null;
 		sheets.set(name, sheet);
 		const depthBlend = on('$depthblend') ? param('$depthblendscale', 50) : 0;
-		return {material, sheet, orientation: Number(m.params.get('$orientation') ?? 0) || 0, dual, size, depthBlend};
+		const height = (tex.image as {height?: number} | undefined)?.height || 1;
+		return {material, sheet, orientation: Number(m.params.get('$orientation') ?? 0) || 0, dual, size, depthBlend, height};
 	}
 
 	// $depthblend, as the shader's (each pixel faded by how far the world
@@ -1132,7 +1134,7 @@ export class ParticleRenderer {
 				if (r.fn !== 'render_animated_sprites' && r.fn !== 'render_sprite_trail' && r.fn !== 'render_rope') continue;
 				if (!b) batches.set(def.material, b = {pos: [], uv: [], uv2: [], col: []});
 				if (r.fn === 'render_rope') {
-					this.rope(b, inst, r, camPos, quad, sprite.orientation);
+					this.rope(b, inst, r, camPos, quad, sprite.orientation, sprite.height);
 					continue;
 				}
 				const trail = r.fn === 'render_sprite_trail';
@@ -1236,9 +1238,9 @@ export class ParticleRenderer {
 	// facing the camera (or, for $orientation 3 materials, widened along
 	// the particles' normals: those that "remap direction to cp to vector"
 	// points at a control point), its whole width each
-	// particle's radius; the texture runs along it by distance and scrolls
+	// particle's radius; the texture repeats along it every texture height x texel_size units and scrolls
 	private rope(b: Batch, inst: ParticleInstance, r: ParticleOperator, camPos: THREE.Vector3,
-		quad: (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][]) => void, orientation = 0) {
+		quad: (b: Batch, c: THREE.Vector3[], uv: number[][], col: number[][]) => void, orientation = 0, height = 1) {
 		const aim = orientation === 3 ? inst.def.operators.find(o => o.fn === 'remap direction to cp to vector') : undefined;
 		const aimAt = aim ? inst.cpPos(num(aim, 'control point', 0)) : null;
 		const ps = [...inst.particles].sort((x, y) => x.index - y.index);
@@ -1246,8 +1248,10 @@ export class ParticleRenderer {
 		// (each the rest of the step along its velocity, as sprites are drawn)
 		const pos = ps.map(p => inst.ahead ? p.pos.clone().addScaledVector(p.vel, inst.ahead) : p.pos);
 		const sub = Math.max(1, Math.floor(num(r, 'subdivision_count', 3)));
-		const texel = num(r, 'texel_size', 4);
-		const scroll = num(r, 'texture_scroll_rate', 0) * inst.time + num(r, 'texture_offset', 0);
+		// (the texture once every height x texel_size units along it,
+		// scrolling and offset in units: C_OP_RenderRope)
+		const texel = 1 / Math.max(1e-6, height * num(r, 'texel_size', 4));
+		const shift = num(r, 'texture_scroll_rate', 0) * inst.time + num(r, 'texture_offset', 0);
 		const pts: {p: THREE.Vector3; w: number; c: number[]}[] = [];
 		for (let i = 0; i + 1 < ps.length; i++) {
 			const p0 = pos[Math.max(0, i - 1)], p1 = pos[i], p2 = pos[i + 1], p3 = pos[Math.min(ps.length - 1, i + 2)];
@@ -1281,7 +1285,7 @@ export class ParticleRenderer {
 				return to.addScaledVector(dir, -to.dot(dir)).normalize();
 			};
 			const sideA = across(a.p), sideZ = across(z.p);
-			const u0 = dist * texel + scroll, u1 = (dist + len) * texel + scroll;
+			const u0 = (dist + shift) * texel, u1 = (dist + len + shift) * texel;
 			dist += len;
 			quad(b,
 				[a.p.clone().addScaledVector(sideA, -a.w), a.p.clone().addScaledVector(sideA, a.w), z.p.clone().addScaledVector(sideZ, z.w), z.p.clone().addScaledVector(sideZ, -z.w)],
