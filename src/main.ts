@@ -1,7 +1,7 @@
 import {loadRuns} from './core/load.ts';
 import {Playback, viewAt, cmdAt, lastAtOrBefore} from './player/playback.ts';
 import type {SegmentTrack, Located} from './player/playback.ts';
-import type {Segment} from './core/model.ts';
+import type {Run, Segment} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
@@ -880,8 +880,10 @@ function racerTrack(r: Racer, loc: Located): SegmentTrack | null {
 	return r.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
 }
 // where a segment's run finishes (the challenge mode flags, as the board's
-// runs record them) and how many ticks SAR's timer gave it, where known
-function finishOf(seg: Segment): {tick: number; ticks: number | null} | null {
+// runs record them) and how many ticks SAR's timer gave it, where known: in
+// the demo, or else in a one-map run's file name as the board names its
+// demos (map_time_steamid_id, the time in hundredths)
+function finishOf(seg: Segment, run: Run): {tick: number; ticks: number | null} | null {
 	let tick: number | null = null, ticks: number | null = null;
 	for (const e of seg.sar) {
 		if (e.kind === 'cmFlags' && ticks === null) tick = e.tick;
@@ -890,6 +892,8 @@ function finishOf(seg: Segment): {tick: number; ticks: number | null} | null {
 			ticks = e.splits.reduce((n, s) => n + s.segments.reduce((m, x) => m + x.ticks, 0), 0) || null;
 		}
 	}
+	const named = /_(\d{3,8})_\d{17}_\d+\.(dem|sarp)$/i.exec(run.fileName);
+	if (ticks === null && named && run.segments.length === 1) ticks = Math.round(Number(named[1]) / 100 / seg.intervalPerTick);
 	return tick === null ? null : {tick, ticks};
 }
 // (a racer's tick as many seconds into its run as this one is into its own:
@@ -898,7 +902,8 @@ function finishOf(seg: Segment): {tick: number; ticks: number | null} | null {
 // of a co-op run starts recording at its own moment; else from where each
 // segment starts)
 function racerTick(loc: Located, track: SegmentTrack) {
-	const a = finishOf(loc.track.seg), b = finishOf(track.seg);
+	const other = racers.find(r => r.pb.tracks.includes(track));
+	const a = pb && finishOf(loc.track.seg, pb.run), b = other && finishOf(track.seg, other.pb.run);
 	const startA = a && b ? a.tick - (a.ticks ?? b.ticks ?? 0) : loc.track.seg.firstTick;
 	const startB = a && b ? b.tick - (b.ticks ?? a.ticks ?? 0) : track.seg.firstTick;
 	const seconds = (loc.tick - startA) * loc.track.seg.intervalPerTick;

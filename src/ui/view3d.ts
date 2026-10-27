@@ -2258,6 +2258,15 @@ export class View3D {
 		const tag = (feet: THREE.Vector3, top: number, name: string, color: string | null) => {
 			const head = new THREE.Vector3(feet.x, feet.y, feet.z + top + 12);
 			const p = head.clone().project(cam);
+			// (a head above the top of the view, its body in it, as up close:
+			// the tag kept at the top)
+			if (p.y > 0.88 && p.z >= -1 && p.z <= 1) {
+				const f = feet.clone().project(cam);
+				if (f.z >= -1 && f.z <= 1 && f.y < 1 && f.y > -1 && Math.abs(f.x) < 1) {
+					p.y = 0.88;
+					p.x = Math.max(-1, Math.min(1, p.x));
+				}
+			}
 			if (p.z < -1 || p.z > 1 || Math.abs(p.x) > 1.1 || Math.abs(p.y) > 1.1) return;
 			const d = head.distanceTo(at);
 			const dir = head.clone().sub(at).divideScalar(Math.max(d, 1e-3));
