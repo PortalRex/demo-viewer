@@ -988,6 +988,9 @@ export class View3D {
 	// views: drawn at its size, and not reallocated every frame between them)
 	private pipMeter = {
 		exposure: 1, meterTarget: null as number | null, meterPending: false, meterTickLast: 0, meterSnap: true, targetHistory: [] as number[], lastRender: 0, meterCount: 0,
+		// (its own read in flight: one finished under the other view's state
+		// left that view waiting on it for good, its exposure stuck)
+		meterRead: null as View3D['meterRead'],
 		portalTargets: new Map<THREE.Object3D, THREE.WebGLRenderTarget>(), waterTargets: new Map<number, THREE.WebGLRenderTarget>(), refractTargets: new Map<number, THREE.WebGLRenderTarget>(),
 	};
 	// free camera: held movement keys, view angles (degrees), drag state
@@ -1309,6 +1312,8 @@ export class View3D {
 	}
 
 	setMap(bsp: BspMap | null, files: GameFiles | null = null, materials: Materials | null = null) {
+		// (no meter read carried over: a new map's first reading is taken as is)
+		this.dropMeterReads();
 		for (const m of this.energyMaterials.values()) m.then(e => e?.dispose());
 		this.energyMaterials.clear();
 		this.energyLive.clear();
@@ -4475,6 +4480,17 @@ export class View3D {
 		const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
 		gl.flush();
 		this.meterRead = {buffer, sync, px, floats, done};
+	}
+	private dropMeterReads() {
+		const gl = this.renderer?.getContext() as WebGL2RenderingContext | undefined;
+		for (const m of [this as unknown as typeof this.pipMeter, this.pipMeter]) {
+			if (m.meterRead && gl) {
+				if (m.meterRead.sync) gl.deleteSync(m.meterRead.sync);
+				gl.deleteBuffer(m.meterRead.buffer);
+			}
+			m.meterRead = null;
+			m.meterPending = false;
+		}
 	}
 	private finishMeterRead(r: THREE.WebGLRenderer) {
 		const read = this.meterRead;
