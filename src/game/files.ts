@@ -4,6 +4,7 @@
 import {LOOSE_DIRS, type GameFS} from './gamefs.ts';
 import {Vpk} from './vpk.ts';
 import type {Zip} from './zip.ts';
+import {cacheGet, cacheSet} from '../core/idbcache.ts';
 
 export class GameFiles {
 	readonly fs: GameFS;
@@ -35,8 +36,31 @@ export class GameFiles {
 		this.dirs = dirs;
 		await Promise.all(dirs.map(async d => {
 			if (!this.vpks.has(d)) this.vpks.set(d, await Vpk.open(this.fs, `${d}/pak01_dir.vpk`).catch(() => null));
-			if (!this.loose.has(d)) this.loose.set(d, this.fs.list ? await this.fs.list(d).catch(() => null) : null);
+			if (!this.loose.has(d)) this.loose.set(d, await this.listLoose(d));
 		}));
+	}
+
+	// A game folder's loose files: as listed on an earlier visit, where there
+	// was one (walking the folders took the better part of a second), and
+	// listed again in the background, the list kept up to date with that
+	private async listLoose(dir: string): Promise<Set<string> | null> {
+		const fs = this.fs;
+		if (!fs.list) return null;
+		const key = `loose|${fs.label}|${dir}`;
+		const fresh = () => fs.list!(dir).catch(() => null);
+		const kept = await cacheGet<string[]>(key);
+		if (!kept) {
+			const listed = await fresh();
+			if (listed) void cacheSet(key, [...listed]);
+			return listed;
+		}
+		void fresh().then(listed => {
+			if (!listed) return;
+			this.loose.set(dir, listed);
+			for (const p of listed) this.missing.delete(`${dir}/${p}`);
+			void cacheSet(key, [...listed]);
+		});
+		return new Set(kept);
 	}
 
 	async read(path: string): Promise<Uint8Array | null> {
