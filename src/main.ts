@@ -469,6 +469,7 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 		pb = new Playback(run);
 		$('drop').hidden = true;
 		$('viewer').hidden = false;
+		$('close-run').hidden = false;
 		panels.setRun(run, i => seekTo(pb!.tracks[i].start));
 		timeline.pb = pb;
 		currentSeg = -1;
@@ -486,6 +487,33 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 		showError(`Couldn't open ${name}: ${(e as Error).message}`);
 	}
 }
+
+// back to the start page: the run, its raced runs and its map let go
+function closeRun() {
+	if (!pb || exporting) return;
+	setPlaying(false);
+	pb = null;
+	timeline.pb = null;
+	++mapToken;
+	currentSeg = segIn3d = segLoading = -1;
+	entityCache.clear();
+	for (const r of racers) r.row.remove();
+	racers = [];
+	view3d.ghosts = [];
+	pathView.racers = [];
+	$('ghost-hud').hidden = true;
+	$('ghost').classList.remove('on');
+	view3d.setMap(null);
+	$('viewer').hidden = true;
+	$('drop').hidden = false;
+	$('close-run').hidden = true;
+	$('run-title').textContent = '';
+	$('badges').textContent = '';
+	$('drop-file').textContent = '';
+	document.title = 'SAR Run Viewer';
+	if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+}
+$('close-run').onclick = closeRun;
 
 // the challenge mode HUD (Eyes view of a challenge mode recording), as the
 // game draws it; its toggle shows with it and is remembered per browser
@@ -723,6 +751,15 @@ function render() {
 $('play').onclick = () => setPlaying(!playing);
 $('back').onclick = () => seekTo(t - 60);
 $('fwd').onclick = () => seekTo(t + 60);
+// (a tick at a time, paused, onto whole ticks)
+$('tick-back').onclick = () => {
+	setPlaying(false);
+	seekTo(Math.ceil(t) - 1);
+};
+$('tick-fwd').onclick = () => {
+	setPlaying(false);
+	seekTo(Math.floor(t) + 1);
+};
 $<HTMLSelectElement>('rate').onchange = e => (rate = Number((e.target as HTMLSelectElement).value));
 $('fit').onclick = () => {
 	pathView.fit();

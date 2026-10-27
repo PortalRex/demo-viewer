@@ -12,6 +12,7 @@
 			<div class="brand">SAR Run Viewer</div>
 			<div id="run-title" class="run-title"></div>
 			<div id="badges" class="badges"></div>
+			<button id="close-run" class="close-btn" hidden title="Close this run (and the runs raced against it), freeing what was loaded for it">Close</button>
 			<label class="open-btn">
 				<input id="file-input" type="file" accept=".sarp,.dem" multiple hidden>
 				Open file
@@ -110,6 +111,8 @@
 					<button id="play" title="Play / pause (Space)">▶</button>
 					<button id="back" title="Back 1 s (Shift+←)">−1s</button>
 					<button id="fwd" title="Forward 1 s (Shift+→)">+1s</button>
+					<button id="tick-back" title="Back 1 tick, paused (←)">−1t</button>
+					<button id="tick-fwd" title="Forward 1 tick, paused (→)">+1t</button>
 					<select id="rate" title="Playback speed">
 						<option value="0.25">0.25×</option>
 						<option value="0.5">0.5×</option>

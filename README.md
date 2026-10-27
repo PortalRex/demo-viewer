@@ -195,9 +195,10 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 | | |
 |---|---|
 | <kbd>Space</kbd> | Play / pause |
-| <kbd>←</kbd> <kbd>→</kbd> | Step one tick |
-| <kbd>Shift</kbd> + <kbd>←</kbd> <kbd>→</kbd> | Step one second |
+| <kbd>←</kbd> <kbd>→</kbd> | Step one tick (or the **−1t** / **+1t** buttons, which also pause) |
+| <kbd>Shift</kbd> + <kbd>←</kbd> <kbd>→</kbd> | Step one second (or **−1s** / **+1s**) |
 | <kbd>Home</kbd> | Back to the start of the segment |
+| **Close** | Closes the run and the runs raced against it, and frees the loaded map, back to the start page |
 | **Orbit** | Drag to turn, scroll to zoom in or out as far as you like |
 | **Chase** | Follows behind the player along where they look, closer where a wall is in the way |
 | **Free** | Drag to look, <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to move, <kbd>Q</kbd>/<kbd>E</kbd> down/up, <kbd>Shift</kbd> faster, <kbd>Ctrl</kbd> slower |
