@@ -37,7 +37,7 @@ import {later, soon} from '../core/later.ts';
 import {background, afterFrame} from './background.ts';
 import {Bloom, ENCODE} from './bloom.ts';
 
-export type CameraMode = 'eyes' | 'orbit' | 'free';
+export type CameraMode = 'eyes' | 'orbit' | 'free' | 'chase';
 
 // Portal 2's 90° horizontal FOV at 4:3, as a vertical FOV (widescreen keeps it)
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
@@ -5193,7 +5193,7 @@ export class View3D {
 			: view ? new THREE.Vector3(...view.origin) : null;
 		this.applyControllers(pk, tick);
 		// screen-door dissolve of whatever is between the orbit camera and the player
-		ditherUniforms.ditherOn.value = feet && this.mode === 'orbit' ? 1 : 0;
+		ditherUniforms.ditherOn.value = feet && (this.mode === 'orbit' || this.mode === 'chase') ? 1 : 0;
 		if (feet) ditherUniforms.ditherTarget.value.copy(feet).add(new THREE.Vector3(0, 0, 36));
 		if (feet) {
 			this.player.position.copy(feet);
@@ -5220,6 +5220,8 @@ export class View3D {
 				else this.portalledEye(feet);
 			} else if (this.mode === 'free') {
 				// the free camera goes where the user takes it
+			} else if (this.mode === 'chase') {
+				this.chaseCamera(eye, tick);
 			} else if (this.controls) {
 				// follow: move the camera with the player, keep the user's angle
 				const target = feet.clone();
@@ -5241,6 +5243,47 @@ export class View3D {
 		this.updateFlashlight(tick);
 		this.lightModels();
 		this.render();
+	}
+
+	// Chase: behind the followed player, along where they've been looking
+	// (the view's yaw over the last third of a second, its pitch eased), a
+	// little above, pulled in where a wall is behind them; looking just
+	// ahead of their eye. Worked out from the tick alone, so seeking or
+	// exporting gives the same shot
+	private chaseCamera(eye: THREE.Vector3, tick: number) {
+		const anglesAt = (t: number): number[] | null => {
+			if (this.followed) return this.entityPose(this.followed, t).angles;
+			const v = this.track && viewAt(this.track, t);
+			return v ? v.angles : null;
+		};
+		let yaw = 0, pitch = 0, n = 0, last: number | null = null;
+		for (let k = 0; k <= 10; k++) {
+			const a = anglesAt(Math.max(0, tick - k * 2));
+			if (!a) continue;
+			let y = a[1];
+			// (unwrapped against the one before)
+			if (last !== null) y = last + ((y - last + 540) % 360) - 180;
+			last = y;
+			yaw += y;
+			pitch += a[0];
+			n++;
+		}
+		if (n) {
+			yaw /= n;
+			pitch /= n;
+		}
+		const p = Math.max(-20, Math.min(35, pitch * 0.5)) * Math.PI / 180, y = yaw * Math.PI / 180;
+		const fwd = new THREE.Vector3(Math.cos(p) * Math.cos(y), Math.cos(p) * Math.sin(y), -Math.sin(p));
+		const want = eye.clone().addScaledVector(fwd, -CHASE_DISTANCE);
+		want.z += 22;
+		const to = want.clone().sub(eye);
+		const len = to.length();
+		to.divideScalar(len);
+		const hit = this.collision?.raycastFirst(new THREE.Ray(eye.clone(), to), THREE.DoubleSide);
+		const reach = hit && hit.distance < len + 10 ? Math.max(16, hit.distance - 10) : len;
+		this.camera.position.copy(eye).addScaledVector(to, reach);
+		this.camera.up.set(0, 0, 1);
+		this.camera.lookAt(eye.clone().addScaledVector(fwd, 80));
 	}
 
 	// (each body where its player stands, turned to its aim, the marker on its

@@ -61,7 +61,7 @@ computer.
 </tr>
 <tr>
 <td><b>On the map (Top / Side).</b> The route coloured by speed, portal placements, teleports, the view cone, inputs and a speed graph. It works without the game installed.</td>
-<td><b>In 3D (Eyes / Orbit / Free).</b> Through the runner's eyes, orbiting them, or flying freely. Walls between the camera and the player dissolve so you never lose sight of them.</td>
+<td><b>In 3D (Eyes / Orbit / Chase / Free).</b> Through the runner's eyes, orbiting them, following behind them, or flying freely. Walls between the camera and the player dissolve so you never lose sight of them.</td>
 </tr>
 </table>
 
@@ -194,6 +194,7 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 | <kbd>Shift</kbd> + <kbd>←</kbd> <kbd>→</kbd> | Step one second |
 | <kbd>Home</kbd> | Back to the start of the segment |
 | **Orbit** | Drag to turn, scroll to zoom in or out as far as you like |
+| **Chase** | Follows behind the player along where they look, closer where a wall is in the way |
 | **Free** | Drag to look, <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to move, <kbd>Q</kbd>/<kbd>E</kbd> down/up, <kbd>Shift</kbd> faster, <kbd>Ctrl</kbd> slower |
 
 These toggles in the 3D view are remembered per browser:

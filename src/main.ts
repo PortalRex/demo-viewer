@@ -1276,7 +1276,7 @@ function parseMoment(hash: string): {load: string | null; moment: Moment | null}
 		moment: {
 			tick: Number(q.get('t')) || 0,
 			view: view === '3d' || view === 'side' ? view : 'top',
-			camera: cam === 'eyes' || cam === 'orbit' || cam === 'free' ? {mode: cam, pos: nums('pos'), ang: nums('ang'), offset: nums('off')} : undefined,
+			camera: cam === 'eyes' || cam === 'orbit' || cam === 'free' || cam === 'chase' ? {mode: cam, pos: nums('pos'), ang: nums('ang'), offset: nums('off')} : undefined,
 			file: q.get('file') ?? undefined,
 		},
 	};
