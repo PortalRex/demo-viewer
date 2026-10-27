@@ -47,6 +47,9 @@ computer.
 <td><img src="docs/images/coop.jpg" alt="Atlas mid-fling in a co-op chamber"><br><sub><b>Animated players:</b> Chell, Atlas and P-body move as recorded: running, jumping, flinging, aiming.</sub></td>
 <td><img src="docs/images/core.jpg" alt="Space, from the finale"><br><sub><b>Anywhere in the game:</b> every single-player and co-op map, including the finale and space.</sub></td>
 </tr>
+<tr>
+<td colspan="2" align="center"><img src="docs/images/coop_race.gif" alt="A co-op race on Buttons: one run through a player's eyes, the other run's players as blue and orange ghosts, with how far ahead or behind each is" width="640"><br><sub><b>Co-op race:</b> Bexc & hero's 17.56 on Buttons, raced against RealCreative & unity's 17.60. The other run's players are ghosts in their own colours, each compared with the player doing the same job, with the partner's view in the corner.</sub></td>
+</tr>
 </table>
 
 ## Two ways to watch
@@ -125,8 +128,11 @@ computer.
 - **Ghost race:** load other runs of the same map, as many as you like. Each
   one's player is drawn in its own colour beside yours (a glowing ghost in
   3D, a marker in the Top and Side views), with a live readout of how far
-  ahead or behind you are, measured where it passed the same spot. Each can
-  be hidden, have its path drawn through the map, or be taken off again.
+  ahead or behind you are, measured where it passed the same spot. Runs are
+  lined up from where each one's timer started, and in co-op each player is
+  compared with the one doing the same job. Each can be hidden, have its path
+  drawn through the map, or be taken off again, and exported videos show the
+  readout too.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the
