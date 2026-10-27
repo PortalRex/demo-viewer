@@ -795,6 +795,7 @@ export class View3D {
 	// Eyes view with its own field of view, as the game does
 	private vmScene = new THREE.Scene();
 	private vmCam = new THREE.PerspectiveCamera(VIEWMODEL_FOV, 1, 1, 2000);
+	private fpCam = new THREE.PerspectiveCamera();  // the first-person effects' (see render)
 	private vmObjects = new Map<EntityTrack, THREE.Group>();
 	private vmShown: THREE.Group | null = null;
 	private eyeAngles: number[] = [0, 0, 0];
@@ -4855,9 +4856,18 @@ export class View3D {
 			ditherUniforms.ditherOn.value = 0;
 			r.render(this.vmScene, this.vmCam);
 			ditherUniforms.ditherOn.value = dither;
+			// first-person effects over it, tested against its depth (as the
+			// game draws the view model's translucents): a glow inside the
+			// gun's nose stays hidden. Formatting their points kept their
+			// distance along the view, so with the view model camera's near
+			// and far their depths match the gun's
 			if (this.fpParticlesShown.length) {
-				r.clearDepth();
-				r.render(this.fpScene, this.camera);
+				const cam = this.fpCam;
+				cam.copy(this.camera);
+				cam.near = this.vmCam.near;
+				cam.far = this.vmCam.far;
+				cam.updateProjectionMatrix();
+				r.render(this.fpScene, cam);
 			}
 			r.autoClear = auto;
 		}

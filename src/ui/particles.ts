@@ -66,6 +66,49 @@ const endCapOk = (o: ParticleOperator, ending: boolean) => {
 	return s < 0 || (s === 1) === ending;
 };
 
+// ---- noise ----
+
+// The particle system's noise (NoiseSIMD): values on a unit lattice, blended
+// trilinearly between the eight corners around a point (its position in the
+// cell in 1/256 steps), -1..1. Typical values sit well inside that range,
+// and nearby points get nearby values. (The lattice is this file's own:
+// any random table looks the same.)
+const LATTICE = (() => {
+	const r: Rng = {a: 0x5eed};
+	const perm = () => {
+		const a = Array.from({length: 256}, (_, i) => i);
+		for (let i = 255; i > 0; i--) {
+			const j = Math.floor(nextRandom(r) * (i + 1));
+			[a[i], a[j]] = [a[j], a[i]];
+		}
+		return Uint8Array.from(a);
+	};
+	return {a: perm(), b: perm(), c: perm(), values: Float32Array.from({length: 256}, () => nextRandom(r))};
+})();
+function latticeValue(x: number, y: number, z: number): number {
+	const {a, b, c, values} = LATTICE;
+	return values[c[(z + b[(y + a[x & 255]) & 255]) & 255]];
+}
+export function noise3(x: number, y: number, z: number): number {
+	const cell = (v: number) => {
+		const q = Math.floor(v * 256);
+		return [q >> 8, (q & 255) / 256];
+	};
+	const [xi, xf] = cell(x), [yi, yf] = cell(y), [zi, zf] = cell(z);
+	const lerp = (u: number, v: number, t: number) => u + (v - u) * t;
+	const at = (dx: number, dy: number, dz: number) => latticeValue(xi + dx, yi + dy, zi + dz);
+	const x00 = lerp(at(0, 0, 0), at(1, 0, 0), xf), x10 = lerp(at(0, 1, 0), at(1, 1, 0), xf);
+	const x01 = lerp(at(0, 0, 1), at(1, 0, 1), xf), x11 = lerp(at(0, 1, 1), at(1, 1, 1), xf);
+	return 2 * (lerp(lerp(x00, x10, yf), lerp(x01, x11, yf), zf) - 0.5);
+}
+// a noise initializer's value: noise (-1..1) mapped onto min..max, or with
+// absolute value (0..1), onto the same
+function noiseOutput(noise: number, min: number, max: number, abs: boolean): number {
+	return abs ? min + (max - min) * noise : min + (max - min) * 0.5 * (1 + noise);
+}
+// (the y and z outputs' coordinates moved far off the x's, for separate values)
+const NOISE_Y = [100000.5, 300000.25, 9000000.75], NOISE_Z = [110000.25, 310000.75, 9100000.5];
+
 // whether an effect (or one of its children) keeps emitting until stopped
 export function isEndless(def: ParticleSystemDef, lib: ParticleLibrary, depth = 0): boolean {
 	if (def.emitters.some(e => e.fn !== 'emit_instantaneously' && num(e, 'emission_duration', 0) <= 0)) return true;
@@ -105,6 +148,7 @@ interface Particle {
 	fadeIn: number;    // per-particle random fade times (seconds or proportions)
 	fadeOut: number;
 	osc: number[];     // per-particle oscillation rates/frequencies
+	oscVec?: number[][];  // "oscillate vector": per operator, rates and frequencies per axis, then its start and end
 	pathT?: number;    // where along a control point path it was placed (0..1)
 	pathAt?: THREE.Vector3;  // that point of the path when last moved with it
 	normal?: THREE.Vector3;  // the way its card faces (renderers' orientation_type 3)
@@ -139,6 +183,8 @@ export interface InstanceState {
 	emitted: Map<ParticleOperator, number>;
 	pathBulge: THREE.Vector3 | undefined;
 	spawned: number;
+	epitrochoidCount: Map<ParticleOperator, number>;
+	restartCounts: Map<ParticleOperator, number>;
 	restartAt: number;
 	emitBase: number;
 	sizeScale: number;
@@ -194,6 +240,10 @@ export class ParticleInstance {
 	private parent: ParticleInstance | null = null;
 	private pathBulge: THREE.Vector3 | undefined;  // a path's random bulge direction
 	private spawned = 0;
+	private epitrochoidCount = new Map<ParticleOperator, number>();  // the particles each epitrochoid initializer has placed
+	// the particles some initializers have made since the effect (re)started
+	// (the engine's counts that Restart zeroes: warp, sequential path, count remap)
+	private restartCounts = new Map<ParticleOperator, number>();
 	// initializers that read a particle's position run after those that set it
 	private initOrder: ParticleOperator[];
 	// "restart effect after duration": when the emitters next fire again,
@@ -252,7 +302,7 @@ export class ParticleInstance {
 	snapshot(): InstanceState {
 		return {
 			time: this.time, emitting: this.emitting, cps: new Map([...this.cps].map(([k, m]) => [k, m.clone()])), rng: this.rng.a,
-			lighting: this.lighting, emitted: new Map(this.emitted), pathBulge: this.pathBulge?.clone(), spawned: this.spawned,
+			lighting: this.lighting, emitted: new Map(this.emitted), pathBulge: this.pathBulge?.clone(), spawned: this.spawned, epitrochoidCount: new Map(this.epitrochoidCount), restartCounts: new Map(this.restartCounts),
 			restartAt: this.restartAt, emitBase: this.emitBase, sizeScale: this.sizeScale,
 			particles: this.particles.map(copyParticle), children: this.children.map(c => c.inst.snapshot()),
 		};
@@ -268,6 +318,8 @@ export class ParticleInstance {
 		this.emitted = new Map(s.emitted);
 		this.pathBulge = s.pathBulge?.clone();
 		this.spawned = s.spawned;
+		this.epitrochoidCount = new Map(s.epitrochoidCount);
+		this.restartCounts = new Map(s.restartCounts);
 		this.restartAt = s.restartAt;
 		this.emitBase = s.emitBase;
 		this.sizeScale = s.sizeScale;
@@ -384,6 +436,7 @@ export class ParticleInstance {
 	// the child systems too)
 	private restartEmitters(at: number) {
 		this.emitted.clear();
+		this.restartCounts.clear();
 		this.emitBase = at;
 		for (const c of this.children) c.inst.restartEmitters(at - c.delay);
 	}
@@ -522,6 +575,11 @@ export class ParticleInstance {
 			const z = this.r(-1, 1), a = this.r(0, Math.PI * 2), s = Math.sqrt(1 - z * z);
 			return new THREE.Vector3(s * Math.cos(a), s * Math.sin(a), z);
 		};
+		const counted = (o: ParticleOperator) => {
+			const n = this.restartCounts.get(o) ?? 0;
+			this.restartCounts.set(o, n + 1);
+			return n;
+		};
 		const scalarOut = (o: ParticleOperator, field: number, value: number, scale: boolean) => {
 			setField(p, field, scale ? getField(p, field) * value : value);
 			if (field === F.COLOR) p.color = p.color.map(x => x * value);
@@ -566,12 +624,22 @@ export class ParticleInstance {
 				break;
 			}
 			case 'position modify warp random': {
-				// stretches the particle's offset from the point, per local axis,
-				// and its velocity with it (the engine warps its previous position
-				// too): a sphere's burst squashed flat stays flat
+				// (C_INIT_PositionWarp) stretches the particle's offset from the
+				// point, per local axis, and its velocity with it (the engine warps
+				// its previous position too): a sphere's burst squashed flat stays
+				// flat. With a transition, from min to max over the particles made
+				// (or the time) from its start since the effect (re)started: a
+				// strand's ends drawn in to its points; else random per axis
 				const m = this.cp(num(o, 'control point number', 0));
-				const lo = vec(o, 'warp min', [1, 1, 1]), hi = vec(o, 'warp max', [1, 1, 1]), k = this.rand();
-				const s = [0, 1, 2].map(i => lo[i] + (hi[i] - lo[i]) * k);
+				let lo = vec(o, 'warp min', [1, 1, 1]), hi = vec(o, 'warp max', [1, 1, 1]);
+				if (num(o, 'reverse warp (0/1)', 0)) [lo, hi] = [hi, lo];
+				const span = num(o, 'warp transition time (treats min/max as start/end sizes)', 0), from = num(o, 'warp transition start time', 0);
+				let s: number[];
+				if (span) {
+					const at = num(o, 'use particle count instead of time', 0) ? counted(o) : p.born - this.emitBase;
+					const k = Math.min(1, Math.max(0, (at - from) / span));
+					s = [0, 1, 2].map(i => lo[i] + (hi[i] - lo[i]) * k);
+				} else s = [0, 1, 2].map(i => this.r(lo[i], hi[i]));
 				const inv = m.clone().invert();
 				const l = p.pos.clone().applyMatrix4(inv);
 				p.pos = l.set(l.x * s[0], l.y * s[1], l.z * s[2]).applyMatrix4(m);
@@ -589,7 +657,7 @@ export class ParticleInstance {
 			}
 			case 'position along path sequential': {
 				const n = Math.max(1, num(o, 'particles to map from start to end', 100));
-				const k = n > 1 ? (index % n) / (n - 1) : 0;
+				const k = n > 1 ? (counted(o) % n) / (n - 1) : 0;
 				p.pos = this.pathPoint(o, k);
 				p.pathT = k;  // (kept for "movement lock to saved position along path")
 				break;
@@ -601,10 +669,41 @@ export class ParticleInstance {
 				break;
 			}
 			case 'velocity noise': {
-				// smooth noise in the game; a random pick from the same range here
+				// (C_INIT_InitialVelocityNoise) at its creation time and where it is
+				// then: made before a path initializer places them, a burst's
+				// particles all share one velocity
 				const lo = vec(o, 'output minimum', [0, 0, 0]), hi = vec(o, 'output maximum', [1, 1, 1]);
-				const n = [this.r(lo[0], hi[0]), this.r(lo[1], hi[1]), this.r(lo[2], hi[2])];
-				p.vel.add(num(o, 'Apply Velocity in Local Space (0/1)', 0) ? local(n) : new THREE.Vector3(n[0], n[1], n[2]));
+				const abs = vec(o, 'Absolute Value', [0, 0, 0]), inv = vec(o, 'Invert Abs Value', [0, 0, 0]);
+				const t = (p.born + num(o, 'Time Coordinate Offset', 0)) * num(o, 'Time Noise Coordinate Scale', 1);
+				const off = vec(o, 'Spatial Coordinate Offset', [0, 0, 0]), scale = num(o, 'Spatial Noise Coordinate Scale', 0.01);
+				const at = [p.pos.x, p.pos.y, p.pos.z].map((v, i) => t + (v + off[i]) * scale);
+				const n = [[0, 0, 0], NOISE_Y, NOISE_Z].map((shift, i) => {
+					let v = noise3(at[0] + shift[0], at[1] + shift[1], at[2] + shift[2]);
+					if (abs[i]) v = inv[i] ? 1 - Math.abs(v) : Math.abs(v);
+					return noiseOutput(v, lo[i], hi[i], !!abs[i]);
+				});
+				p.vel.add(num(o, 'Apply Velocity in Local Space (0/1)', 0) ? local(n, this.cp(num(o, 'Control Point Number', 0))) : new THREE.Vector3(n[0], n[1], n[2]));
+				break;
+			}
+			case 'position along epitrochoid': {
+				// (C_INIT_CreateInEpitrochoid) a point on the curve a circle rolling
+				// around another traces, by the particle count (or creation time)
+				const r1 = num(o, 'radius 1', 40), r2 = num(o, 'radius 2', 24) + 1e-7, offset = num(o, 'point offset', 4);
+				const sum = r1 + r2;
+				if (!sum) break;
+				const useCount = !!num(o, 'use particle count instead of creation time', 0);
+				const count = this.epitrochoidCount.get(o) ?? 0;
+				if (useCount) this.epitrochoidCount.set(o, count + 1);
+				const t = (useCount ? count : p.born) * num(o, 'particle density', 10);
+				const v = [0, 0, 0];
+				const c1 = num(o, 'first dimension 0-2 (-1 disables)', 0), c2 = num(o, 'second dimension 0-2 (-1 disables)', 1);
+				if (c1 >= 0) v[c1] = sum * Math.cos(t) + offset * Math.cos(sum * t / r2);
+				if (c2 >= 0) v[c2] = sum * Math.sin(t) + offset * Math.sin(sum * t / r2);
+				const m = this.cp(num(o, 'control point number', 0));
+				const d = new THREE.Vector3(v[0], v[1], v[2]);
+				if (num(o, 'local space', 0)) d.applyMatrix3(new THREE.Matrix3().setFromMatrix4(m));
+				if (!num(o, 'offset from existing position', 0)) p.pos.setFromMatrixPosition(m);
+				p.pos.add(d);
 				break;
 			}
 			case 'radius random':
@@ -685,16 +784,22 @@ export class ParticleInstance {
 				break;
 			}
 			case 'remap particle count to scalar': {
-				const i0 = num(o, 'input minimum', 0), i1 = num(o, 'input maximum', 10);
-				if (num(o, 'only active within specified input range', 0) && (index < i0 || index > i1)) break;
-				const k = Math.min(1, Math.max(0, (index - i0) / ((i1 - i0) || 1)));
+				const i0 = num(o, 'input minimum', 0), i1 = num(o, 'input maximum', 10), count = counted(o);
+				if (num(o, 'only active within specified input range', 0) && (count < i0 || count > i1)) break;
+				const k = Math.min(1, Math.max(0, (count - i0) / ((i1 - i0) || 1)));
 				scalarOut(o, num(o, 'output field', 3), num(o, 'output minimum', 0) + (num(o, 'output maximum', 1) - num(o, 'output minimum', 0)) * k, !!num(o, 'output is scalar of initial random range', 0));
 				break;
 			}
-			case 'remap noise to scalar':
-				// smooth noise in the game; a random pick from the same range here
-				scalarOut(o, num(o, 'output field', 3), this.r(num(o, 'output minimum', 0), num(o, 'output maximum', 1)), false);
+			case 'remap noise to scalar': {
+				// (C_INIT_CreationNoise) at its creation time and where it is
+				const t = (p.born + num(o, 'time coordinate offset', 0)) * num(o, 'time noise coordinate scale', 1);
+				const off = vec(o, 'spatial coordinate offset', [0, 0, 0]), scale = num(o, 'spatial noise coordinate scale', 0.001);
+				let n = noise3(t + (p.pos.x + off[0]) * scale, t + (p.pos.y + off[1]) * scale, t + (p.pos.z + off[2]) * scale);
+				const abs = !!num(o, 'absolute value', 0);
+				if (abs) n = num(o, 'invert absolute value', 0) ? 1 - Math.abs(n) : Math.abs(n);
+				scalarOut(o, num(o, 'output field', 3), noiseOutput(n, num(o, 'output minimum', 0), num(o, 'output maximum', 1), abs), false);
 				break;
+			}
 			case 'remap initial distance to control point to scalar': {
 				const d = p.pos.distanceTo(this.cpPos(num(o, 'control point', 0)));
 				const d0 = num(o, 'distance minimum', 0), d1 = num(o, 'distance maximum', 128);
@@ -724,6 +829,11 @@ export class ParticleInstance {
 				p.fadeIn = this.r(num(o, 'fade in time min', 0.25), num(o, 'fade in time max', 0.25), num(o, 'fade in time exponent', 1));
 			} else if (o.fn === 'alpha fade out random') {
 				p.fadeOut = this.r(num(o, 'fade out time min', 0.25), num(o, 'fade out time max', 0.25), num(o, 'fade out time exponent', 1));
+			} else if (o.fn === 'oscillate vector') {
+				const r0 = vec(o, 'oscillation rate min', [0, 0, 0]), r1 = vec(o, 'oscillation rate max', [0, 0, 0]);
+				const f0 = vec(o, 'oscillation frequency min', [1, 1, 1]), f1 = vec(o, 'oscillation frequency max', [1, 1, 1]);
+				(p.oscVec ??= []).push([0, 1, 2].map(i => this.r(r0[i], r1[i])).concat([0, 1, 2].map(i => this.r(f0[i], f1[i]))),
+					[this.r(num(o, 'start time min', 0), num(o, 'start time max', 0)), this.r(num(o, 'end time min', 1), num(o, 'end time max', 1))]);
 			} else if (o.fn === 'oscillate scalar') {
 				p.osc.push(this.r(num(o, 'oscillation rate min', 0), num(o, 'oscillation rate max', 0)), this.r(num(o, 'oscillation frequency min', 1), num(o, 'oscillation frequency max', 1)));
 			}
@@ -735,7 +845,7 @@ export class ParticleInstance {
 		const ending = !this.emitting;
 		const age = this.time - p.born;
 		const frac = p.life > 0 ? Math.min(1, age / p.life) : 1;
-		let alpha = 1, radiusScale = 1, osc = 0;
+		let alpha = 1, radiusScale = 1, osc = 0, oscVec = 0;
 		let interpolated: number | null = null;  // the radius scale operators' (see 'radius scale')
 		let moves = false;
 		for (const o of this.def.operators) {
@@ -836,6 +946,34 @@ export class ParticleInstance {
 				let k = Math.min(1, Math.max(0, (frac - s0) / ((s1 - s0) || 1)));
 				if (num(o, 'ease_in_and_out', 1)) k = k * k * (3 - 2 * k);
 				p.color = [0, 1, 2].map(i => p.baseColor[i] + (c[i] / 255 - p.baseColor[i]) * k);
+				break;
+			}
+			case 'oscillate vector': {
+				// (C_OP_OscillateVector) the position (or colour) swings, per axis,
+				// between a start and end of its life
+				const rf = p.oscVec?.[oscVec * 2], window = p.oscVec?.[oscVec * 2 + 1];
+				oscVec++;
+				if (!rf || !window) break;
+				const life = num(o, 'start/end proportional', 1) ? frac : age;
+				if (life < window[0] || life >= window[1]) break;
+				const mult = num(o, 'oscillation multiplier', 2), phase = num(o, 'oscillation start phase', 0.5);
+				const proportional = !!num(o, 'proportional 0/1', 1);
+				const d = [0, 1, 2].map(i => {
+					const turns = proportional ? mult * rf[3 + i] * frac + phase : rf[3 + i] * (mult * this.time + phase);
+					return rf[i] * dt * Math.sin(2 * Math.PI * turns);
+				});
+				const field = num(o, 'oscillation field', 0);
+				if (field === F.COLOR) p.color = p.color.map((c, i) => Math.min(1, Math.max(0, c + d[i])));
+				else if (field === 0) p.pos.add(new THREE.Vector3(d[0], d[1], d[2]));
+				break;
+			}
+			case 'movement dampen relative to control point': {
+				// (C_OP_DampenToCP) slowed near a point, to a stop at it: its step
+				// this frame scaled by (distance / range)^scale
+				const range = num(o, 'falloff range', 100);
+				if (range <= 0) break;
+				const d = p.pos.clone().addScaledVector(p.vel, dt).distanceTo(this.cpPos(num(o, 'control_point_number', 0)));
+				if (d <= range) p.vel.multiplyScalar(Math.pow(d / range, num(o, 'dampen scale', 1)));
 				break;
 			}
 			case 'oscillate scalar': {
