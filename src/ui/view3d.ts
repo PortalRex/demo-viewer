@@ -4126,6 +4126,20 @@ export class View3D {
 			const ok = ot && keyAt(ot, Math.floor(tick));
 			if (!o || !ok) continue;
 			o.visible = true;
+			// a security camera being yanked stays on its mount while it's
+			// pulled (the game shows it there, the beam reaching to it; its
+			// networked origin sits at the holder's eye): kept where it was
+			// when the grab began
+			if (ot.className === 'CAI_BaseNPC') {
+				let i = keyIndexAt(p, tick);
+				while (i > 0 && Number(p.keys[i - 1].extra?.m_hAttachedObject ?? -1) === h) i--;
+				const pose = this.entityPose(ot, p.keys[i].tick - 1);
+				o.matrixAutoUpdate = true;
+				o.position.copy(pose.origin);
+				o.rotation.copy(toEuler(pose.angles));
+				o.userData.heldApparent = pose.origin.clone();
+				continue;
+			}
 			const hk = keyAt(p, ok.tick) ?? k;
 			const holderThen = new THREE.Matrix4().compose(
 				new THREE.Vector3(hk.origin[0], hk.origin[1], hk.origin[2] + (hk.eyeZ ?? DEFAULT_EYE)),
