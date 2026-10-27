@@ -461,10 +461,15 @@ const NEUTRAL: ModelLighting = {cube: new Array(18).fill(0.1), lights: []};
 // uniforms only when the material changes between draws, so objects can't
 // share one); its texture and settings are copied from the shared one
 export function ownLitMaterial(shared: THREE.Material): THREE.Material {
+	// (cloned without its userData, set below: three's copy deep-copies it as
+	// JSON, which serialised every texture held there, each part of each model)
+	const data = shared.userData;
+	shared.userData = {};
 	const m = shared.clone();
+	shared.userData = data;
 	// (three's copy leaves out a built-in material's defines: Refract, goo...)
 	m.defines = {...shared.defines};
-	m.userData = {ambientLit: true, modelEnv: shared.userData.modelEnv, selfIllum: shared.userData.selfIllum, phong: shared.userData.phong, refractLocal: shared.userData.refractLocal};
+	m.userData = {ambientLit: true, modelEnv: data.modelEnv, selfIllum: data.selfIllum, phong: data.phong, refractLocal: data.refractLocal};
 	hook(m, false);
 	return m;
 }

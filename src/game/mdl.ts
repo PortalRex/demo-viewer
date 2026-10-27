@@ -34,10 +34,24 @@ function cstr(b: Uint8Array, at: number) {
 	return String.fromCharCode(...b.subarray(at, end));
 }
 
+// A model's files read, then parsed off the page's thread where there are
+// workers (in a page: parsing a map's models there stalled the first
+// seconds of playback), else here (the command-line tools)
 export async function loadModel(files: GameFiles, name: string, color: [number, number, number], skin = 0, body = 0): Promise<StudioModel | null> {
 	const base = name.toLowerCase().replace(/\\/g, '/').replace(/\.mdl$/, '');
 	const [mdl, vvd, vtx] = await Promise.all([files.read(`${base}.mdl`), files.read(`${base}.vvd`), files.read(`${base}.dx90.vtx`)]);
 	if (!mdl || !vvd || !vtx) return null;
+	return parseOffThread ? parseOffThread(mdl, vvd, vtx, color, skin, body) : parseModel(mdl, vvd, vtx, color, skin, body);
+}
+
+// set by the page (see mdlpool.ts): parses in a worker
+let parseOffThread: ((mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, color: [number, number, number], skin: number, body: number) => Promise<StudioModel | null>) | null = null;
+export function setModelParser(f: typeof parseOffThread) {
+	parseOffThread = f;
+}
+
+// The model as the 3D view draws it, from its .mdl, .vvd and .dx90.vtx
+export function parseModel(mdl: Uint8Array, vvd: Uint8Array, vtx: Uint8Array, color: [number, number, number], skin = 0, body = 0): StudioModel | null {
 	const m = new DataView(mdl.buffer, mdl.byteOffset, mdl.byteLength);
 	const d = new DataView(vvd.buffer, vvd.byteOffset, vvd.byteLength);
 	const x = new DataView(vtx.buffer, vtx.byteOffset, vtx.byteLength);

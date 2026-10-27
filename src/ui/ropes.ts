@@ -77,6 +77,9 @@ export class Ropes {
 	private textureHeights = new Map<string, number>();
 	private assets: EffectAssets;
 
+	// called when a new mesh joins the group (its material's shader is to compile)
+	onNewMesh = () => {};
+
 	constructor(assets: EffectAssets) {
 		this.assets = assets;
 	}
@@ -106,6 +109,7 @@ export class Ropes {
 				mesh.frustumCulled = false;
 				this.group.add(mesh);
 				this.ropes.set(s.key, {mesh, nodes, shapeKey, material: s.material});
+				this.onNewMesh();
 			}
 		}
 		for (const [key, rope] of this.ropes) if (!seen.has(key)) rope.mesh.visible = false;

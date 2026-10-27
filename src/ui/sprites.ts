@@ -50,6 +50,9 @@ export class Sprites {
 	private loaded = new Map<string, SpriteMaterial | null>();
 	private meshes = new Map<string, THREE.Mesh>();
 
+	// called when a new mesh joins the group (its material's shader is to compile)
+	onNewMesh = () => {};
+
 	constructor(assets: EffectAssets) {
 		this.assets = assets;
 	}
@@ -127,6 +130,7 @@ export class Sprites {
 				mesh.renderOrder = 3;
 				this.meshes.set(key, mesh);
 				this.group.add(mesh);
+				this.onNewMesh();
 			}
 			const g = mesh.geometry;
 			g.setDrawRange(0, writeAttribute(g, 'position', b.pos, 3));

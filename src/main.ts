@@ -13,6 +13,7 @@ import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
 import {later, soon} from './core/later.ts';
+import {installModelWorkers} from './game/mdlpool.ts';
 import {Materials} from './game/materials.ts';
 import type {MaterialInfo} from './game/materials.ts';
 import {Zip} from './game/zip.ts';
@@ -247,6 +248,8 @@ function timed<T>(p: Promise<T>, name: string, start: number): Promise<T> {
 	return p.then(v => (timing(name, start), v));
 }
 if (import.meta.env.DEV) (window as unknown as {timings: typeof timings}).timings = timings;
+// (models parse in workers, off the page's thread)
+installModelWorkers();
 const entityCache = new Map<number, EntityTimeline | null>();
 const mapCache = new Map<string, Promise<BspMap>>();
 let gameFS: GameFS | null = null;

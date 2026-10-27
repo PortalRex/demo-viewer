@@ -34,6 +34,7 @@ import {keyAt, keyIndexAt, type ScreenFade, type HudMessage} from '../net/entiti
 import {viewAt, type SegmentTrack, type ViewState} from '../player/playback.ts';
 import type {Vec3} from '../core/model.ts';
 import {later, soon} from '../core/later.ts';
+import {background, afterFrame} from './background.ts';
 import {Bloom, ENCODE} from './bloom.ts';
 
 export type CameraMode = 'eyes' | 'orbit' | 'free';
@@ -118,16 +119,56 @@ function between(keys: EntityKey[], j: number, tick: number): THREE.Vector3 {
 // A mesh whose ray tests go through a bounds tree of its geometry, built on
 // the first one (props are tested for what hides glows: a big one, tested
 // triangle by triangle, cost milliseconds a ray)
+// (not built mid-frame: one not built yet is queued for the background, and
+// until then the mesh hides nothing from the rays)
 function bvhOnDemand(mesh: THREE.Mesh): THREE.Mesh {
 	mesh.raycast = function (this: THREE.Mesh, ray: THREE.Raycaster, hits: THREE.Intersection[]) {
-		this.geometry.boundsTree ??= new MeshBVH(this.geometry);
+		if (!this.geometry.boundsTree) {
+			queueBoundsTree(this.geometry);
+			return;
+		}
 		acceleratedRaycast.call(this, ray, hits);
 	};
 	return mesh;
 }
 
+// bounds trees to build, one a piece
+const treeQueue = new Set<THREE.BufferGeometry>();
+function queueBoundsTree(g: THREE.BufferGeometry) {
+	if (g.boundsTree || treeQueue.has(g)) return;
+	treeQueue.add(g);
+	if (treeQueue.size > 1) return;
+	background(() => {
+		const [next] = treeQueue;
+		if (!next) return false;
+		treeQueue.delete(next);
+		if (!next.boundsTree && next.getAttribute('position')) next.boundsTree = new MeshBVH(next);
+		return treeQueue.size > 0;
+	});
+}
+
+// A camera's near plane moved onto a plane (Lengyel's oblique frustum): what's
+// behind the plane isn't drawn, with no clipping planes. Its projection's
+// depth row is replaced: x and y (where things land on screen) are as they
+// were. The camera is kept at least half a unit behind the plane (crossing
+// a portal it comes right up to it, where the plane would pass through it)
+function obliqueNear(cam: THREE.PerspectiveCamera, plane: THREE.Plane) {
+	cam.updateMatrixWorld();
+	const p = plane.clone().applyMatrix4(cam.matrixWorldInverse);
+	const c = new THREE.Vector4(p.normal.x, p.normal.y, p.normal.z, Math.min(p.constant, -0.5));
+	const e = cam.projectionMatrix.elements;
+	const q = new THREE.Vector4(Math.sign(c.x), Math.sign(c.y), 1, 1).applyMatrix4(cam.projectionMatrixInverse);
+	c.multiplyScalar(2 / c.dot(q));
+	e[2] = c.x - e[3];
+	e[6] = c.y - e[7];
+	e[10] = c.z - e[11];
+	e[14] = c.w - e[15];
+	cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+}
+
 // (rendered to set three's clipping state before a compile: see precompile)
 const EMPTY_SCENE = new THREE.Scene();
+const CLIP_PLANE = new THREE.Plane();
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
 const R180Z = new THREE.Matrix4().makeRotationZ(Math.PI);
 
@@ -891,64 +932,115 @@ export class View3D {
 	// compile the shaders of everything in the scene, hidden entities too,
 	// so nothing stalls the first time it shows
 	private loaded() {
-		this.compileNeeded = true;
+		this.freshNeeded = true;
 		this.onLoaded();
 		this.precompileTimer?.();
-		this.precompileTimer = later(() => {
-			if (this.freezeStatics()) {
-				this.mergeProps();
-				this.mergeFrozenKids();
-			}
-			this.precompile();
-			this.prelightProps(this.mapToken);
-		}, 400);
+		this.precompileTimer = later(() => this.settle(), 400);
+	}
+
+	// once loading goes quiet: props that never move frozen and merged, the
+	// shaders compiled, the static props lit (each in slices between frames)
+	private settle() {
+		const more = this.freezeStatics();
+		if (more !== false) {
+			this.mergeProps();
+			this.mergeFrozenKids();
+		}
+		if (more === 'more') {
+			const token = this.mapToken;
+			background(() => {
+				if (token === this.mapToken) this.settle();
+				return false;
+			}, true);
+			return;
+		}
+		this.precompile();
+		this.prelightProps(this.mapToken);
 	}
 	private precompileTimer: (() => void) | undefined;
 
+	// The scene's shaders compiled ahead, as they're drawn here (and cut by a
+	// plane, as water's reflection and refraction draw them), and the world's
+	// as the other camera modes draw it (back faces): a scene child per step,
+	// in the background. (Hidden entities too: three's compile walks them.)
+	private precompileToken = 0;
 	private precompile() {
 		const r = this.renderer;
 		if (!r) return;
-		const hidden: THREE.Object3D[] = [];
-		for (const g of [this.entityGroup, this.vmScene]) {
-			g.traverse(o => {
-				if (!o.visible) {
-					hidden.push(o);
-					o.visible = true;
-				}
-			});
-		}
+		const token = ++this.precompileToken;
 		// (for the HDR frame, which is what scenes are drawn into: made now if
 		// nothing's been drawn yet, sized when it is)
-		const target = r.getRenderTarget();
 		this.frame ??= new THREE.WebGLRenderTarget(1, 1, {type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: true, samples: 4});
-		r.setRenderTarget(this.frame);
-		const clipping = r.clippingPlanes, auto = r.autoClear;
-		try {
-			// as drawn here, then cut by a plane as the portal views draw it
-			// (three takes the plane count from the last render: an empty
-			// one with a plane set)
-			for (const planes of [[], [new THREE.Plane()]]) {
-				r.clippingPlanes = planes;
-				r.autoClear = false;
-				r.render(EMPTY_SCENE, this.camera);
-				r.compile(this.scene, this.camera);
-				if (!planes.length) r.compile(this.vmScene, this.vmCam);
-				// and the world as the other camera modes draw it (with or
-				// without back faces), so switching is instant
-				const lib = this.library;
-				if (lib) {
-					const on = lib.showsBackFaces;
-					lib.setBackFaces(!on);
-					r.compile(this.scene, this.camera);
-					lib.setBackFaces(on);
-				}
-			}
-		} finally {
-			r.clippingPlanes = clipping;
-			r.autoClear = auto;
-			r.setRenderTarget(target);
-			for (const o of hidden) o.visible = false;
+		type Step = () => void;
+		const steps: Step[] = [];
+		// (three takes the plane count from the last render: an empty one
+		// with the planes set, then the compile)
+		const compile = (root: THREE.Object3D, camera: THREE.Camera, scene: THREE.Scene, planes: THREE.Plane[]) => {
+			r.clippingPlanes = planes;
+			r.render(EMPTY_SCENE, this.camera);
+			r.compile(root, camera, scene);
+			this.lastGpuWork = performance.now();
+		};
+		const roots: THREE.Object3D[] = [];
+		for (const o of this.scene.children) {
+			if (o === this.mapGroup || o === this.propGroup || o === this.entityGroup) roots.push(...o.children);
+			else roots.push(o);
 		}
+		// (cut by a plane too where water's reflection and refraction are)
+		const variants = this.waterMeshes.length ? [[], [CLIP_PLANE]] : [[]];
+		for (const root of roots) steps.push(() => {
+			if (!root.parent) return;
+			for (const planes of variants) compile(root, this.camera, this.scene, planes);
+		});
+		steps.push(() => compile(this.vmScene, this.vmCam, this.vmScene, []));
+		for (const planes of variants) steps.push(() => {
+			const lib = this.library;
+			if (!lib) return;
+			const on = lib.showsBackFaces;
+			lib.setBackFaces(!on);
+			compile(this.mapGroup, this.camera, this.scene, planes);
+			compile(this.entityGroup, this.camera, this.scene, planes);
+			lib.setBackFaces(on);
+		});
+		// the flashlight's shadow pass: its depth materials as it swaps them in
+		// (without fog), where the map has a projected light
+		if (this.entities?.tracks.some(t => t.className === 'CEnvProjectedTexture')) steps.push(() => {
+			const meshes: THREE.Mesh[] = [], swapped: [THREE.Mesh, THREE.Material][] = [];
+			this.scene.traverse(o => {
+				const mesh = o as THREE.Mesh, m = mesh.material as THREE.Material | undefined;
+				if (!mesh.isMesh || !m || Array.isArray(m) || m.transparent || (m as THREE.ShaderMaterial).isShaderMaterial) return;
+				swapped.push([mesh, m]);
+				mesh.material = m.alphaTest > 0 && (m as THREE.MeshBasicMaterial).map ? this.flashDepthAlpha(m) : this.flashDepthMaterial;
+				meshes.push(mesh);
+			});
+			const fog = this.scene.fog;
+			this.scene.fog = null;
+			try {
+				const batch = {traverse: (f: (o: THREE.Object3D) => void) => meshes.forEach(f), traverseVisible: () => {}} as unknown as THREE.Object3D;
+				r.clippingPlanes = [];
+				r.render(EMPTY_SCENE, this.camera);
+				r.compile(batch, this.camera, this.scene);
+				this.lastGpuWork = performance.now();
+			} finally {
+				this.scene.fog = fog;
+				for (const [mesh, m] of swapped) mesh.material = m;
+			}
+		});
+		steps.reverse();
+		background(() => {
+			if (token !== this.precompileToken || this.renderer !== r || !steps.length) return false;
+			const target = r.getRenderTarget(), clipping = r.clippingPlanes, auto = r.autoClear;
+			r.setRenderTarget(this.frame);
+			r.autoClear = false;
+			try {
+				steps.pop()!();
+			} finally {
+				r.clippingPlanes = clipping;
+				r.autoClear = auto;
+				r.setRenderTarget(target);
+			}
+			return steps.length > 0;
+		});
 	}
 
 	constructor(container: HTMLElement) {
@@ -985,6 +1077,10 @@ export class View3D {
 		// mapping does
 		this.renderer.toneMapping = THREE.LinearToneMapping;
 		this.renderer.toneMappingExposure = 3;
+		// (three checks each new shader's log when it's first used: a
+		// synchronous query, which while the GPU process is building other
+		// shaders waits for all of them; turn on to debug a shader)
+		this.renderer.debug.checkShaderErrors = false;
 		this.renderer.setPixelRatio(window.devicePixelRatio || 1);
 		compressedSupport.dxt = this.renderer.extensions.has('WEBGL_compressed_texture_s3tc');
 		compressedSupport.srgb = this.renderer.extensions.has('WEBGL_compressed_texture_s3tc_srgb');
@@ -1220,6 +1316,7 @@ export class View3D {
 		this.pointLight.clear();
 		this.particleLib.lightAt = point => this.lightForPoint(point);
 		this.particleRenderer = new ParticleRenderer(files, materials, this.library.textures);
+		this.particleRenderer.onNewMesh = this.compileSoon;
 		this.particleRenderer.visibility = (point, eye, radius) => this.pointSeen(point, eye, radius);
 		this.particleRenderer.surface = (from, dir, far) => {
 			const ray = new THREE.Ray(from, dir);
@@ -1233,6 +1330,7 @@ export class View3D {
 		this.scene.add(this.particleRenderer.group);
 		if (this.fpParticleRenderer) this.fpScene.remove(this.fpParticleRenderer.group);
 		this.fpParticleRenderer = new ParticleRenderer(files, materials, this.library.textures);
+		this.fpParticleRenderer.onNewMesh = this.compileSoon;
 		this.fpScene.add(this.fpParticleRenderer.group);
 		this.particleRuns.clear();
 		this.fizzlers.clear();
@@ -1318,10 +1416,12 @@ export class View3D {
 		this.ropes?.dispose();
 		if (this.ropes) this.scene.remove(this.ropes.group);
 		this.ropes = this.effects ? new Ropes(this.effects) : null;
+		if (this.ropes) this.ropes.onNewMesh = this.compileSoon;
 		if (this.ropes) this.scene.add(this.ropes.group);
 		this.sprites?.dispose();
 		if (this.sprites) this.scene.remove(this.sprites.group);
 		this.sprites = this.effects ? new Sprites(this.effects) : null;
+		if (this.sprites) this.sprites.onNewMesh = this.compileSoon;
 		if (this.sprites) this.scene.add(this.sprites.group);
 		this.movies?.dispose();
 		if (this.movies) this.scene.remove(this.movies.group);
@@ -1414,7 +1514,7 @@ export class View3D {
 	private readyModels = new Map<string, ModelAsset | null>();
 	private frozenCandidates: EntityTrack[] | null = null;
 
-	private freezeStatics(): boolean {
+	private freezeStatics(): boolean | 'more' {
 		const ents = this.entities, amb = this.bsp?.ambient, library = this.library;
 		if (!ents || !amb || !library) return false;
 		if (!this.frozenCandidates) {
@@ -1444,8 +1544,11 @@ export class View3D {
 			});
 		}
 		let added = false;
+		// (a few milliseconds' worth a call: the rest on the next)
+		const end = performance.now() + 4;
 		for (const t of this.frozenCandidates) {
 			if (this.frozen.has(t)) continue;
+			if (performance.now() > end) return 'more';
 			const k = t.keys[0];
 			// its model (loaded now if it hasn't been; this runs again once
 			// loading goes quiet)
@@ -1630,6 +1733,11 @@ export class View3D {
 	// that share a material become one mesh (hundreds of draw calls fewer),
 	// with a bounds tree for ray tests
 	private mergeProps() {
+		// (one at a time: a second pass waits for the first)
+		if (this.merging) {
+			this.mergeAgain = true;
+			return;
+		}
 		const byMaterial = new Map<THREE.Material, THREE.Mesh[]>();
 		// each prop: the clusters it's in (on its top-level object)
 		const propOf = (o: THREE.Object3D) => {
@@ -1655,21 +1763,45 @@ export class View3D {
 			list.push(mesh);
 			byMaterial.set(key, list);
 		});
+		const jobs: {material: THREE.Material; list: THREE.Mesh[]}[] = [];
 		for (const [material, meshes] of byMaterial) {
 			const bySig = new Map<string, THREE.Mesh[]>();
 			for (const m of meshes) {
 				const sig = (m.userData as {mergeSig: string}).mergeSig;
 				bySig.set(sig, [...(bySig.get(sig) ?? []), m]);
 			}
-			for (const list of bySig.values()) {
-				if (list.length < 2) continue;
+			for (const list of bySig.values()) if (list.length > 1) jobs.push({material, list});
+		}
+		// (merged a few groups at a time, between frames: all at once was a
+		// stall of a fifth of a second just after a map came in; frames in
+		// between draw the props unmerged, which looks the same)
+		this.merging = true;
+		const token = this.mapToken;
+		const lists = () => {
+			this.windowed = this.propGroup.children.filter(o => o.userData.window && (o.userData.window[0] > -Infinity || o.userData.window[1] < Infinity));
+			this.visCulled = this.propGroup.children.filter(o => o.userData.clusters);
+		};
+		const step = (): boolean => {
+			if (token !== this.mapToken) {
+				// (a new map: its own merge, if one was asked for meanwhile)
+				this.merging = false;
+				if (this.mergeAgain) {
+					this.mergeAgain = false;
+					this.mergeProps();
+				}
+				return false;
+			}
+			const job = jobs.pop();
+			if (job) {
+				const {material, list} = job;
+				if (list.some(m => !m.parent)) return true;  // (gone with a map change)
 				const parts = list.map(m => {
 					m.updateWorldMatrix(true, false);
 					return m.geometry.clone().applyMatrix4(m.matrixWorld);
 				});
 				const merged = mergeGeometries(parts);
 				parts.forEach(p => p.dispose());
-				if (!merged) continue;
+				if (!merged) return true;
 				const mesh = bvhOnDemand(new THREE.Mesh(merged, material));
 				mesh.name = `merged props ${list[0].name}`;
 				mesh.matrixAutoUpdate = false;
@@ -1683,12 +1815,25 @@ export class View3D {
 				}
 				this.propGroup.add(mesh);
 			}
-		}
-		// prop groups left empty
-		for (const o of [...this.propGroup.children]) if (!(o as THREE.Mesh).isMesh && !o.children.length) o.removeFromParent();
-		this.windowed = this.propGroup.children.filter(o => o.userData.window && (o.userData.window[0] > -Infinity || o.userData.window[1] < Infinity));
-		this.visCulled = this.propGroup.children.filter(o => o.userData.clusters);
+			if (jobs.length) {
+				lists();
+				return true;
+			}
+			// prop groups left empty
+			for (const o of [...this.propGroup.children]) if (!(o as THREE.Mesh).isMesh && !o.children.length) o.removeFromParent();
+			lists();
+			this.merging = false;
+			this.onLoaded();
+			if (this.mergeAgain) {
+				this.mergeAgain = false;
+				this.mergeProps();
+			}
+			return false;
+		};
+		background(step, true);
 	}
+	private merging = false;
+	private mergeAgain = false;  // asked for while a merge was under way
 
 	// Culling by the map's visibility sets, as the engine draws: for one
 	// view, what can't be seen from where it looks from is hidden (put back
@@ -1896,6 +2041,11 @@ export class View3D {
 			if (token !== this.mapToken || this.entities !== ents) return;
 			for (const o of this.objects.values()) this.hookModelLighting(o);
 			this.loaded();
+			// (every model's in: the props that never move frozen now, not once
+			// loading has gone quiet, which while playing could be seconds away:
+			// until then each is drawn and lit as a moving model)
+			this.precompileTimer?.();
+			this.settle();
 			this.uploadTextures(token);
 		});
 	}
@@ -1918,12 +2068,13 @@ export class View3D {
 			});
 		}
 		const list = [...textures];
-		const step = () => {
-			if (token !== this.mapToken) return;
-			for (const t of list.splice(0, 8)) r.initTexture(t);
-			if (list.length) later(step, 0);
-		};
-		step();
+		background(() => {
+			const t = list.pop();
+			if (token !== this.mapToken || !t) return false;
+			r.initTexture(t);
+			this.lastGpuWork = performance.now();
+			return list.length > 0;
+		});
 	}
 
 	setSegment(track: SegmentTrack, entities: EntityTimeline | null) {
@@ -2031,6 +2182,7 @@ export class View3D {
 		o.visible = false;
 		this.objects.set(t, o);
 		this.entityGroup.add(o);
+		this.freshNeeded = true;
 		return o;
 	}
 
@@ -2927,10 +3079,13 @@ export class View3D {
 			// 0.03 units off its wall (so the wall goes too, even where it's
 			// drawn two-sided: brush entities, models, the back faces option),
 			// and the overlays on it (laid 0.1 units off: a bullseye under the
-			// portal isn't in its view)
+			// portal isn't in its view). As the near plane of the view (an
+			// oblique one), as the engine clips: a clipping plane would need a
+			// second compile of every shader drawn through a portal, which, the
+			// first time a portal opened, stalled for a second or more
 			const normal = new THREE.Vector3(1, 0, 0).transformDirection(linked.obj.matrixWorld);
 			const at = new THREE.Vector3().setFromMatrixPosition(linked.obj.matrixWorld);
-			r.clippingPlanes = [new THREE.Plane(normal, -normal.dot(at) - 0.25)];
+			obliqueNear(cam, new THREE.Plane(normal, -normal.dot(at) - 0.25));
 			const linkedSurface = linked.obj.userData.portalSurface as THREE.Mesh;
 			surface.visible = linkedSurface.visible = false;
 			this.sky.position.setFromMatrixPosition(cam.matrixWorld);
@@ -2953,7 +3108,6 @@ export class View3D {
 			r.render(this.scene, cam);
 			this.uncull();
 			r.setRenderTarget(frameTarget);
-			r.clippingPlanes = [];
 			surface.visible = linkedSurface.visible = true;
 
 			material.uniforms.view.value = rt.texture;
@@ -3684,6 +3838,7 @@ export class View3D {
 		// (or it has nothing lit this way: brush models, beams)
 		if (!pending && (hooked || o.userData.ambSomeHooked || meshes)) o.userData.ambAllHooked = true;
 		if (hooked) {
+			this.freshNeeded = true;
 			o.userData.ambSomeHooked = true;
 			// (lit again: the new copies take its reflection)
 			delete o.userData.lightingKey;
@@ -3694,7 +3849,15 @@ export class View3D {
 	private lightModels() {
 		if (!this.bsp?.ambient) return;
 		for (const o of this.objects.values()) if (o.visible) this.lightModel(o);
-		for (const o of this.propGroup.children) if (!o.userData.ambAllHooked) this.lightModel(o);
+		// (static props not lit yet: as many as fit in a few milliseconds, the
+		// rest left to prelightProps, which lights them all in slices; lighting
+		// them all here, the frame after a map loads stalled for most of a second)
+		const end = performance.now() + 3;
+		for (const o of this.propGroup.children) {
+			if (o.userData.ambAllHooked) continue;
+			if (performance.now() > end) break;
+			this.lightModel(o);
+		}
 		if (this.vmShown) {
 			// the view model is lit where the eye is
 			this.lightModelAt(this.vmShown, this.camera.position);
@@ -3707,15 +3870,16 @@ export class View3D {
 	private prelightProps(token: number) {
 		if (!this.bsp?.ambient) return;
 		const todo = this.propGroup.children.filter(o => !o.userData.ambAllHooked);
-		const step = () => {
-			if (token !== this.mapToken) return;
-			const end = performance.now() + 8;
-			while (todo.length && performance.now() < end) this.lightModel(todo.pop()!);
-			if (todo.length) later(step, 0);
-			// (their lit copies are new materials: compiled too)
-			else this.precompile();
-		};
-		step();
+		background(() => {
+			if (token !== this.mapToken) return false;
+			const o = todo.pop();
+			if (o) this.lightModel(o);
+			if (todo.length) return true;
+			// (their lit copies are new materials: compiled too, as the portal
+			// views draw them as well)
+			this.precompile();
+			return false;
+		});
 	}
 
 	// an object lit by the map's light at its illumination point
@@ -3745,7 +3909,10 @@ export class View3D {
 		const key = `${Math.round(at.x / 4)},${Math.round(at.y / 4)},${Math.round(at.z / 4)},${this.styleGen}`;
 		if (o.userData.lightingKey === key) return;
 		o.userData.lightingKey = key;
-		o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches, this.styleNow);
+		// (only parts hooked to it read it: static props lit by vrad's vertex
+		// light don't, and working it out for each was most of a map's
+		// lighting time; hooking a part later clears the key)
+		if (o.userData.ambSomeHooked) o.userData.lighting = amb.at([at.x, at.y, at.z], this.lightReaches, this.styleNow);
 		this.reflectAt(o, at);
 	}
 
@@ -4112,6 +4279,54 @@ export class View3D {
 	// frames the view is drawn small, and the scale is set from a histogram
 	// of it (see histogramTarget); within the tonemap controller's range,
 	// approached gradually.
+	// The meter's pixels read back without stopping the page: into a pixel
+	// buffer, with a fence after, collected on a later frame once the fence
+	// has passed. Read as floats, which a float target always allows, and
+	// turned into the half floats the histogram takes. (three's async read
+	// first asks the context which format reads back, a synchronous query:
+	// while the GPU process was busy building shaders, that alone stalled
+	// the page for most of a second)
+	// whether the GPU process may still be building shaders or taking
+	// textures (what's compiling, or anything sent in the last moment and a
+	// half): then nothing synchronous is asked of it
+	private lastGpuWork = 0;
+	private gpuBusy() {
+		return this.compiling.size > 0 || performance.now() - this.lastGpuWork < 1500;
+	}
+	private meterRead: {buffer: WebGLBuffer; sync: WebGLSync | null; px: Uint16Array; floats: Float32Array; done: () => void} | null = null;
+	private startMeterRead(r: THREE.WebGLRenderer, w: number, h: number, px: Uint16Array, done: () => void) {
+		const gl = r.getContext() as WebGL2RenderingContext;
+		const buffer = this.meterRead?.buffer ?? gl.createBuffer()!;
+		const floats = this.meterRead?.floats.length === px.length ? this.meterRead.floats : new Float32Array(px.length);
+		gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
+		gl.bufferData(gl.PIXEL_PACK_BUFFER, floats.byteLength, gl.STREAM_READ);
+		gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, 0);
+		gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+		const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+		gl.flush();
+		this.meterRead = {buffer, sync, px, floats, done};
+	}
+	private finishMeterRead(r: THREE.WebGLRenderer) {
+		const read = this.meterRead;
+		// (not while shaders are building: fetching the data is a round trip
+		// to the GPU process, which waits behind all of them)
+		if (!read?.sync || this.gpuBusy()) return;
+		const gl = r.getContext() as WebGL2RenderingContext;
+		// (the fence's state as last seen: no waiting)
+		const state = gl.clientWaitSync(read.sync, 0, 0);
+		if (state === gl.TIMEOUT_EXPIRED) return;
+		gl.deleteSync(read.sync);
+		read.sync = null;
+		if (state !== gl.WAIT_FAILED) {
+			gl.bindBuffer(gl.PIXEL_PACK_BUFFER, read.buffer);
+			gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, read.floats);
+			gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+			for (let i = 0; i < read.floats.length; i++) read.px[i] = THREE.DataUtils.toHalfFloat(read.floats[i]);
+			read.done();
+		}
+		this.meterPending = false;
+	}
+
 	private meterExposure(r: THREE.WebGLRenderer, measure = true) {
 		// the eye adapts in the recording's time (while playing; by the clock
 		// when paused), and starts over after a jump: it takes the next
@@ -4123,7 +4338,8 @@ export class View3D {
 		this.meterTickLast = this.meterTick;
 		if (step > 1) this.meterSnap = true;
 		const dt = step > 0 && step <= 1 ? step : wall;
-		if ((this.meterCount++ % 8 === 0 || this.meterSnap) && !this.meterPending && measure) {
+		// (and no new reading while shaders are building: see finishMeterRead)
+		if ((this.meterCount++ % 8 === 0 || this.meterSnap) && !this.meterPending && measure && (this.syncMeter || !this.gpuBusy())) {
 			const w = 64, h = 36;
 			// (with a stencil buffer: the sky is masked to the sky faces by it)
 			this.meter ??= new THREE.WebGLRenderTarget(w, h, {type: THREE.HalfFloatType, stencilBuffer: true});
@@ -4155,9 +4371,7 @@ export class View3D {
 				r.autoClear = auto;
 			}
 			// read back without waiting for the GPU (it lands a frame or two
-			// later); started while the meter is the target, as the read puts
-			// back the target's single-sampled buffer, not the multisampled one
-			// the frame is drawn into
+			// later); started while the meter is the target
 			const px = new Uint16Array(w * h * 4);
 			this.meterPending = true;
 			const exposed = this.exposure;
@@ -4172,16 +4386,17 @@ export class View3D {
 				}
 			};
 			// (captures read it at once: a background page's async reads crawl)
-			const reading = this.syncMeter ? null : r.readRenderTargetPixelsAsync(this.meter, 0, 0, w, h, px);
 			if (this.syncMeter) r.readRenderTargetPixels(this.meter, 0, 0, w, h, px);
+			else this.startMeterRead(r, w, h, px, take);
 			r.setRenderTarget(frameTarget);
 			for (const o of overlays) o.visible = true;
 			this.sky.visible = skyShown;
-			if (!reading) {
+			if (this.syncMeter) {
 				take();
 				this.meterPending = false;
-			} else reading.then(take).catch(() => {}).finally(() => { this.meterPending = false; });
+			}
 		}
+		this.finishMeterRead(r);
 		// (the engine eases in by its rate x 2 x the frame time, at most 1/60 of
 		// the way a frame (1/15 of the histogram's 16 buckets, quartered): at
 		// the 60 frames a second the game's recorded at, always that 1/60)
@@ -4638,6 +4853,48 @@ export class View3D {
 
 	private frame: THREE.WebGLRenderTarget | null = null;
 	private compileNeeded = true;
+	private freshNeeded = false;
+	// something new to draw: its shader compiled before the frame draws it
+	private compileSoon = () => {
+		this.freshNeeded = true;
+	};
+	// each material's version when it was last compiled, for plain meshes
+	// and for skinned ones (which take a program of their own)
+	private compiledAs = new WeakMap<THREE.Material, [number, number]>();
+
+	// What's new since something last loaded, compiled before it's drawn
+	// (in the background, while it sits out: see notReady): each mesh whose
+	// material hasn't been compiled at its version for its kind of mesh.
+	// (three's compile of a whole scene works out every material's program
+	// again, which, done each time anything loaded, stalled frame after
+	// frame while a map came in)
+	private compileFresh(r: THREE.WebGLRenderer) {
+		const visit = (root: THREE.Object3D, camera: THREE.Camera, scene: THREE.Scene) => {
+			const fresh: THREE.Mesh[] = [];
+			root.traverse(o => {
+				const mesh = o as THREE.Mesh;
+				if (!mesh.isMesh || !mesh.material) return;
+				const kind = (mesh as THREE.SkinnedMesh).isSkinnedMesh ? 1 : 0;
+				const materials = [mesh.material].flat();
+				if (materials.every(m => this.compiledAs.get(m)?.[kind] === m.version)) return;
+				fresh.push(mesh);
+				for (const m of materials) {
+					const seen = this.compiledAs.get(m) ?? [-1, -1];
+					seen[kind] = m.version;
+					this.compiledAs.set(m, seen);
+				}
+			});
+			if (!fresh.length) return;
+			// (all in one compile, the scene's lights gathered once: three only
+			// walks what it's given, for its meshes and for lights of its own)
+			const batch = {traverse: (f: (o: THREE.Object3D) => void) => fresh.forEach(f), traverseVisible: () => {}} as unknown as THREE.Object3D;
+			for (const m of r.compile(batch, camera, scene)) this.compiling.add(m);
+			this.lastGpuWork = performance.now();
+		};
+		visit(this.scene, this.camera, this.scene);
+		visit(this.vmScene, this.vmCam, this.vmScene);
+		visit(this.fpScene, this.camera, this.fpScene);
+	}
 	private recheck: (() => void) | undefined;
 	private compiling = new Set<THREE.Material>();
 
@@ -4970,6 +5227,12 @@ export class View3D {
 	private compositeCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
 	render() {
+		this.renderFrame();
+		// (some of the background work, in the frame's spare time)
+		afterFrame();
+	}
+
+	private renderFrame() {
 		const r = this.renderer;
 		if (!r) return;
 		// (orbit: the camera stays where it's scrolled to, walls or not;
@@ -4996,9 +5259,13 @@ export class View3D {
 		} else if (frame.width !== size.x || frame.height !== size.y) frame.setSize(size.x, size.y);
 		r.setRenderTarget(frame);
 		if (this.compileNeeded) {
-			this.compileNeeded = false;
+			this.compileNeeded = this.freshNeeded = false;
 			for (const m of r.compile(this.scene, this.camera)) this.compiling.add(m);
 			for (const m of r.compile(this.vmScene, this.vmCam)) this.compiling.add(m);
+			this.lastGpuWork = performance.now();
+		} else if (this.freshNeeded) {
+			this.freshNeeded = false;
+			this.compileFresh(r);
 		}
 		// (a snapshot waits for every shader instead of leaving things out)
 		const waiting = this.capturing ? [] : this.notReady(r);

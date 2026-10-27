@@ -1144,6 +1144,9 @@ export class ParticleRenderer {
 	// (Infinity for none within `far`), for $depthblend sprites
 	surface: ((from: THREE.Vector3, dir: THREE.Vector3, far: number) => number) | null = null;
 
+	// called when a new mesh joins the group (its material's shader is to compile)
+	onNewMesh = () => {};
+
 	constructor(files: GameFiles, materials: Materials, textures: TextureCache) {
 		this.files = files;
 		this.materials = materials;
@@ -1374,6 +1377,7 @@ export class ParticleRenderer {
 				mesh.renderOrder = 3;
 				this.meshes.set(name, mesh);
 				this.group.add(mesh);
+				this.onNewMesh();
 			}
 			const g = mesh.geometry;
 			const count = writeAttribute(g, 'position', b.pos, 3);
