@@ -866,16 +866,55 @@ function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack): {de
 	if (best < 0 || bestD > 256 ** 2) return null;
 	return {delta: (tick - views[best].tick) * track.seg.intervalPerTick, d2: bestD};
 }
+// a racer's segment's entities (its players' models and animation), decoded
+// once it's raced; null until then
+const racerEntities = new WeakMap<SegmentTrack, EntityTimeline | null>();
+function racerEntitiesFor(r: Racer, track: SegmentTrack): EntityTimeline | null {
+	if (racerEntities.has(track)) return racerEntities.get(track)!;
+	racerEntities.set(track, null);
+	const tables = track.seg.dataTables ?? r.pb.run.dataTables;
+	if (!tables) return null;
+	let steps: Generator<void, EntityTimeline>;
+	try {
+		steps = decodeEntitySteps(track.seg, tables);
+	} catch (e) {
+		console.warn(`couldn't decode entities in ${r.name}'s ${track.seg.map}`, e);
+		return null;
+	}
+	// (in slices of a few milliseconds between tasks, not behind the map's
+	// own loading in the background queue)
+	const slice = () => {
+		const end = performance.now() + 8;
+		try {
+			while (performance.now() < end) {
+				const step = steps.next();
+				if (!step.done) continue;
+				racerEntities.set(track, step.value);
+				if (!playing) render();
+				return;
+			}
+		} catch (e) {
+			console.warn(`couldn't decode entities in ${r.name}'s ${track.seg.map}`, e);
+			return;
+		}
+		soon(slice);
+	};
+	soon(slice);
+	return null;
+}
 // what the views draw of them, and each one's row (with its difference)
 function showRacers(loc: Located, view: {origin: number[]} | null) {
 	$('ghost-hud').hidden = !racers.length;
 	const marks: GhostSpec[] = [];
-	const others = racers.length ? view3d.otherEyes(loc.tick) : [];
+	const others = racers.length ? view3d.otherPlayers(loc.tick) : [];
 	for (const r of racers) {
 		const track = racerTrack(r, loc);
 		r.row.classList.toggle('away', !track);
 		if (!track) continue;
-		marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null});
+		// (its player as its robot in the 3D view)
+		const ents = viewMode === '3d' && r.shown ? racerEntitiesFor(r, track) : null;
+		const body = ents?.player ? {track: ents.player, tick: racerTick(loc, track)} : null;
+		marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null, body});
 		// (in co-op, against whichever of this run's players it follows: the
 		// recording one or their partner)
 		const d = [view?.origin ?? null, ...others].map(at => racerDelta(loc, at, track))

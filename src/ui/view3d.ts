@@ -177,19 +177,30 @@ export interface GhostSpec {
 	view: {origin: Vec3; angles: Vec3} | null;
 	color: string;
 	path: SegmentTrack | null;
+	// its player as its own demo's network data has it (model and
+	// animation), and the tick of that demo at this moment
+	body?: {track: EntityTrack; tick: number} | null;
 }
 
 // A raced run's player: a glowing see-through body (brightest at its
 // edges) with a pointer where it looks
-function makeGhost(body: THREE.BufferGeometry): THREE.Group {
-	const material = new THREE.ShaderMaterial({
+// (its glow, on a capsule or posed on the player's own skinned model)
+function ghostMaterial(): THREE.ShaderMaterial {
+	return new THREE.ShaderMaterial({
 		uniforms: {color: {value: new THREE.Color()}, exposure: {value: 1}},
 		vertexShader: `
+			#include <common>
+			#include <skinning_pars_vertex>
 			varying vec3 vNormal;
 			varying vec3 vView;
 			void main() {
-				vec4 p = modelViewMatrix * vec4(position, 1.0);
-				vNormal = normalize(normalMatrix * normal);
+				#include <beginnormal_vertex>
+				#include <skinbase_vertex>
+				#include <skinnormal_vertex>
+				#include <begin_vertex>
+				#include <skinning_vertex>
+				vec4 p = modelViewMatrix * vec4(transformed, 1.0);
+				vNormal = normalize(normalMatrix * objectNormal);
 				vView = normalize(-p.xyz);
 				gl_Position = projectionMatrix * p;
 			}`,
@@ -209,6 +220,9 @@ function makeGhost(body: THREE.BufferGeometry): THREE.Group {
 		depthWrite: false,
 		blending: THREE.AdditiveBlending,
 	});
+}
+function makeGhost(body: THREE.BufferGeometry): THREE.Group {
+	const material = ghostMaterial();
 	const group = new THREE.Group();
 	group.name = 'ghost';
 	group.add(new THREE.Mesh(body, material));
@@ -222,6 +236,14 @@ function makeGhost(body: THREE.BufferGeometry): THREE.Group {
 	group.userData.material = material;
 	group.visible = false;
 	return group;
+}
+
+// frees a raced player's robot: its posed copies of the model and its glow
+function disposeGhostRobot(robot: THREE.Object3D) {
+	robot.traverse(o => {
+		if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose();
+	});
+	(robot.userData.material as THREE.Material | undefined)?.dispose();
 }
 
 // a run's path through a segment as line segments, broken at teleports
@@ -918,13 +940,38 @@ export class View3D {
 	private pathLine: THREE.LineSegments | null = null;
 	private pathShown = true;
 	private player: THREE.Mesh;
-	// other runs raced against this one: where each one's player's eye is
+	// other runs raced against this one: where each one's player stands
 	// and where it looks this frame (null: not on this map now), in its
 	// colour, and its segment on this map where its path is to be drawn
 	ghosts: GhostSpec[] = [];
 	private ghostBody: THREE.BufferGeometry;
 	private ghostGroup = new THREE.Group();
 	private ghostPaths = new Map<SegmentTrack, THREE.LineSegments>();
+	// raced players' own models, glowing (posed once loaded)
+	private ghostRobots = new Map<EntityTrack, THREE.Group>();
+	private ghostRobot(track: EntityTrack): THREE.Group | null {
+		let robot = this.ghostRobots.get(track);
+		if (robot) return robot;
+		const name = track.model || 'models/player/chell/player.mdl';
+		if (!this.library) return null;
+		robot = new THREE.Group();
+		robot.name = 'ghost robot';
+		robot.visible = false;
+		this.ghostRobots.set(track, robot);
+		this.ghostGroup.add(robot);
+		const group = robot;
+		this.model(name, Number(track.keys[0]?.skin ?? 0)).then(asset => {
+			if (!asset?.skeleton || this.ghostRobots.get(track) !== group) return;
+			const material = ghostMaterial();
+			const anim = new AnimatedModel(asset.skeleton, asset.parts.map(p => ({geometry: skinnedGeometry(p.group, p.raw), material})));
+			group.add(anim.group);
+			group.userData.anim = anim;
+			group.userData.skeleton = asset.skeleton;
+			group.userData.material = material;
+			this.loaded();
+		});
+		return robot;
+	}
 	private bsp: BspMap | null = null;
 	private entities: EntityTimeline | null = null;
 	private objects = new Map<EntityTrack, THREE.Object3D>();
@@ -1348,6 +1395,11 @@ export class View3D {
 		this.dropMeterReads();
 		this.occluderList.length = 0;
 		this.occluderFrame = -1;
+		for (const robot of this.ghostRobots.values()) {
+			this.ghostGroup.remove(robot);
+			disposeGhostRobot(robot);
+		}
+		this.ghostRobots.clear();
 		for (const m of this.energyMaterials.values()) m.then(e => e?.dispose());
 		this.energyMaterials.clear();
 		this.energyLive.clear();
@@ -2141,9 +2193,9 @@ export class View3D {
 		return [...seen.values()];
 	}
 
-	// where the other co-op players' eyes are at a tick (the recording's own
-	// view gives its player's), so raced runs compare player with player
-	otherEyes(tick: number): number[][] {
+	// where the other co-op players stand at a tick (the recording's own view
+	// gives its player's), so raced runs compare player with player
+	otherPlayers(tick: number): number[][] {
 		const ents = this.entities;
 		if (!ents) return [];
 		const out: number[][] = [];
@@ -2152,7 +2204,7 @@ export class View3D {
 			const k = keyAt(t, tick);
 			if (!k || k.removed) continue;
 			const o = this.entityPose(t, tick).origin;
-			out.push([o.x, o.y, o.z + (k.eyeZ ?? DEFAULT_EYE)]);
+			out.push([o.x, o.y, o.z]);
 		}
 		return out;
 	}
@@ -5039,12 +5091,36 @@ export class View3D {
 		this.render();
 	}
 
-	// (each body from its eye down, turned to its aim, the marker on its
+	// (each body where its player stands, turned to its aim, the marker on its
 	// front tilted with the pitch; and the paths asked for, made once per
 	// segment and freed when no longer asked for)
 	private placeGhosts() {
+		// (as their robots, where their demo's players and models are in;
+		// else as capsules)
+		const robots = new Set<THREE.Object3D>();
+		for (const g of this.ghosts) {
+			if (!g.view || !g.body || !this.entities) continue;
+			const robot = this.ghostRobot(g.body.track);
+			if (!robot?.userData.anim) continue;
+			robots.add(robot);
+			const {track, tick} = g.body;
+			const a = this.playerAnim(track, tick, robot.userData.skeleton as Skeleton);
+			(robot.userData.anim as AnimatedModel).setPose(a.seq, a.cycle, a.params, a.gestures);
+			robot.position.set(g.view.origin[0], g.view.origin[1], g.view.origin[2]);
+			robot.rotation.set(0, 0, a.feetYaw * Math.PI / 180);
+			const u = (robot.userData.material as THREE.ShaderMaterial).uniforms;
+			u.color.value.set(g.color);
+			u.exposure.value = this.exposure;
+		}
+		for (const [track, robot] of this.ghostRobots) {
+			robot.visible = robots.has(robot);
+			if (this.ghosts.some(g => g.body?.track === track)) continue;
+			this.ghostGroup.remove(robot);
+			disposeGhostRobot(robot);
+			this.ghostRobots.delete(track);
+		}
 		const bodies = this.ghostGroup.children.filter(o => o.name === 'ghost');
-		const shown = this.ghosts.filter(g => g.view);
+		const shown = this.ghosts.filter(g => g.view && !(g.body && robots.has(this.ghostRobots.get(g.body.track)!)));
 		while (bodies.length < shown.length) {
 			const ghost = makeGhost(this.ghostBody);
 			this.ghostGroup.add(ghost);
@@ -5055,7 +5131,7 @@ export class View3D {
 			ghost.visible = !!g;
 			if (!g?.view) return;
 			const v = g.view;
-			ghost.position.set(v.origin[0], v.origin[1], v.origin[2] - DEFAULT_EYE);
+			ghost.position.set(v.origin[0], v.origin[1], v.origin[2]);
 			ghost.rotation.set(0, 0, v.angles[1] * Math.PI / 180);
 			(ghost.userData.aim as THREE.Object3D).rotation.set(0, v.angles[0] * Math.PI / 180, 0);
 			const u = (ghost.userData.material as THREE.ShaderMaterial).uniforms;
