@@ -47,7 +47,7 @@ export class HudText {
 	}
 
 	// the fonts and the English strings, once
-	private load() {
+	load() {
 		this.loading ??= (async () => {
 			const fonts: [string, string][] = [['P2 UniversLTStd-Cn', 'universc'], ['P2 UniversLTStd-BoldCn', 'univercb']];
 			await Promise.all(fonts.map(async ([family, file]) => {
@@ -69,9 +69,10 @@ export class HudText {
 	}
 
 	// the messages showing at `time` (seconds; messages' ticks x interval)
-	draw(messages: HudMessage[] | null, time: number, interval: number) {
+	// (sized to its place on the page, or as given: a video's frames)
+	draw(messages: HudMessage[] | null, time: number, interval: number, size?: [number, number]) {
 		const c = this.canvas;
-		const w = Math.round(c.clientWidth * devicePixelRatio), h = Math.round(c.clientHeight * devicePixelRatio);
+		const [w, h] = size ?? [Math.round(c.clientWidth * devicePixelRatio), Math.round(c.clientHeight * devicePixelRatio)];
 		if (c.width !== w || c.height !== h) {
 			c.width = w;
 			c.height = h;

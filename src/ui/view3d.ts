@@ -4623,9 +4623,23 @@ export class View3D {
 		this.render();
 	}
 
+	// Drawing at a set size (a video's frames: every pixel its own, nothing
+	// left out while its shader compiles) until set back to null
+	private captureSize: [number, number] | null = null;
+	setCaptureSize(size: [number, number] | null) {
+		const r = this.ensureRenderer();
+		this.captureSize = size;
+		this.capturing = !!size;
+		r.setPixelRatio(size ? 1 : (window.devicePixelRatio || 1) * this.quality.scale);
+		this.resize();
+	}
+	get canvas(): HTMLCanvasElement | null {
+		return this.renderer?.domElement ?? null;
+	}
+
 	resize() {
 		const r = this.ensureRenderer();
-		const w = this.container.clientWidth, h = this.container.clientHeight;
+		const [w, h] = this.captureSize ?? [this.container.clientWidth, this.container.clientHeight];
 		if (!w || !h) return;
 		const size = r.getSize(new THREE.Vector2());
 		if (size.x !== w || size.y !== h) {

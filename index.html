@@ -50,6 +50,7 @@
 					<button id="titles-toggle" class="toggle on" hidden title="Show the game's on-screen text (chapter titles)">Titles</button>
 					<button id="pip-toggle" class="toggle on" hidden title="Show the co-op partner's view in the corner, as autorender's co-op renders do">Partner</button>
 					<button id="bright-toggle" class="toggle" hidden title="Brighten dark maps as autorender does (mat_ambient_light 0.05; on by default where autorender uses it)">Bright</button>
+					<button id="export" hidden title="Save part of the run as an MP4 video, drawn as the 3D view shows it">Export</button>
 					<select id="quality" hidden title="3D quality: resolution, antialiasing, bloom and shadow detail (lower runs faster)">
 						<option value="high">High</option>
 						<option value="medium">Medium</option>
@@ -108,6 +109,32 @@
 				<canvas id="speed"></canvas>
 			</footer>
 		</main>
+
+		<dialog id="export-dialog" class="export-dialog">
+			<form method="dialog">
+				<h2>Export video</h2>
+				<label>Part <select id="export-range">
+					<option value="segment">This segment</option>
+					<option value="here">From here to the end of the segment</option>
+					<option value="run">The whole run</option>
+				</select></label>
+				<label>Size <select id="export-size">
+					<option value="1280x720">1280 × 720</option>
+					<option value="1920x1080" selected>1920 × 1080</option>
+					<option value="2560x1440">2560 × 1440</option>
+				</select></label>
+				<label>Frame rate <select id="export-fps">
+					<option value="30">30 fps</option>
+					<option value="60" selected>60 fps</option>
+				</select></label>
+				<p class="muted" id="export-note">Drawn frame by frame with the current camera and settings, so it takes longer than the part itself. Nothing is uploaded.</p>
+				<progress id="export-progress" max="1" value="0" hidden></progress>
+				<div class="export-buttons">
+					<button type="button" id="export-cancel">Cancel</button>
+					<button type="button" id="export-go" class="primary">Export</button>
+				</div>
+			</form>
+		</dialog>
 
 		<div id="error" class="error" hidden></div>
 	</div>

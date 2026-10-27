@@ -13,6 +13,7 @@ import type {BspMap} from './game/bsp.ts';
 import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
+import {recordMp4, canExportVideo} from './ui/export.ts';
 import {later, soon} from './core/later.ts';
 import {installModelWorkers} from './game/mdlpool.ts';
 import {Materials} from './game/materials.ts';
@@ -712,6 +713,7 @@ $('view-mode').onclick = e => {
 	$('fit').hidden = is3d;
 	$('path-line').hidden = !is3d;
 	$('quality').hidden = !is3d;
+	$('export').hidden = !is3d || !canExportVideo();
 	if (is3d) {
 		if (segIn3d === currentSeg) showViewAs();
 		load3dMap();
@@ -782,6 +784,146 @@ window.addEventListener('drop', async e => {
 	const list = [...(e.dataTransfer?.files ?? [])].filter(x => /\.(sarp|dem)$/i.test(x.name));
 	if (list.length) open(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
 });
+
+// ---- video export ----
+// Part of the run drawn frame by frame at a video's size (each frame waits
+// for what it shows; a level change, for the next map), with the on-screen
+// text and the challenge mode HUD drawn over it, saved as an MP4
+let exportCancelled = false;
+let exporting = false;
+const exportDialog = $('export-dialog') as HTMLDialogElement;
+$('export').onclick = () => {
+	if (!pb || exporting) return;
+	($('export-range').querySelector('option[value="run"]') as HTMLOptionElement).hidden = pb.tracks.length < 2;
+	$('export-progress').hidden = true;
+	($('export-go') as HTMLButtonElement).disabled = false;
+	exportDialog.showModal();
+};
+$('export-cancel').onclick = () => {
+	if (exporting) exportCancelled = true;
+	else exportDialog.close();
+};
+exportDialog.addEventListener('cancel', e => {
+	// (Escape cancels an export running, rather than hiding it)
+	if (exporting) {
+		e.preventDefault();
+		exportCancelled = true;
+	}
+});
+// (until the 3D view has its map and has gone a moment without anything
+// arriving)
+async function exportSettle(tick: number) {
+	let quiet = performance.now();
+	const orig = view3d.onLoaded;
+	view3d.onLoaded = () => {
+		quiet = performance.now();
+		orig();
+	};
+	const start = performance.now();
+	try {
+		while (performance.now() - start < 30000 && !exportCancelled) {
+			seekTo(tick);
+			await new Promise(r => setTimeout(r, 100));
+			if (segIn3d === currentSeg && performance.now() - quiet > 1500) break;
+		}
+	} finally {
+		view3d.onLoaded = orig;
+	}
+	seekTo(tick);
+}
+function drawCmHud(g: OffscreenCanvasRenderingContext2D, stats: {portals: number; seconds: number}, w: number, h: number) {
+	// (as the page's HUD box, scaled with the video's height)
+	const s = h / 540;
+	const cs = Math.floor(stats.seconds * 100 + 1e-6);
+	const pad = (n: number) => String(n).padStart(2, '0');
+	const rows = [['Portals:', String(stats.portals)], ['Time:', `${pad(Math.floor(cs / 6000))}:${pad(Math.floor(cs / 100) % 60)}.${pad(cs % 100)}`]];
+	const bw = 150 * s, line = 13 * 1.35 * s, bh = line * 2 + 10 * s;
+	const x = w - 16 * s - bw, y = h - 16 * s - bh;
+	g.fillStyle = 'rgba(0, 0, 0, 0.55)';
+	g.fillRect(x, y, bw, bh);
+	g.fillStyle = '#fff';
+	g.font = `700 ${13 * s}px Arial, Helvetica, sans-serif`;
+	g.textBaseline = 'middle';
+	rows.forEach(([label, value], i) => {
+		const ty = y + 5 * s + line * (i + 0.5);
+		g.textAlign = 'left';
+		g.fillText(label, x + 9 * s, ty);
+		g.textAlign = 'right';
+		g.fillText(value, x + bw - 9 * s, ty);
+	});
+}
+$('export-go').onclick = async () => {
+	if (!pb || exporting) return;
+	const range = ($('export-range') as HTMLSelectElement).value;
+	const [width, height] = ($('export-size') as HTMLSelectElement).value.split('x').map(Number);
+	const fps = Number(($('export-fps') as HTMLSelectElement).value);
+	const track = pb.tracks[currentSeg];
+	const from = range === 'run' ? 0 : range === 'here' ? t : track.start;
+	const to = range === 'run' ? pb.total : track.start + track.length;
+	const step = 1 / fps / track.seg.intervalPerTick;
+	const frames = Math.max(1, Math.floor((to - from) / step) + 1);
+	const progress = $('export-progress') as HTMLProgressElement;
+	const note = $('export-note');
+	const noteText = note.textContent;
+	progress.hidden = false;
+	progress.value = 0;
+	($('export-go') as HTMLButtonElement).disabled = true;
+	exporting = true;
+	exportCancelled = false;
+	setPlaying(false);
+	const out = new OffscreenCanvas(width, height);
+	const g = out.getContext('2d')!;
+	const hud = gameFiles ? new HudText(gameFiles, document.createElement('canvas')) : null;
+	const name = `${pb.run.fileName.replace(/\.[^.]+$/, '')}_${Math.round(from)}-${Math.round(to)}.mp4`;
+	const started = performance.now();
+	try {
+		await hud?.load();
+		note.textContent = 'Getting the first frame ready…';
+		view3d.setCaptureSize([width, height]);
+		await exportSettle(from);
+		const video = await recordMp4({
+			width, height, fps, frames,
+			frame: async i => {
+				const tick = Math.min(to, from + i * step);
+				seekTo(tick);
+				if (segIn3d !== currentSeg) await exportSettle(tick);
+				// (copied straight after it's drawn: the canvas isn't kept)
+				g.drawImage(view3d.canvas!, 0, 0, width, height);
+				const loc = pb!.locate(tick);
+				const messages = view3d.hudMessages();
+				if (hud && messages && titlesShown) {
+					hud.draw(messages.messages, loc.tick * messages.interval, messages.interval, [width, height]);
+					g.drawImage(hud.canvas, 0, 0);
+				}
+				const stats = view3d.mode === 'eyes' && cmShown ? view3d.cmStats(loc.tick) : null;
+				if (stats) drawCmHud(g, stats, width, height);
+				return out;
+			},
+			progress: done => {
+				progress.value = done / frames;
+				const left = (performance.now() - started) / done * (frames - done) / 1000;
+				note.textContent = `Frame ${done} of ${frames}, about ${Math.ceil(left)} s left`;
+			},
+			cancelled: () => exportCancelled,
+		});
+		if (video) {
+			const a = document.createElement('a');
+			a.href = URL.createObjectURL(video);
+			a.download = name;
+			a.click();
+			setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+		}
+		exportDialog.close();
+	} catch (e) {
+		showError(`Couldn't export the video: ${(e as Error).message}`);
+		exportDialog.close();
+	} finally {
+		exporting = false;
+		view3d.setCaptureSize(null);
+		note.textContent = noteText;
+		render();
+	}
+};
 
 // #load=<url> opens a recording from a URL (one served next to the page,
 // or anywhere that allows it)
