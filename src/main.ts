@@ -1,4 +1,4 @@
-import {loadRuns} from './core/load.ts';
+import {groupRunFiles, loadRuns} from './core/load.ts';
 import {Playback, viewAt, cmdAt, lastAtOrBefore} from './player/playback.ts';
 import type {SegmentTrack, Located} from './player/playback.ts';
 import type {Run, Segment} from './core/model.ts';
@@ -9,7 +9,7 @@ import {View3D, QUALITY} from './ui/view3d.ts';
 import type {CameraMode, CameraState, GhostSpec, NameTag} from './ui/view3d.ts';
 import {decodeEntitySteps, keyAt} from './net/entities.ts';
 import {background} from './ui/background.ts';
-import type {EntityTimeline} from './net/entities.ts';
+import type {EntityTimeline, EntityTrack} from './net/entities.ts';
 import {loadBspOffThread} from './game/bsppool.ts';
 import type {BspMap} from './game/bsp.ts';
 import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
@@ -856,28 +856,53 @@ window.addEventListener('drop', async e => {
 });
 
 // ---- ghost race ----
-// Other runs of the same maps, played alongside: each one's player drawn as
-// a ghost in its own colour from the moment each run's segment starts (its
+// Other runs of the same maps, played alongside: each one's players drawn as
+// ghosts in its own colour from the moment each run's segment starts (its
 // path too, where asked), and the difference between it and this run, from
 // when it was where this run's player is now. Each can be hidden, have its
-// path shown, or be taken off
-interface Racer {
+// path shown, or be taken off. A co-op run's two demos (the board names them
+// with the same time and ids one apart) race as one run
+interface RacerPlayer {
 	pb: Playback;
 	name: string;
+}
+interface Racer {
+	players: RacerPlayer[];
+	key: string | null;  // its first demo's name, where the board's (map_time_steamid_id)
 	color: string;
-	shown: boolean;  // its player drawn
-	path: boolean;   // its path drawn
+	shown: boolean;  // its players drawn
+	path: boolean;   // their paths drawn
 	row: HTMLElement;
 }
 const RACER_COLORS = ['#ff8c26', '#4cb8ff', '#d45cff', '#3fd6c8', '#ffd84a', '#ff5c7a', '#9be34a', '#ff9ad5'];
 let racers: Racer[] = [];
+// (the first of these not taken; then hues spread around the wheel, each
+// as far from the ones before it as it can be)
+function racerColor(): string {
+	const free = RACER_COLORS.find(c => !racers.some(r => r.color === c));
+	if (free) return free;
+	for (let i = 0; ; i++) {
+		const c = `hsl(${Math.round((i * 137.508 + 20) % 360)}, ${i % 2 ? 70 : 90}%, ${i % 3 ? 62 : 70}%)`;
+		if (!racers.some(r => r.color === c)) return c;
+	}
+}
+// a board demo's run (map_time_steamid_id): the same map and time, and an id
+// the same or one apart, is the same co-op run's other player
+function boardRun(fileName: string): {map: string; time: string; id: number} | null {
+	const m = /^(.+)_(\d{3,8})_\d{17}_(\d+)\.(dem|sarp)$/i.exec(fileName);
+	return m && {map: m[1].toLowerCase(), time: m[2], id: Number(m[3])};
+}
+function sameBoardRun(a: string | null, b: string | null) {
+	const x = a ? boardRun(a) : null, y = b ? boardRun(b) : null;
+	return !!x && !!y && x.map === y.map && x.time === y.time && Math.abs(x.id - y.id) <= 1;
+}
 // a racer's segment for one of this run's: the one on the same map (the
 // same one of them, where a run visits a map more than once)
-function racerTrack(r: Racer, loc: Located): SegmentTrack | null {
+function racerTrack(p: RacerPlayer, loc: Located): SegmentTrack | null {
 	if (!pb) return null;
 	const map = loc.track.seg.map;
 	const visit = pb.tracks.slice(0, loc.index).filter(tr => tr.seg.map === map).length;
-	return r.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
+	return p.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
 }
 // where a segment's run finishes (the challenge mode flags, as the board's
 // runs record them) and how many ticks SAR's timer gave it, where known: in
@@ -896,14 +921,32 @@ function finishOf(seg: Segment, run: Run): {tick: number; ticks: number | null} 
 	if (ticks === null && named && run.segments.length === 1) ticks = Math.round(Number(named[1]) / 100 / seg.intervalPerTick);
 	return tick === null ? null : {tick, ticks};
 }
+// where a racer's segment that records no finish (a demo from before the
+// challenge mode flags) finishes: where its player first comes near where
+// this run's finishes (as it keeps recording after), with its time from its
+// file name where the board's
+const finishesNear = new WeakMap<SegmentTrack, {tick: number; ticks: number | null} | null>();
+function finishNear(track: SegmentTrack, own: SegmentTrack, finish: {tick: number} | null, run: Run): {tick: number; ticks: number | null} | null {
+	if (finishesNear.has(track)) return finishesNear.get(track)!;
+	const at = finish && viewAt(own, finish.tick)?.origin;
+	let found: {tick: number; ticks: number | null} | null = null;
+	if (at) {
+		const v = track.seg.views.find(v => (v.origin[0] - at[0]) ** 2 + (v.origin[1] - at[1]) ** 2 + (v.origin[2] - at[2]) ** 2 < 48 ** 2);
+		if (v) found = {tick: v.tick, ticks: null};
+		const named = /_(\d{3,8})_\d{17}_\d+\.(dem|sarp)$/i.exec(run.fileName);
+		if (found && named && run.segments.length === 1) found.ticks = Math.round(Number(named[1]) / 100 / track.seg.intervalPerTick);
+	}
+	finishesNear.set(track, found);
+	return found;
+}
 // (a racer's tick as many seconds into its run as this one is into its own:
 // from where each run's timer started, the finish less its time (the other
 // run's where one has none, so their finishes meet), as each player's demo
 // of a co-op run starts recording at its own moment; else from where each
 // segment starts)
 function racerTick(loc: Located, track: SegmentTrack) {
-	const other = racers.find(r => r.pb.tracks.includes(track));
-	const a = pb && finishOf(loc.track.seg, pb.run), b = other && finishOf(track.seg, other.pb.run);
+	const other = racers.flatMap(r => r.players).find(p => p.pb.tracks.includes(track));
+	const a = pb && finishOf(loc.track.seg, pb.run), b = other && (finishOf(track.seg, other.pb.run) ?? finishNear(track, loc.track, a, other.pb.run));
 	const startA = a && b ? a.tick - (a.ticks ?? b.ticks ?? 0) : loc.track.seg.firstTick;
 	const startB = a && b ? b.tick - (b.ticks ?? a.ticks ?? 0) : track.seg.firstTick;
 	const seconds = (loc.tick - startA) * loc.track.seg.intervalPerTick;
@@ -938,19 +981,20 @@ function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack): {de
 	if (best < 0 || bestD > 256 ** 2) return null;
 	return {delta: (tick - views[best].tick) * track.seg.intervalPerTick, d2: bestD};
 }
-// a racer's segment's entities (its players' models and animation), decoded
-// once it's raced; null until then
-const racerEntities = new WeakMap<SegmentTrack, EntityTimeline | null>();
-function racerEntitiesFor(r: Racer, track: SegmentTrack): EntityTimeline | null {
+// a racer's segment's player (its model and animation), decoded once it's
+// raced (only that kept, so many racers don't hold every entity of their
+// demos); null until then
+const racerEntities = new WeakMap<SegmentTrack, EntityTrack | null>();
+function racerPlayerTrack(p: RacerPlayer, track: SegmentTrack): EntityTrack | null {
 	if (racerEntities.has(track)) return racerEntities.get(track)!;
 	racerEntities.set(track, null);
-	const tables = track.seg.dataTables ?? r.pb.run.dataTables;
+	const tables = track.seg.dataTables ?? p.pb.run.dataTables;
 	if (!tables) return null;
 	let steps: Generator<void, EntityTimeline>;
 	try {
 		steps = decodeEntitySteps(track.seg, tables);
 	} catch (e) {
-		console.warn(`couldn't decode entities in ${r.name}'s ${track.seg.map}`, e);
+		console.warn(`couldn't decode entities in ${p.name}'s ${track.seg.map}`, e);
 		return null;
 	}
 	// (in slices of a few milliseconds between tasks, not behind the map's
@@ -961,12 +1005,12 @@ function racerEntitiesFor(r: Racer, track: SegmentTrack): EntityTimeline | null 
 			while (performance.now() < end) {
 				const step = steps.next();
 				if (!step.done) continue;
-				racerEntities.set(track, step.value);
+				racerEntities.set(track, step.value.player ?? null);
 				if (!playing) render();
 				return;
 			}
 		} catch (e) {
-			console.warn(`couldn't decode entities in ${r.name}'s ${track.seg.map}`, e);
+			console.warn(`couldn't decode entities in ${p.name}'s ${track.seg.map}`, e);
 			return;
 		}
 		soon(slice);
@@ -974,23 +1018,33 @@ function racerEntitiesFor(r: Racer, track: SegmentTrack): EntityTimeline | null 
 	soon(slice);
 	return null;
 }
+// (past this many, each row on one line, so a whole board's top fits)
+const COMPACT_RACERS = 6;
 // what the views draw of them, and each one's row (with its difference)
 function showRacers(loc: Located, view: {origin: number[]} | null) {
 	$('ghost-hud').hidden = !racers.length;
+	$('ghost-hud').classList.toggle('compact', racers.length > COMPACT_RACERS);
 	const marks: GhostSpec[] = [];
 	const others = racers.length ? view3d.otherPlayers(loc.tick) : [];
 	for (const r of racers) {
-		const track = racerTrack(r, loc);
-		r.row.classList.toggle('away', !track);
-		if (!track) continue;
-		// (its player as its robot in the 3D view)
-		const ents = viewMode === '3d' && r.shown ? racerEntitiesFor(r, track) : null;
-		const body = ents?.player ? {track: ents.player, tick: racerTick(loc, track)} : null;
-		marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null, body, name: r.name});
-		// (in co-op, against whichever of this run's players it follows: the
-		// recording one or their partner)
-		const d = [view?.origin ?? null, ...others].map(at => racerDelta(loc, at, track))
-			.reduce<{delta: number; d2: number} | null>((a, b) => !b || (a && a.d2 <= b.d2) ? a : b, null)?.delta ?? null;
+		let best: {delta: number; d2: number} | null = null, here = false;
+		for (const p of r.players) {
+			const track = racerTrack(p, loc);
+			if (!track) continue;
+			here = true;
+			// (its players as their robots in the 3D view)
+			const player = viewMode === '3d' && r.shown ? racerPlayerTrack(p, track) : null;
+			const body = player ? {track: player, tick: racerTick(loc, track)} : null;
+			marks.push({view: r.shown ? racerAt(loc, track) : null, color: r.color, path: r.path ? track : null, body, name: p.name});
+			// (in co-op, the nearest of its players to whichever of this
+			// run's players it's nearest: the recording one or their partner)
+			for (const at of [view?.origin ?? null, ...others]) {
+				const d = racerDelta(loc, at, track);
+				if (d && (!best || d.d2 < best.d2)) best = d;
+			}
+		}
+		r.row.classList.toggle('away', !here);
+		const d = best?.delta ?? null;
 		const el = r.row.querySelector('.ghost-delta') as HTMLElement;
 		el.textContent = d === null ? '—' : `${d > 0 ? '+' : d < 0 ? '−' : '±'}${Math.abs(d).toFixed(2)}`;
 		el.classList.toggle('behind', d !== null && d > 0.005);
@@ -999,15 +1053,14 @@ function showRacers(loc: Located, view: {origin: number[]} | null) {
 	view3d.ghosts = marks;
 	pathView.racers = marks;
 }
+const racerName = (r: Racer) => r.players.map(p => p.name).join(' & ');
 // a racer's row: its name in its colour, its difference, and its toggles
 function racerRow(r: Racer): HTMLElement {
 	const row = document.createElement('div');
 	row.className = 'ghost-row';
 	row.style.setProperty('--ghost', r.color);
-	row.title = `${r.name} (${r.pb.run.fileName}): how far ahead (−) or behind (+) this run is, where it was at this spot`;
 	const name = document.createElement('div');
 	name.className = 'ghost-name';
-	name.textContent = r.name;
 	const delta = document.createElement('div');
 	delta.className = 'ghost-delta';
 	const toggle = (label: string, title: string, get: () => boolean, set: (on: boolean) => void) => {
@@ -1035,34 +1088,51 @@ function racerRow(r: Racer): HTMLElement {
 	const buttons = document.createElement('div');
 	buttons.className = 'ghost-buttons';
 	buttons.append(
-		toggle('Ghost', 'Show its player', () => r.shown, on => (r.shown = on)),
+		toggle('Ghost', 'Show its players', () => r.shown, on => (r.shown = on)),
 		toggle('Path', 'Draw its path through the map', () => r.path, on => (r.path = on)),
 		remove);
 	row.append(name, delta, buttons);
 	return row;
 }
+function nameRacerRow(r: Racer) {
+	r.row.querySelector('.ghost-name')!.textContent = racerName(r);
+	r.row.title = `${racerName(r)} (${r.players.map(p => p.pb.run.fileName).join(', ')}): how far ahead (−) or behind (+) this run is, where it was at this spot`;
+}
+// a run to race: with its co-op partner's demo where that's raced already
+// (none where it's this run's own partner's), else a run of its own
+function addRacer(run: Run) {
+	const maps = new Set(pb?.run.segments.map(s => s.map));
+	if (!run.segments.some(s => maps.has(s.map) && s.views.length)) throw new Error('it has none of the maps this run plays.');
+	if (pb && sameBoardRun(run.fileName, pb.run.fileName)) return;
+	// (named after its player, as the demo records them)
+	const player: RacerPlayer = {pb: new Playback(run), name: run.player || run.fileName.replace(/\.[^.]+$/, '')};
+	const team = racers.find(r => sameBoardRun(r.key, run.fileName));
+	if (team) {
+		team.players.push(player);
+		nameRacerRow(team);
+		return;
+	}
+	const r: Racer = {players: [player], key: boardRun(run.fileName) ? run.fileName : null, color: racerColor(), shown: true, path: false, row: null!};
+	r.row = racerRow(r);
+	nameRacerRow(r);
+	racers.push(r);
+	$('ghost-list').append(r.row);
+}
 $('ghost').onclick = () => ($('ghost-input') as HTMLInputElement).click();
+// (each file a run of its own, but for a demo's numbered continuations)
 $<HTMLInputElement>('ghost-input').onchange = async e => {
 	const input = e.target as HTMLInputElement;
 	const list = [...(input.files ?? [])];
 	input.value = '';
-	if (!list.length) return;
-	try {
-		const run = await loadRuns(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
-		const maps = new Set(pb?.run.segments.map(s => s.map));
-		if (!run.segments.some(s => maps.has(s.map) && s.views.length)) throw new Error('it has none of the maps this run plays.');
-		// (the first colour not taken)
-		const color = RACER_COLORS.find(c => !racers.some(r => r.color === c)) ?? RACER_COLORS[racers.length % RACER_COLORS.length];
-		// (named after its player, as the demo records them)
-		const r: Racer = {pb: new Playback(run), name: run.player || run.fileName.replace(/\.[^.]+$/, ''), color, shown: true, path: false, row: null!};
-		r.row = racerRow(r);
-		racers.push(r);
-		$('ghost-list').append(r.row);
-		$('ghost').classList.add('on');
-		render();
-	} catch (err) {
-		showError(`Couldn't race ${list.length === 1 ? list[0].name : `${list.length} files`}: ${(err as Error).message}`);
+	for (const files of groupRunFiles(list)) {
+		try {
+			addRacer(await loadRuns(await Promise.all(files.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name})))));
+		} catch (err) {
+			showError(`Couldn't race ${files.length === 1 ? files[0].name : `${files.length} files`}: ${(err as Error).message}`);
+		}
 	}
+	$('ghost').classList.toggle('on', racers.length > 0);
+	render();
 };
 
 // ---- video export ----
@@ -1136,25 +1206,34 @@ function drawCmHud(g: OffscreenCanvasRenderingContext2D, stats: {portals: number
 // colour and how far ahead or behind this run is), top right
 function drawRacers(g: OffscreenCanvasRenderingContext2D, w: number, h: number) {
 	const s = h / 540;
+	// (past a few, a line each, as the page shows them)
+	const compact = racers.length > COMPACT_RACERS;
+	const bw = (compact ? 230 : 190) * s, bh = (compact ? 20 : 46) * s, gap = (compact ? 3 : 6) * s, x = w - 16 * s - bw;
 	let y = 16 * s;
 	for (const row of document.querySelectorAll<HTMLElement>('#ghost-list .ghost-row')) {
-		if (row.classList.contains('away')) continue;
+		if (row.classList.contains('away') || y + bh > h - 16 * s) continue;
 		const name = row.querySelector('.ghost-name')!.textContent ?? '';
 		const deltaEl = row.querySelector('.ghost-delta')!;
-		const color = row.style.getPropertyValue('--ghost');
-		const bw = 190 * s, bh = 46 * s, x = w - 16 * s - bw;
+		const deltaColor = deltaEl.classList.contains('ahead') ? '#47c17b' : deltaEl.classList.contains('behind') ? '#ff5d5d' : '#fff';
 		g.fillStyle = 'rgba(0, 0, 0, 0.55)';
 		g.fillRect(x, y, bw, bh);
-		g.fillStyle = color;
+		g.fillStyle = row.style.getPropertyValue('--ghost');
 		g.fillRect(x + bw - 3 * s, y, 3 * s, bh);
 		g.textAlign = 'right';
 		g.textBaseline = 'alphabetic';
-		g.font = `400 ${13 * s}px Arial, Helvetica, sans-serif`;
-		g.fillText(name, x + bw - 13 * s, y + 17 * s, bw - 20 * s);
-		g.fillStyle = deltaEl.classList.contains('ahead') ? '#47c17b' : deltaEl.classList.contains('behind') ? '#ff5d5d' : '#fff';
-		g.font = `700 ${20 * s}px Arial, Helvetica, sans-serif`;
-		g.fillText(deltaEl.textContent ?? '', x + bw - 13 * s, y + 39 * s);
-		y += bh + 6 * s;
+		if (compact) {
+			g.font = `700 ${14 * s}px Arial, Helvetica, sans-serif`;
+			g.fillText(name, x + bw - 70 * s, y + 15 * s, bw - 80 * s);
+			g.fillStyle = deltaColor;
+			g.fillText(deltaEl.textContent ?? '', x + bw - 11 * s, y + 15 * s);
+		} else {
+			g.font = `400 ${13 * s}px Arial, Helvetica, sans-serif`;
+			g.fillText(name, x + bw - 13 * s, y + 17 * s, bw - 20 * s);
+			g.fillStyle = deltaColor;
+			g.font = `700 ${20 * s}px Arial, Helvetica, sans-serif`;
+			g.fillText(deltaEl.textContent ?? '', x + bw - 13 * s, y + 39 * s);
+		}
+		y += bh + gap;
 	}
 }
 $('export-go').onclick = async () => {

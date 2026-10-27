@@ -133,7 +133,10 @@ computer.
   lined up from where each one's timer started, and in co-op each player is
   compared with the one doing the same job. Each can be hidden, have its path
   drawn through the map, or be taken off again, and exported videos show the
-  readout too.
+  readout too. Pick a whole board's top runs at once: each file becomes its
+  own run, and a co-op run's two demos (as the board names them) share one
+  colour and one row. Demos from before the challenge-mode finish was recorded
+  are lined up by where their player reaches the finish.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the

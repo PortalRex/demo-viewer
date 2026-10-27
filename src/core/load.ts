@@ -31,6 +31,21 @@ export async function loadRuns(files: {bytes: Uint8Array; name: string}[]): Prom
 	};
 }
 
+// Picked files split into runs: a demo and its numbered continuations
+// (name.dem, name_2.dem, ...) together, every other file a run of its own
+export function groupRunFiles<T extends {name: string}>(files: T[]): T[][] {
+	const stem = (n: string) => n.replace(/\.[^.]+$/, '');
+	const stems = new Set(files.map(f => stem(f.name)));
+	const groups = new Map<string, T[]>();
+	for (const f of files) {
+		const m = /^(.*)_(\d+)$/.exec(stem(f.name));
+		const base = m && stems.has(m[1]) ? m[1] : stem(f.name);
+		if (!groups.has(base)) groups.set(base, []);
+		groups.get(base)!.push(f);
+	}
+	return [...groups.values()];
+}
+
 export async function loadRun(bytes: Uint8Array, fileName: string): Promise<Run> {
 	if (isSarp(bytes)) return readSarp(bytes, fileName);
 	if (isDem(bytes)) return readDem(bytes, fileName);

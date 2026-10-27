@@ -151,3 +151,9 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .ghost-delta { font-size: 20px; font-variant-numeric: tabular-nums; }
 .ghost-delta.ahead { color: var(--ok); }
 .ghost-delta.behind { color: var(--bad); }
+/* many runs raced: one line each, the toggles shown on the row pointed at */
+.ghost-hud.compact .ghost-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; gap: 0 10px; margin-bottom: 3px; padding: 2px 8px; }
+.ghost-hud.compact .ghost-name { max-width: 200px; }
+.ghost-hud.compact .ghost-delta { font-size: 14px; min-width: 46px; }
+.ghost-hud.compact .ghost-buttons { display: none; flex-basis: 100%; }
+.ghost-hud.compact .ghost-row:hover .ghost-buttons { display: flex; }
