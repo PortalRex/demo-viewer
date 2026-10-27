@@ -1037,6 +1037,8 @@ interface BlenderJob {
 let blenderCancelled = false;
 async function exportBlender(job: BlenderJob = {}): Promise<{name: string; frames: number; bytes: number; unsupported: Record<string, number>} | null> {
 	if (!pb) throw new Error('no run open');
+	// (it records what the 3D view draws: nothing to record without it)
+	if (viewMode !== '3d') throw new Error('the 3D view is not open');
 	const track = pb.tracks[pb.locate(job.from ?? t).index];
 	const from = Math.max(track.start, job.from ?? track.start);
 	const to = Math.min(track.start + track.length, job.to ?? track.start + track.length);
