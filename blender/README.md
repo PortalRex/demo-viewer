@@ -46,7 +46,7 @@ renders on its own too.
 | Option | |
 | --- | --- |
 | Scale | Blender units per game unit (0.0254: one inch, so a player is 1.83 m) |
-| Render engine | **Cycles** for the real look: portals show the view through them (Ray Portal BSDF), projected lights cast shadows. **Eevee** for quick previews. |
+| Render engine | **Cycles** for the real look: portals show the view through them (Ray Portal BSDF), projected lights cast shadows with their cookie. **Eevee** for quick previews: portals show the viewer's picture of their view, and projected lights are plain spotlights. |
 | Samples | antialiasing samples per pixel (everything is emission, so even 16 renders clean) |
 | Projected lights | sunlight through windows and flashlights as real lights with ray-traced shadows |
 
@@ -66,7 +66,9 @@ renders on its own too.
   with its own field of view and layered over the world, as the game draws
   it. First-person effects (the gun's lights, the hold beam) go with it.
 - **Portals**: the live view through each one in Cycles, and the flames,
-  opening and static from the portal shader.
+  opening and static from the portal shader. Eevee and the viewport show
+  the viewer's own picture of each portal's view, as the scene camera sees
+  it (`textures/portalview_*`).
 - **Effects**: particles, sprites, glows, lasers, light bridges, funnels,
   fizzlers and ropes. Geometry the game remakes every frame is kept per
   frame, with a *Frames* geometry-nodes modifier that shows the current
@@ -101,5 +103,6 @@ version when one doesn't match: export the run again.
 - **Sound**: the viewer doesn't play the demo's audio.
 - **The co-op partner's picture-in-picture**: an autorender overlay, not
   part of the game's view.
-- **Eevee portals**: the Ray Portal BSDF is Cycles-only. In Eevee a
-  portal's opening shows black.
+- **Eevee portals from another angle**: Eevee shows the view as the
+  scene camera saw it. Orbiting away from that camera in the viewport
+  doesn't change it. Cycles traces the real view from anywhere.

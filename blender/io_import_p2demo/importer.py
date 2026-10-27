@@ -903,7 +903,11 @@ class Importer:
         (100 / distance, at most 1), faded out towards its far plane, N.L and
         shadows (here ray traced: Cycles). The materials take it through a
         diffuse part (MaterialBuilder.finish); its strength makes that
-        albedo x 1.5 x the light, as the viewer adds it."""
+        albedo x 1.5 x the light, as the viewer adds it.
+        Eevee takes no light nodes: the light's own colour and energy are
+        what it has, the energy keyed to what the light gives at the eyes'
+        distance (the cookie's average brightness, the falloff there). The
+        nodes divide them back out, so Cycles gets the light as above."""
         fl = self.b.scene.get('flash')
         if not fl or not self.projected_light:
             return
@@ -935,7 +939,6 @@ class Importer:
         cookie = (1, 1, 1)
         if img is not None:
             cookie, _ = g.image(img, g.vec(u, g.sub(1.0, vv), 0.0), extension='CLIP')
-        color = g.vec(g.value(float(col['r'][first]), 'R'), g.value(float(col['g'][first]), 'G'), g.value(float(col['b'][first]), 'B'))
         fall = g.node('ShaderNodeLightFalloff', {'Strength': 1.0})
         dist, dist2 = fall.outputs['Linear'], fall.outputs['Constant']
         far = g.value(float(col['far'][first]), 'Far')
@@ -943,8 +946,9 @@ class Importer:
         fade = g.sat(g.div(g.sub(d_src, far), g.mul(far, -0.4)))
         # (atten x d^2: min(100 / d, 1) in game units, d^2 undoing Cycles' own falloff)
         atten = g.min(g.mul(100.0 * S, dist), dist2)
-        strength = g.mul(g.mul(fade, atten), 6.0 * math.pi * math.pi)
-        emit = g.node('ShaderNodeEmission', {'Color': g.vmul(cookie, color), 'Strength': strength})
+        eevee = g.value(1.0, 'Eevee Energy')
+        strength = g.div(g.mul(g.mul(fade, atten), 6.0 * math.pi * math.pi), g.max(eevee, 1e-6))
+        emit = g.node('ShaderNodeEmission', {'Color': cookie, 'Strength': strength})
         out = g.node('ShaderNodeOutputLight')
         g.link(emit.outputs[0], out.inputs['Surface'])
         light = bpy.data.objects.new('P2 Projected Light', data)
@@ -957,16 +961,40 @@ class Importer:
         # (its cone wide enough for the square frustum's corners)
         spot = 2 * np.arctan(np.tan(np.radians(col['fov']) / 2) * math.sqrt(2))
         data.spot_size = float(spot[first])
+        rgb = np.stack([col['r'], col['g'], col['b']], axis=1)
+        data.color = rgb[first]
+        # Eevee's energy each frame: the light at the eyes' distance (game
+        # units, min(100 / d, 1) by the cookie's mean, x 6 pi^2 as above, x
+        # d^2 for Eevee's own falloff; past the far plane, nothing)
+        mean = 1.0
+        if img is not None and img.size[0]:
+            px = np.empty(img.size[0] * img.size[1] * img.channels, dtype=np.float32)
+            img.pixels.foreach_get(px)
+            px = px.reshape(-1, img.channels)[:, :3]
+            mean = float(np.clip((px * (0.2126, 0.7152, 0.0722)).sum(axis=1).mean(), 0.05, 1.0))
+        n = self.b['frames']
+        at = np.maximum(np.searchsorted(frames, np.arange(n), side='right') - 1, 0)
+        idx = np.maximum.accumulate(np.where(on, np.arange(len(on)), 0))
+        cf, cv = self.b.track(self.b['camera'])
+        eyes = cv[np.maximum(np.searchsorted(cf, np.arange(n), side='right') - 1, 0), 0:3]
+        d = np.maximum(np.linalg.norm(eyes - np.stack([col['x'], col['y'], col['z']], axis=1)[idx][at], axis=1), 1.0)
+        energy = mean * np.minimum(100.0 / d, 1.0) * (d * S) ** 2 * 6.0 * math.pi * math.pi
+        energy *= np.clip((col['far'][idx][at] - d) / (col['far'][idx][at] * 0.4), 0.0, 1.0)
+        energy = np.maximum(energy, 1e-4)
+        keys(nt, 'nodes["Eevee Energy"].outputs[0].default_value', np.arange(n), energy, 'LINEAR', name='P2 Projected Light nodes')
+        keys(data, 'energy', np.arange(n), energy * on[at], 'CONSTANT')
+        data.use_custom_distance = True
+        data.cutoff_distance = float(col['far'][first]) * S
         if len(frames) > 1:
             # (where it's off, it holds its last place)
-            idx = np.maximum.accumulate(np.where(on, np.arange(len(on)), 0))
             key_vectors(light, 'location', frames, loc[idx])
             key_vectors(light, 'rotation_quaternion', frames, quat[idx])
-            keys(data, 'energy', frames, on.astype(np.float32), 'CONSTANT')
-            for name, node in (('fov', 'FOV'), ('far', 'Far'), ('r', 'R'), ('g', 'G'), ('b', 'B')):
+            for name, node in (('fov', 'FOV'), ('far', 'Far')):
                 vals = col[name][idx]
                 if np.ptp(vals) > 0:
                     keys(nt, f'nodes["{node}"].outputs[0].default_value', frames, vals, 'LINEAR', name='P2 Projected Light nodes')
+            if np.ptp(rgb[idx]) > 0:
+                key_vectors(data, 'color', frames, rgb[idx])
             if np.ptp(spot[idx]) > 0:
                 keys(data, 'spot_size', frames, spot[idx])
 
