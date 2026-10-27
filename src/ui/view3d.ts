@@ -826,6 +826,13 @@ export const QUALITY: Record<string, Quality> = {
 	low: {scale: 0.5, samples: 0, bloom: false, shadowSize: 512},
 };
 
+export interface CameraState {
+	mode: CameraMode;
+	pos?: number[];  // free: where it is
+	ang?: number[];  // free: pitch, yaw
+	offset?: number[];  // orbit: from the point it turns about, over the player
+}
+
 export class View3D {
 	readonly container: HTMLElement;
 	mode: CameraMode = 'eyes';
@@ -2009,6 +2016,26 @@ export class View3D {
 		}
 		return [...seen.values()];
 	}
+
+	// The camera as a link keeps it: its mode, and where a free camera is
+	// and looks, or where an orbiting one sits from the player
+	cameraState(): CameraState {
+		const r = (v: number) => Math.round(v * 10) / 10;
+		if (this.mode === 'free') return {mode: 'free', pos: this.camera.position.toArray().map(r), ang: this.freeAngles.map(r)};
+		if (this.mode === 'orbit' && this.controls) return {mode: 'orbit', offset: this.camera.position.clone().sub(this.controls.target).toArray().map(r)};
+		return {mode: this.mode};
+	}
+	setCameraState(state: CameraState) {
+		this.setMode(state.mode);
+		if (state.mode === 'free' && state.pos && state.ang) {
+			this.camera.position.fromArray(state.pos);
+			this.freeAngles = [state.ang[0], state.ang[1]];
+			this.applyFreeView();
+		}
+		// (put where it was from the player once the player's placed)
+		if (state.mode === 'orbit' && state.offset) this.orbitOffset = new THREE.Vector3().fromArray(state.offset);
+	}
+	private orbitOffset: THREE.Vector3 | null = null;
 
 	follow(index: number | null) {
 		const t = index === null ? null : this.entities?.tracks.find(c => c.className === 'CPortal_Player' && c.index === index) ?? null;
@@ -4751,7 +4778,10 @@ export class View3D {
 				// follow: move the camera with the player, keep the user's angle
 				const target = feet.clone();
 				target.z += 36;
-				if (this.lastTarget) this.camera.position.add(target.clone().sub(this.lastTarget));
+				if (this.orbitOffset) {
+					this.camera.position.copy(target).add(this.orbitOffset);
+					this.orbitOffset = null;
+				} else if (this.lastTarget) this.camera.position.add(target.clone().sub(this.lastTarget));
 				this.controls.target.copy(target);
 				this.lastTarget = target;
 				this.controls.update();

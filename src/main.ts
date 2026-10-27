@@ -4,7 +4,7 @@ import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D, QUALITY} from './ui/view3d.ts';
-import type {CameraMode} from './ui/view3d.ts';
+import type {CameraMode, CameraState} from './ui/view3d.ts';
 import {decodeEntitySteps, keyAt} from './net/entities.ts';
 import {background} from './ui/background.ts';
 import type {EntityTimeline} from './net/entities.ts';
@@ -37,7 +37,8 @@ let playing = false;
 let rate = 1;
 let currentSeg = -1;
 let lastFrame = 0;
-let viewMode: 'top' | 'side' | '3d' = 'top';
+type ViewMode = 'top' | 'side' | '3d';
+let viewMode = 'top' as ViewMode;
 
 // ---- entities and the 3D map ----
 
@@ -447,6 +448,9 @@ async function load3dMap() {
 }
 
 
+// (what a link wants shown, once a run's open: see links)
+let afterOpen = () => {};
+
 function showError(msg: string) {
 	const el = $('error');
 	el.textContent = msg;
@@ -471,6 +475,7 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 		setPlaying(false);
 		document.title = `${run.fileName} · SAR Run Viewer`;
 		requestAnimationFrame(() => render());
+		afterOpen();
 		// (and now, where frames don't come, a hidden tab: the first render
 		// starts the 3D view loading in the background)
 		soon(() => currentSeg < 0 && render());
@@ -778,10 +783,92 @@ window.addEventListener('drop', async e => {
 	if (list.length) open(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
 });
 
-// dev convenience: #load=fixtures/name.sarp opens a file served next to the page
+// #load=<url> opens a recording from a URL (one served next to the page,
+// or anywhere that allows it)
+let openedFrom: string | null = null;
 const openPath = (path: string) => fetch(path).then(r => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.statusText))))
-	.then(b => open([{bytes: new Uint8Array(b), name: decodeURIComponent(path.split('/').pop()!)}]))
+	.then(async b => {
+		await open([{bytes: new Uint8Array(b), name: decodeURIComponent(path.split('/').pop()!)}]);
+		openedFrom = path;
+	})
 	.catch(e => showError(`Couldn't load ${path}: ${e.message}`));
-const m = location.hash.match(/^#load=(.+)$/);
-if (m) openPath(m[1]);
+
+// ---- links ----
+// A link to a moment of a run: the recording's URL (where it was opened from
+// one; otherwise its file name, for whoever has the file to drop in), the
+// tick, the view, and the 3D camera:
+//   #load=<url>&t=<tick>&view=3d&cam=free&pos=x,y,z&ang=pitch,yaw
+interface Moment {
+	tick: number;
+	view: ViewMode;
+	camera?: CameraState;
+	file?: string;
+}
+function momentLink(): string {
+	const q = new URLSearchParams();
+	if (openedFrom) q.set('load', openedFrom);
+	else if (pb) q.set('file', pb.run.fileName);
+	q.set('t', String(Math.round(t)));
+	q.set('view', viewMode);
+	if (viewMode === '3d') {
+		const c = view3d.cameraState();
+		q.set('cam', c.mode);
+		if (c.pos) q.set('pos', c.pos.join(','));
+		if (c.ang) q.set('ang', c.ang.join(','));
+		if (c.offset) q.set('off', c.offset.join(','));
+	}
+	// (the URL's own characters kept readable)
+	return `${location.origin}${location.pathname}#${q.toString().replace(/%2F/g, '/').replace(/%2C/g, ',').replace(/%3A/g, ':')}`;
+}
+function parseMoment(hash: string): {load: string | null; moment: Moment | null} {
+	const q = new URLSearchParams(hash.replace(/^#/, ''));
+	const nums = (k: string) => q.get(k)?.split(',').map(Number).filter(Number.isFinite);
+	const load = q.get('load');
+	if (!q.has('t')) return {load, moment: null};
+	const view = q.get('view');
+	const cam = q.get('cam');
+	return {
+		load,
+		moment: {
+			tick: Number(q.get('t')) || 0,
+			view: view === '3d' || view === 'side' ? view : 'top',
+			camera: cam === 'eyes' || cam === 'orbit' || cam === 'free' ? {mode: cam, pos: nums('pos'), ang: nums('ang'), offset: nums('off')} : undefined,
+			file: q.get('file') ?? undefined,
+		},
+	};
+}
+// a link's moment shown once its run is open
+let pendingMoment: Moment | null = null;
+function showMoment(m: Moment) {
+	if (!pb) return;
+	if (m.view !== viewMode) $('view-mode').querySelector<HTMLButtonElement>(`button[data-mode="${m.view}"]`)?.click();
+	if (m.view === '3d' && m.camera) {
+		for (const x of $('cam-mode').querySelectorAll<HTMLElement>('button')) x.classList.toggle('on', x.dataset.cam === m.camera.mode);
+		view3d.setCameraState(m.camera);
+	}
+	seekTo(m.tick);
+}
+afterOpen = () => {
+	const m = pendingMoment;
+	pendingMoment = null;
+	if (m) showMoment(m);
+};
+$('share').onclick = async () => {
+	const b = $('share');
+	try {
+		await navigator.clipboard.writeText(momentLink());
+		b.textContent = 'Copied';
+	} catch {
+		// (no clipboard: the link put in the address bar to copy from there)
+		history.replaceState(null, '', momentLink());
+		b.textContent = 'In address bar';
+	}
+	setTimeout(() => (b.textContent = 'Link'), 1500);
+};
+{
+	const {load, moment} = parseMoment(location.hash);
+	pendingMoment = moment;
+	if (load) openPath(load);
+	else if (moment?.file) $('drop-file').textContent = `This link shows ${moment.file} at tick ${moment.tick}: drop that file here to watch it.`;
+}
 if (import.meta.env.DEV) (window as unknown as {openFixture: typeof openPath}).openFixture = openPath;
