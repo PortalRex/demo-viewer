@@ -1236,6 +1236,7 @@ if (import.meta.env.DEV) {
 	w.exportBlender = exportBlender;
 	w.exportBlenderRun = (job: BlenderJob & {name: string}) => exportBlenderRun({...job, sink: devBlenderSink(job.name)});
 	w.runSegments = () => pb?.tracks.map(tr => ({map: tr.seg.map, start: tr.start, length: tr.length}));
+	w.seek = seekTo;
 }
 
 // #load=<url> opens a recording from a URL (one served next to the page,

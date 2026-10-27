@@ -331,13 +331,26 @@ class EffectBuilder:
             # (one-sided: from behind it's nothing)
             return g.node('ShaderNodeMixShader', {0: back, 1: shader, 2: g.node('ShaderNodeBsdfTransparent').outputs[0]}).outputs[0]
         # Cycles: the view through; Eevee, which has no ray portals: the
-        # opening dark under the flames, as an unlinked portal's
+        # viewer's picture of it, at the point's place on the screen (its
+        # camera space position, p2_clip, from Importer.portal_views)
         out = g.out()
         out.target = 'CYCLES'
         g.link(surface(g.node('ShaderNodeMixShader', {0: linked, 1: black, 2: through}).outputs[0]), out.inputs['Surface'])
         eevee = g.node('ShaderNodeOutputMaterial', target='EEVEE')
         eevee.location = (900, -300)
-        g.link(surface(black), eevee.inputs['Surface'])
+        tid = self.textures.get('view')
+        img = self.mats.images.get(tid) if tid is not None else None
+        seen = black
+        if img is not None:
+            cx, cy, cw = g.xyz(g.attr('p2_clip', 'GEOMETRY', 'Vector'))
+            w = g.max(cw, 1e-6)
+            screen = g.vec(g.add(g.mul(g.div(cx, w), 0.5), 0.5), g.add(g.mul(g.div(cy, w), 0.5), 0.5), 0.0)
+            view, _ = g.image(img, screen, extension='EXTEND')
+            # (as the frame showed it: its exposure's in already)
+            view = self.mats.exposed(g, self.unexposed(view))
+            emit_view = g.node('ShaderNodeEmission', {'Color': view, 'Strength': self.mats.seen(g)}).outputs[0]
+            seen = g.node('ShaderNodeMixShader', {0: linked, 1: black, 2: emit_view}).outputs[0]
+        g.link(surface(seen), eevee.inputs['Surface'])
         mat.surface_render_method = 'BLENDED'
         return None
 

@@ -133,6 +133,10 @@ interface TextureRec {
 	// each time it does, textures/<name>/0001.png on, and the frames each
 	// starts showing at (frame, picture index)
 	live?: {texture: THREE.Texture; version: number; count: number; keys: number[]; lastFrame: number; every: number};
+	// a portal's view through it (for Eevee, which has no ray portals): the
+	// whole frame, black but where it was drawn, a picture each frame it was
+	// (textures/<name>/0001.jpg on), keyed as `live`'s
+	view?: {material: THREE.Material; count: number; keys: number[]};
 }
 
 interface ObjectRec {
@@ -336,6 +340,7 @@ export class BlenderCapture {
 		const bloom = v.quality?.bloom ? v.bloomOverride ?? v.bloomScale : 0;
 		this.globals.push(f, [v.exposure, fade.rgb[0], fade.rgb[1], fade.rgb[2], fade.alpha, fade.modulate ? 1 : 0, ...ambient, bloom]);
 		for (const rec of this.lives) this.snapLive(rec, f);
+		for (const rec of this.views) this.snapView(rec, f);
 		if (paintUniforms.paintOn.value > 0.5 && paintUniforms.paintMap.value) {
 			this.paint ??= {map: this.tex(paintUniforms.paintMap.value), splat: this.tex(paintUniforms.paintSplat.value), tiles: paintUniforms.paintTiles.value.toArray()};
 		}
@@ -813,6 +818,82 @@ export class BlenderCapture {
 		const file = `${rec.file}/${String(index + 1).padStart(4, '0')}.png`;
 		this.writes.push(encodePng(width, height, rgba, true).then(png => this.sink.write(file, png)));
 	}
+	// a portal's view: see TextureRec.view
+	private views: TextureRec[] = [];
+	private viewCanvas: OffscreenCanvas | null = null;
+	private viewPixels: ImageData | null = null;
+	private viewHalf: Uint16Array | null = null;
+	private portalView(m: THREE.Material): number {
+		const key = `portalview_${m.id}`;
+		const known = this.textures.get(key);
+		if (known) return known.id;
+		const id = this.addTexture(key, `textures/${key}`, 'srgb', async () => null);
+		const rec = this.texList[id];
+		rec.view = {material: m, count: 0, keys: []};
+		this.views.push(rec);
+		return id;
+	}
+
+	// (as the frame shows it: by its exposure, clamped, in sRGB; Blender
+	// takes the exposure back out)
+	private static toSrgb = (() => {
+		const lut = new Uint8Array(16384);
+		for (let i = 0; i < lut.length; i++) {
+			const l = i / (lut.length - 1);
+			lut[i] = Math.round(255 * (l <= 0.0031308 ? 12.92 * l : 1.055 * l ** (1 / 2.4) - 0.055));
+		}
+		return lut;
+	})();
+	private static fromHalf = (() => {
+		const lut = new Float32Array(65536);
+		for (let i = 0; i < lut.length; i++) lut[i] = THREE.DataUtils.fromHalfFloat(i);
+		return lut;
+	})();
+
+	private snapView(rec: TextureRec, f: number) {
+		const pv = rec.view!;
+		const v = this.view;
+		type Drawn = {target: THREE.WebGLRenderTarget; frame: number; rect: THREE.Vector4};
+		let drawn: Drawn | null = null;
+		for (const p of (v.portals as Map<number, {obj: THREE.Object3D}>).values()) {
+			const surface = p.obj.userData.portalSurface as THREE.Mesh | undefined;
+			const at = surface?.userData.view as Drawn | undefined;
+			if (surface?.material === pv.material && at && at.frame === v.frameNumber) drawn = at;
+		}
+		if (!drawn || !v.renderer) return;
+		const {target, rect} = drawn;
+		const width = target.width, height = target.height;
+		const [x0, y0, w, h] = [rect.x, rect.y, rect.z, rect.w].map(Math.round);
+		if (w <= 0 || h <= 0) return;
+		if (this.viewPixels?.width !== width || this.viewPixels.height !== height) {
+			this.viewPixels = new ImageData(width, height);
+			this.viewCanvas = new OffscreenCanvas(width, height);
+		}
+		if (!this.viewHalf || this.viewHalf.length < w * h * 4) this.viewHalf = new Uint16Array(w * h * 4);
+		const half = this.viewHalf;
+		(v.renderer as THREE.WebGLRenderer).readRenderTargetPixels(target, x0, y0, w, h, half);
+		const out = this.viewPixels!.data;
+		new Uint32Array(out.buffer).fill(0xff000000);
+		const exposure = v.exposure as number, lut = BlenderCapture.toSrgb, top = lut.length - 1, fromHalf = BlenderCapture.fromHalf;
+		const level = (c: number) => lut[Math.min(top, Math.max(0, Math.round(fromHalf[c] * exposure * top)))];
+		// (read from the bottom row up; written top row first)
+		for (let j = 0; j < h; j++) {
+			const row = (height - 1 - (y0 + j)) * width;
+			for (let i = 0; i < w; i++) {
+				const s = (j * w + i) * 4, d = (row + x0 + i) * 4;
+				out[d] = level(half[s]);
+				out[d + 1] = level(half[s + 1]);
+				out[d + 2] = level(half[s + 2]);
+			}
+		}
+		this.viewCanvas!.getContext('2d')!.putImageData(this.viewPixels!, 0, 0);
+		const index = pv.count++;
+		pv.keys.push(f, index);
+		const file = `${rec.file}/${String(index + 1).padStart(4, '0')}.jpg`;
+		this.writes.push(this.viewCanvas!.convertToBlob({type: 'image/jpeg', quality: 0.92})
+			.then(b => b.arrayBuffer()).then(b => this.sink.write(file, new Uint8Array(b))));
+	}
+
 	private dataTexture(key: string, t: THREE.DataTexture, linear: boolean): number {
 		return this.addTexture(key, `textures/${BlenderCapture.fileName(key)}`, linear ? 'linear' : 'srgb', async () => {
 			const {width, height, data} = t.image as {width: number; height: number; data: ArrayBufferView};
@@ -946,6 +1027,7 @@ export class BlenderCapture {
 				if (flat) values[name] = flat.length === 1 ? flat[0] : flat;
 			}
 		}
+		if (shader === 'portal') textures.view = this.portalView(m);
 		return {kind: 'shader', shader, ...this.blendOf(m), depthTest: m.depthTest, defines: m.defines ?? {}, values, textures};
 	}
 
@@ -1028,6 +1110,10 @@ export class BlenderCapture {
 				t.file = t.live.count ? `${t.file}/0001.png` : '';
 				continue;
 			}
+			if (t.view) {
+				t.file = t.view.count ? `${t.file}/0001.jpg` : '';
+				continue;
+			}
 			const made = await t.make().catch(() => null);
 			if (!made) {
 				t.file = '';
@@ -1080,13 +1166,14 @@ export class BlenderCapture {
 		}));
 		const v = this.view;
 		const sc = v.skyCamera as {origin: THREE.Vector3; scale: number; fog: THREE.Fog | null} | null;
+		const sequenceOf = (s: {count: number; keys: number[]} | undefined) => s && s.count > 1 ? {count: s.count, keys: bin.add(new Float64Array(s.keys))} : undefined;
 		const scene = {
 			format: 'p2-demo-blender', version: 2,
 			...this.info,
 			frames: this.frames,
 			textures: this.texList.map(t => ({
 				id: t.id, file: t.file, colorspace: t.colorspace, alpha: t.alpha,
-				sequence: t.live && t.live.count > 1 ? {count: t.live.count, keys: bin.add(new Float64Array(t.live.keys))} : undefined,
+				sequence: sequenceOf(t.live ?? t.view),
 			})),
 			paint: this.paint,
 			hud: this.hud ? {count: this.hud.count, keys: bin.add(new Float64Array(this.hud.keys))} : null,

@@ -160,3 +160,65 @@ def viewmodel_group():
     l.new(setp.outputs[0], gout.inputs[0])
     gout.location = (1200, 0)
     return tree
+
+
+SCREEN = 'P2 On Screen'
+
+
+def screen_group():
+    """Where each point is on the scene camera's screen, for a material to
+    look up the picture there: p2_clip = (x, y, depth) in the camera's space,
+    x and y over tan(half the view's height) (and the aspect, across), so
+    x / depth and y / depth run -1..1 over the frame. Linear over a face, so
+    it's exact between the corners."""
+    tree = bpy.data.node_groups.get(SCREEN)
+    if tree:
+        return tree
+    tree, _ = _tree(SCREEN)
+    tree.interface.new_socket('Tan Half Height', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 0.5
+    tree.interface.new_socket('Aspect', in_out='INPUT', socket_type='NodeSocketFloat').default_value = 16 / 9
+    n, l = tree.nodes, tree.links
+    gin, gout = n.new('NodeGroupInput'), n.new('NodeGroupOutput')
+    cam = n.new('GeometryNodeInputActiveCamera')
+    cinfo = n.new('GeometryNodeObjectInfo')
+    cinfo.transform_space = 'ORIGINAL'
+    l.new(cam.outputs[0], cinfo.inputs['Object'])
+    me = n.new('GeometryNodeSelfObject')
+    minfo = n.new('GeometryNodeObjectInfo')
+    minfo.transform_space = 'ORIGINAL'
+    l.new(me.outputs[0], minfo.inputs['Object'])
+    inv = n.new('FunctionNodeInvertMatrix')
+    l.new(cinfo.outputs['Transform'], inv.inputs[0])
+    mul = n.new('FunctionNodeMatrixMultiply')
+    l.new(inv.outputs[0], mul.inputs[0])
+    l.new(minfo.outputs['Transform'], mul.inputs[1])
+    pos = n.new('GeometryNodeInputPosition')
+    tp = n.new('FunctionNodeTransformPoint')
+    l.new(pos.outputs[0], tp.inputs['Vector'])
+    l.new(mul.outputs[0], tp.inputs['Transform'])
+    sep = n.new('ShaderNodeSeparateXYZ')
+    l.new(tp.outputs[0], sep.inputs[0])
+
+    def math(op, a, b):
+        m = n.new('ShaderNodeMath')
+        m.operation = op
+        for i, v in enumerate((a, b)):
+            if isinstance(v, bpy.types.NodeSocket):
+                l.new(v, m.inputs[i])
+            else:
+                m.inputs[i].default_value = v
+        return m.outputs[0]
+    across = math('MULTIPLY', gin.outputs['Tan Half Height'], gin.outputs['Aspect'])
+    clip = n.new('ShaderNodeCombineXYZ')
+    l.new(math('DIVIDE', sep.outputs['X'], across), clip.inputs[0])
+    l.new(math('DIVIDE', sep.outputs['Y'], gin.outputs['Tan Half Height']), clip.inputs[1])
+    l.new(math('MULTIPLY', sep.outputs['Z'], -1.0), clip.inputs[2])
+    store = n.new('GeometryNodeStoreNamedAttribute')
+    store.data_type = 'FLOAT_VECTOR'
+    store.domain = 'POINT'
+    store.inputs['Name'].default_value = 'p2_clip'
+    l.new(gin.outputs[0], store.inputs['Geometry'])
+    l.new(clip.outputs[0], store.inputs['Value'])
+    l.new(store.outputs[0], gout.inputs[0])
+    gout.location = (1200, 0)
+    return tree

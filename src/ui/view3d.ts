@@ -3274,6 +3274,8 @@ export class View3D {
 			material.uniforms.view.value = rt.texture;
 			material.uniforms.hasView.value = 1;
 			material.uniforms.resolution.value.copy(size);
+			// (for the Blender export: which frame's view it holds, and where)
+			surface.userData.view = {target: rt, frame: this.frameNumber, rect: rt.viewport.clone()};
 		}
 		ditherUniforms.ditherOn.value = dither;
 		if (redrawn) this.particleRenderer?.draw(this.particlesShown, this.camera);

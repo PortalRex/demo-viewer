@@ -13,7 +13,7 @@ import numpy as np
 from mathutils import Matrix, Quaternion, Vector
 
 from . import compositor
-from .geonodes import frame_filter_group, rope_group, viewmodel_group
+from .geonodes import frame_filter_group, rope_group, viewmodel_group, screen_group
 from . import materials
 from .materials import MaterialBuilder, globals_group
 from .nodes import Graph
@@ -163,6 +163,7 @@ class Importer:
         self.sequences_play()
         self.note(f'objects {time.time() - t0:.1f}s')
         self.cameras(scene)
+        self.portal_views()
         self.flash()
         self.viewmodel_scene(context)
         self.viewmodel_preview()
@@ -457,6 +458,7 @@ class Importer:
     def objects(self):
         b = self.b
         frames_total = b['frames']
+        self.portal_objs = []
         for rec in b['objects']:
             mid = rec['material']
             desc = b['materials'][mid]
@@ -513,6 +515,8 @@ class Importer:
                 self.uniforms(obj, rec['uniforms'], desc)
             if rec.get('portal'):
                 self.portal(obj, rec['portal'])
+                if (desc.get('textures') or {}).get('view') is not None:
+                    self.portal_objs.append(obj)
             if 'ropeTangent' in b['geometries'][rec['geometry']]['attributes']:
                 # (a rope that holds still: its ribbon still turns to the camera)
                 obj.modifiers.new('Rope', 'NODES').node_group = rope_group(self.S)
@@ -803,6 +807,29 @@ class Importer:
     def cameras(self, scene):
         self.cam = self.camera('P2 Eyes', self.b['camera'], self.cols['cameras'])
         scene.camera = self.cam
+
+    def portal_views(self):
+        """Portals' places on the eyes' screen (p2_clip), where Eevee looks up
+        the picture of their view (see effects' portal): by the camera's
+        field of view, kept up with it by a driver."""
+        if not self.portal_objs:
+            return
+        tree = screen_group()
+        socket = {i.name: i.identifier for i in tree.interface.items_tree if i.item_type == 'SOCKET' and i.in_out == 'INPUT'}
+        aspect = self.b['width'] / self.b['height']
+        for obj in self.portal_objs:
+            mod = obj.modifiers.new('On Screen', 'NODES')
+            mod.node_group = tree
+            mod[socket['Aspect']] = aspect
+            d = mod.driver_add(f'["{socket["Tan Half Height"]}"]').driver
+            d.type = 'SCRIPTED'
+            for var_name, path in (('lens', 'lens'), ('sh', 'sensor_height')):
+                var = d.variables.new()
+                var.name = var_name
+                var.targets[0].id_type = 'CAMERA'
+                var.targets[0].id = self.cam.data
+                var.targets[0].data_path = path
+            d.expression = 'sh / 2 / lens'
 
     def viewmodel_scene(self, context):
         """The view model, drawn as the game does: over the world, with its own
