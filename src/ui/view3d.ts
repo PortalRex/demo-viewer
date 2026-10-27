@@ -68,6 +68,27 @@ const HIDDEN_CLASSES = new Set([
 ]);
 
 // effects placed in world space from their props, not the entity's transform
+// Whether an entity moves smoothly from one update to the next (else it
+// jumps there): close enough in time, the same parent and visibility, and not
+// faster than anything moves (terminal velocity is ~58 units a tick: a
+// teleport, through a portal or otherwise)
+function joined(k: EntityKey | undefined, n: EntityKey | undefined): n is EntityKey {
+	if (!k || !n || n.tick <= k.tick || n.tick - k.tick > 8 || n.visible !== k.visible || n.parent !== k.parent) return false;
+	return Math.hypot(n.origin[0] - k.origin[0], n.origin[1] - k.origin[1], n.origin[2] - k.origin[2]) <= 70 * (n.tick - k.tick);
+}
+
+// An update's position eased towards its neighbours' (1:2:1) where updates
+// come every few ticks: a co-op client's recording (P-body's, usually) gets
+// its snapshots unevenly in time though they're stamped evenly, so moving
+// between them as they are lurches, fast and slow by turns. Updates a tick
+// apart (a host's) are kept as they are.
+function eased(keys: EntityKey[], j: number): THREE.Vector3 {
+	const a = keys[j - 1], b = keys[j], c = keys[j + 1];
+	const at = new THREE.Vector3(b.origin[0], b.origin[1], b.origin[2]);
+	if (!a || !c || b.tick - a.tick < 2 || c.tick - b.tick < 2 || !joined(a, b) || !joined(b, c)) return at;
+	return at.multiplyScalar(2).add(new THREE.Vector3(...a.origin)).add(new THREE.Vector3(...c.origin)).multiplyScalar(0.25);
+}
+
 // (rendered to set three's clipping state before a compile: see precompile)
 const EMPTY_SCENE = new THREE.Scene();
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
@@ -933,6 +954,10 @@ export class View3D {
 		this.container.appendChild(this.renderer.domElement);
 		this.controls = new OrbitControls(this.camera, this.renderer.domElement);
 		this.controls.enableDamping = false;
+		// (scroll as close or far as wanted: not into the player, where
+		// zooming, which scales the distance, would take long to get out of)
+		this.controls.minDistance = 8;
+		this.controls.maxDistance = Infinity;
 		this.controls.enabled = this.mode === 'orbit';
 		this.controls.addEventListener('change', () => this.render());
 		this.bindFreeCamera(this.renderer.domElement);
@@ -3693,11 +3718,9 @@ export class View3D {
 		const i = keyIndexAt(t, Math.floor(tick));
 		const k = t.keys[Math.max(0, i)], n = t.keys[i + 1];
 		const origin = new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]);
-		if (!n || n.tick - k.tick > 8 || n.visible !== k.visible || n.parent !== k.parent) return {origin, angles: k.angles};
-		// faster than anything moves (terminal velocity is ~58 units a tick): a teleport, through a portal or otherwise
-		if (Math.hypot(n.origin[0] - k.origin[0], n.origin[1] - k.origin[1], n.origin[2] - k.origin[2]) > 70 * (n.tick - k.tick)) return {origin, angles: k.angles};
+		if (!joined(k, n)) return {origin, angles: k.angles};
 		const f = Math.min(1, Math.max(0, (tick - k.tick) / (n.tick - k.tick)));
-		origin.lerp(new THREE.Vector3(n.origin[0], n.origin[1], n.origin[2]), f);
+		origin.copy(eased(t.keys, Math.max(0, i))).lerp(eased(t.keys, i + 1), f);
 		const lerpAngle = (a: number, b: number) => {
 			const d = ((b - a + 540) % 360) - 180;
 			return a + d * f;
@@ -4353,7 +4376,13 @@ export class View3D {
 		const pk = ft ? keyAt(ft, tick) : undefined;
 		const other = !!this.followed && !!pk;
 		const otherPose = other ? this.entityPose(this.followed!, tick) : null;
-		const feet = otherPose ? otherPose.origin.clone() : pk ? new THREE.Vector3(...pk.origin) : view ? new THREE.Vector3(...view.origin) : null;
+		// (the recording player moved between its updates too: they come
+		// every tick on a host, but every few for a co-op client, P-body's
+		// usual side, where standing on each one stepped)
+		const eyeZ = pk?.eyeZ ?? DEFAULT_EYE;
+		const feet = otherPose ? otherPose.origin.clone()
+			: ft && pk ? this.entityPose(ft, tick).origin
+			: view ? new THREE.Vector3(...view.origin) : null;
 		this.applyControllers(pk, tick);
 		// screen-door dissolve of whatever is between the orbit camera and the player
 		ditherUniforms.ditherOn.value = feet && this.mode === 'orbit' ? 1 : 0;
@@ -4361,8 +4390,7 @@ export class View3D {
 		if (feet) {
 			this.player.position.copy(feet);
 			this.player.visible = this.mode !== 'eyes' && !ents?.player;
-			const eye = feet.clone();
-			eye.z += pk?.eyeZ ?? DEFAULT_EYE;
+			const eye = feet.clone().setZ(feet.z + eyeZ);
 			this.viewEntity = this.mode === 'eyes' && !other ? this.viewEntityMatrix(pk, tick) : null;
 			if (this.viewEntity) {
 				// a camera the view's been handed to (point_viewcontrol):
@@ -4900,10 +4928,8 @@ export class View3D {
 	render() {
 		const r = this.renderer;
 		if (!r) return;
-		// orbit: the camera stays on the player's side of walls, as a game's
-		// third-person camera does (the user's distance is kept for later);
-		// before metering, which must see what's drawn
-		const saved = this.mode === 'orbit' ? this.pullInCamera() : null;
+		// (orbit: the camera stays where it's scrolled to, walls or not;
+		// whatever stands between it and the player dissolves instead)
 		// (through the player's eyes, the game's near plane: VIEW_NEARZ, 7
 		// units, so what's right against the eye isn't drawn)
 		const near = this.mode === 'eyes' ? VIEW_NEARZ : 1;
@@ -4996,10 +5022,6 @@ export class View3D {
 		this.screenFade(this.meterTick);
 		r.render(this.compositeScene, this.compositeCam);
 		if (this.pipShown && this.pipFrame && this.mode === 'eyes') this.compositePip(r);
-		if (saved) {
-			this.camera.position.copy(saved);
-			this.camera.updateMatrixWorld();
-		}
 	}
 
 	// Free camera: drag to look, WASD to fly along the view, Q/E down/up,
@@ -5066,21 +5088,6 @@ export class View3D {
 		this.render();
 		this.freeFrame = requestAnimationFrame(this.freeTick);
 	};
-
-	private pullInCamera(): THREE.Vector3 | null {
-		if (!this.collision || !this.controls) return null;
-		const target = this.controls.target;
-		const offset = this.camera.position.clone().sub(target);
-		const len = offset.length();
-		if (len < 1) return null;
-		const ray = new THREE.Ray(target.clone(), offset.clone().divideScalar(len));
-		const hit = this.collision.raycastFirst(ray, THREE.DoubleSide);
-		if (!hit || hit.distance > len) return null;
-		const saved = this.camera.position.clone();
-		this.camera.position.copy(target).addScaledVector(ray.direction, Math.max(4, hit.distance - 10));
-		this.camera.updateMatrixWorld();
-		return saved;
-	}
 
 	// overlays an info_overlay_accessor names, by overlay id: the frame of
 	// their texture follows its m_iTextureFrameIndex
