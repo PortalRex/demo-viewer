@@ -115,6 +115,17 @@ function between(keys: EntityKey[], j: number, tick: number): THREE.Vector3 {
 		.addScaledVector(v1, f3 - f2);
 }
 
+// A mesh whose ray tests go through a bounds tree of its geometry, built on
+// the first one (props are tested for what hides glows: a big one, tested
+// triangle by triangle, cost milliseconds a ray)
+function bvhOnDemand(mesh: THREE.Mesh): THREE.Mesh {
+	mesh.raycast = function (this: THREE.Mesh, ray: THREE.Raycaster, hits: THREE.Intersection[]) {
+		this.geometry.boundsTree ??= new MeshBVH(this.geometry);
+		acceleratedRaycast.call(this, ray, hits);
+	};
+	return mesh;
+}
+
 // (rendered to set three's clipping state before a compile: see precompile)
 const EMPTY_SCENE = new THREE.Scene();
 const WORLD_SPACE = new Set(['CPortalLaser', 'CProjectedWallEntity', 'CTrigger_TractorBeam']);
@@ -1358,6 +1369,7 @@ export class View3D {
 				for (const c of o.children) c.matrixAutoUpdate = false;
 				// (the clusters it's in, for culling by what can be seen)
 				if (bsp.vis) o.userData.clusters = [...new Set(prop.leaves.map(l => bsp.vis!.leafCluster(l)).filter(c => c >= 0))];
+				o.traverse(c => (c as THREE.Mesh).isMesh && !(c as THREE.SkinnedMesh).isSkinnedMesh && bvhOnDemand(c as THREE.Mesh));
 				this.propGroup.add(o);
 				this.loaded();
 			}));
@@ -1372,8 +1384,19 @@ export class View3D {
 
 	// whether a world light reaches a point (nothing solid in between), for
 	// model lighting
+	private lightClusters = new WeakMap<number[], number>();  // world lights' clusters, by their position
 	private lightReaches = (from: number[], to: [number, number, number]): boolean => {
 		if (!this.collision) return true;
+		// (a light in a cluster the point's can't see is surely blocked: no
+		// ray needed, the costly part of lighting a moving model)
+		const vis = this.bsp?.vis;
+		if (vis) {
+			const here = vis.clusterAt(from);
+			let there = this.lightClusters.get(to);
+			if (there === undefined) this.lightClusters.set(to, there = vis.clusterAt(to));
+			const set = here >= 0 && there >= 0 ? vis.visibleFrom(here) : null;
+			if (set && !(set[there >> 3] & (1 << (there & 7)))) return false;
+		}
 		const d = new THREE.Vector3(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
 		const len = d.length();
 		if (len < 2) return true;
@@ -1507,7 +1530,7 @@ export class View3D {
 					g.computeBoundingBox();
 					mesh.userData.clusters = vis.clustersInBox(g.boundingBox!.min.toArray(), g.boundingBox!.max.toArray());
 				}
-				this.propGroup.add(mesh);
+				this.propGroup.add(bvhOnDemand(mesh));
 			}
 			this.frozen.add(t);
 			if (o) o.visible = false;
@@ -1647,12 +1670,7 @@ export class View3D {
 				const merged = mergeGeometries(parts);
 				parts.forEach(p => p.dispose());
 				if (!merged) continue;
-				const mesh = new THREE.Mesh(merged, material);
-				// (its bounds tree built on the first ray test)
-				mesh.raycast = function (this: THREE.Mesh, ray: THREE.Raycaster, hits: THREE.Intersection[]) {
-					merged.boundsTree ??= new MeshBVH(merged);
-					acceleratedRaycast.call(this, ray, hits);
-				};
+				const mesh = bvhOnDemand(new THREE.Mesh(merged, material));
 				mesh.name = `merged props ${list[0].name}`;
 				mesh.matrixAutoUpdate = false;
 				mesh.userData.window = list[0].userData.window;
