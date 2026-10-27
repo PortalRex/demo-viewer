@@ -5099,7 +5099,8 @@ export class View3D {
 		// else as capsules)
 		const robots = new Set<THREE.Object3D>();
 		for (const g of this.ghosts) {
-			if (!g.view || !g.body || !this.entities) continue;
+			// (before its player's first update: as a capsule)
+			if (!g.view || !g.body || !this.entities || !keyAt(g.body.track, Math.floor(g.body.tick))) continue;
 			const robot = this.ghostRobot(g.body.track);
 			if (!robot?.userData.anim) continue;
 			robots.add(robot);
