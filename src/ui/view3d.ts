@@ -17,7 +17,7 @@ import type {Gesture, Skeleton} from '../game/anim.ts';
 import {AnimatedModel, attachmentMatrix, bakePose, boneMatrices, skinMatrices, skinnedGeometry} from './skinning.ts';
 import {Laser, Bridge, Funnel, worldEnergyMaterial, animateEnergy, fizzlerMaterial, setFizzlerState, portalMaterial, vec3, EffectAssets} from './effects.ts';
 import {PaintLayer} from './paint.ts';
-import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless} from './particles.ts';
+import {ParticleLibrary, ParticleInstance, ParticleRenderer, isEndless, settleTime} from './particles.ts';
 import type {ControlPoints, InstanceState} from './particles.ts';
 import {AMBIENT_SCALE, modelAmbientUniforms, flashUniforms, exposureUniforms, paintUniforms, ditherUniforms, fogUniforms, waterUniforms, waterMaterialUniforms, hookWorldMaterial, hookModelMaterial, useModelLighting, ownLitMaterial, setModelEnvCube, bumpLightUniforms, setWorldEnv, setWorldDetail} from './shaderhooks.ts';
 import {TextureCache, compressedSupport} from './textures.ts';
@@ -3492,7 +3492,9 @@ export class View3D {
 				const inst = new ParticleInstance(def, lib, c, hashKey(key));
 				if (opts.cpAt) inst.setCpAt(opts.cpAt);
 				if (opts.size) inst.setSizeScale(opts.size);
-				if (time > 6 && !opts.cpAt) inst.skipTo(time - 6);
+				// (one started long ago: run just long enough to look as it does)
+				const settle = settleTime(def, lib, 6);
+				if (time > settle && !opts.cpAt) inst.skipTo(time - settle);
 				r = {start, inst, saved: []};
 				this.particleRuns.set(key, r);
 			}

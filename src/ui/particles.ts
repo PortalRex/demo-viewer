@@ -122,6 +122,40 @@ export function isEndless(def: ParticleSystemDef, lib: ParticleLibrary, depth = 
 	});
 }
 
+// How long an endless effect started long ago needs to run to look as it
+// does by then: as long as its longest-lived particles live (its children's
+// too, after their delay), so all it shows were born in that time; up to
+// `most` seconds, all of them where a particle's life isn't known (or
+// particles don't age, or the effect restarts itself)
+export function settleTime(def: ParticleSystemDef, lib: ParticleLibrary, most: number, depth = 0): number {
+	if (depth > 4 || def.operators.some(o => o.fn === 'restart effect after duration')) return most;
+	let longest = 0;
+	if (def.emitters.length) {
+		if (!def.operators.some(o => o.fn === 'lifespan decay' || o.fn === 'alpha fade and decay')) return most;
+		// the longest a particle's life can be set to: a second where nothing
+		// sets it; the remaps' largest output (or that times what it was),
+		// as their input is reached long after the start
+		const writesLife = (o: ParticleOperator) => num(o, 'output field', -1) === F.LIFE;
+		if (def.operators.some(writesLife)) return most;
+		longest = 1;
+		for (const o of def.initializers) {
+			if (o.fn === 'lifetime random') longest = num(o, 'lifetime_max', 0);
+			else if (o.fn === 'lifetime from sequence') return most;
+			else if (writesLife(o)) {
+				if (o.fn !== 'remap initial scalar' && o.fn !== 'remap particle count to scalar') return most;
+				const top = Math.max(num(o, 'output minimum', 0), num(o, 'output maximum', 1));
+				longest = num(o, 'output is scalar of initial random range', 0) ? longest * top : top;
+			}
+		}
+	}
+	for (const c of def.children) {
+		const d = lib.get(c.name);
+		if (d) longest = Math.max(longest, c.delay + settleTime(d, lib, most, depth + 1));
+	}
+	// (a step more, so the oldest have gone)
+	return Math.min(most, longest + 0.1);
+}
+
 // ---- particles ----
 
 // particle fields as the operators address them
@@ -337,6 +371,9 @@ export class ParticleInstance {
 		t = Math.floor(t / STEP) * STEP;
 		this.time = t;
 		for (const e of this.def.emitters) if (e.fn === 'emit_instantaneously' && num(e, 'emission_start_time', 0) < t) this.emitted.set(e, 0);
+		// (its children too: else they'd run every step from the start to
+		// catch up, seconds of them for an effect that's been on for minutes)
+		for (const c of this.children) if (t > c.delay) c.inst.skipTo(t - c.delay);
 	}
 
 	// a scale on every particle's drawn size, for its children too (the
