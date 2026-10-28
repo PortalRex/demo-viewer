@@ -14,11 +14,30 @@ export interface RacerMark {
 }
 
 const GRID_STEPS = [64, 128, 256, 512, 1024, 2048, 4096];
+const HEAT_CELL = 16;         // units a side of the heatmap's cells
+const HEAT_MAX_CELLS = 1024;  // across, at most (larger maps: larger cells)
+
+// Where many runs went: each cell of a grid over the map counted once for
+// every run whose path crosses it, as an image (a pixel a cell) and where
+// it lies in the view's (projected) world coordinates
+interface Heat {
+	key: string;
+	image: HTMLCanvasElement;
+	x0: number;
+	y0: number;
+	cell: number;
+	runs: number;
+}
 
 export class PathView {
 	mode: Mode = 'top';
 	follow = true;
 	racers: RacerMark[] = [];
+	// the heatmap's runs (this one's segment and every raced run's on the
+	// map), drawn under the paths while heatShown
+	heatTracks: SegmentTrack[] = [];
+	heatShown = false;
+	private heat: Heat | null = null;
 	private scale = 0.1;  // pixels per unit
 	private cx = 0;       // world (projected) coordinates at the canvas center
 	private cy = 0;
@@ -129,6 +148,7 @@ export class PathView {
 		this.drawGrid(g, w, h);
 		const track = this.track;
 		if (!track) return;
+		if (this.heatShown) this.drawHeat(g);
 
 		const views = track.seg.views;
 		const current = view?.viewIndex ?? -1;
@@ -189,6 +209,79 @@ export class PathView {
 			else g.lineTo(x, y);
 		}
 		g.stroke();
+	}
+
+	private drawHeat(g: CanvasRenderingContext2D) {
+		const tracks = this.heatTracks;
+		if (tracks.length < 2) return;
+		const key = `${this.mode} ${this.sideAxis} ${tracks.map(t => `${t.seg.map}:${t.start}:${t.seg.views.length}`).join(',')}`;
+		if (this.heat?.key !== key || this.heat.runs !== tracks.length) this.heat = this.makeHeat(key, tracks);
+		const heat = this.heat;
+		if (!heat) return;
+		// (the image's top row is the grid's highest y: the screen's y is down)
+		const [sx, sy] = this.toScreen(heat.x0, heat.y0 + heat.image.height * heat.cell);
+		g.globalAlpha = 0.85;
+		g.imageSmoothingQuality = 'high';
+		g.drawImage(heat.image, sx, sy, heat.image.width * heat.cell * this.scale, heat.image.height * heat.cell * this.scale);
+		g.globalAlpha = 1;
+	}
+
+	private makeHeat(key: string, tracks: SegmentTrack[]): Heat | null {
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+		for (const t of tracks) {
+			for (const f of t.seg.views) {
+				const [x, y] = this.project(f.origin);
+				x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+				y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+			}
+		}
+		if (!Number.isFinite(x0)) return null;
+		const cell = Math.max(HEAT_CELL, Math.ceil(Math.max(x1 - x0, y1 - y0) / HEAT_MAX_CELLS));
+		x0 -= cell; y0 -= cell;
+		const cols = Math.ceil((x1 - x0) / cell) + 2, rows = Math.ceil((y1 - y0) / cell) + 2;
+		const counts = new Uint16Array(cols * rows);
+		const seen = new Uint32Array(cols * rows);  // the run (+1) that last counted each cell
+		tracks.forEach((t, run) => {
+			const mark = (x: number, y: number) => {
+				const i = Math.floor((y - y0) / cell) * cols + Math.floor((x - x0) / cell);
+				if (seen[i] === run + 1) return;
+				seen[i] = run + 1;
+				counts[i]++;
+			};
+			const v = t.seg.views;
+			for (let i = 0; i < v.length; i++) {
+				const [bx, by] = this.project(v[i].origin);
+				if (i === 0 || t.teleports[i]) {
+					mark(bx, by);
+					continue;
+				}
+				// (along the step from the view before, a half cell at a time)
+				const [ax, ay] = this.project(v[i - 1].origin);
+				const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / (cell / 2)));
+				for (let k = 1; k <= steps; k++) mark(ax + (bx - ax) * k / steps, ay + (by - ay) * k / steps);
+			}
+		});
+		const image = document.createElement('canvas');
+		image.width = cols;
+		image.height = rows;
+		const g = image.getContext('2d')!;
+		const pixels = g.createImageData(cols, rows);
+		for (let r = 0; r < rows; r++) {
+			for (let c = 0; c < cols; c++) {
+				const n = counts[r * cols + c];
+				if (!n) continue;
+				// (a lone run faint and blue, all of them bright and hot)
+				const f = (n - 1) / Math.max(1, tracks.length - 1);
+				const [cr, cg, cb] = heatColor(f);
+				const o = ((rows - 1 - r) * cols + c) * 4;
+				pixels.data[o] = cr;
+				pixels.data[o + 1] = cg;
+				pixels.data[o + 2] = cb;
+				pixels.data[o + 3] = Math.round(70 + 185 * Math.sqrt(f));
+			}
+		}
+		g.putImageData(pixels, 0, 0);
+		return {key, image, x0, y0, cell, runs: tracks.length};
 	}
 
 	private drawGrid(g: CanvasRenderingContext2D, w: number, h: number) {
@@ -304,6 +397,15 @@ export class PathView {
 		g.arc(x, y, 5, 0, Math.PI * 2);
 		g.fill();
 	}
+}
+
+// the heatmap's colours: deep blue (few runs) -> magenta -> orange -> pale yellow (all)
+function heatColor(f: number): [number, number, number] {
+	const stops: [number, number, number][] = [[40, 60, 190], [190, 50, 170], [255, 130, 40], [255, 240, 170]];
+	const x = Math.min(1, Math.max(0, f)) * (stops.length - 1);
+	const i = Math.min(stops.length - 2, Math.floor(x)), k = x - i;
+	const a = stops[i], b = stops[i + 1];
+	return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
 }
 
 // blue (slow) -> green -> yellow -> red (fast)

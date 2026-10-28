@@ -133,6 +133,37 @@ function devGameFiles(): Plugin {
 	};
 }
 
+// Dev only: the leaderboard (board.portal2.sr) at /__board/, as its demo
+// files aren't served for other sites to read. Just a chamber's scores and
+// a run's demo pass (the demo's name in X-File-Name, from where it redirects)
+const BOARD = 'https://board.portal2.sr';
+function boardProxy(): Plugin {
+	return {
+		name: 'board-proxy',
+		apply: 'serve',
+		configureServer(server) {
+			server.middlewares.use('/__board', async (req, res) => {
+				const path = req.url ?? '';
+				if (!/^\/(chamber\/\d+\/json|getDemo\?id=\d+)$/.test(path)) {
+					res.statusCode = 404;
+					res.end();
+					return;
+				}
+				try {
+					const up = await fetch(BOARD + path, {headers: {'User-Agent': 'SAR Run Viewer (dev)'}});
+					res.statusCode = up.status;
+					res.setHeader('Content-Type', up.headers.get('content-type') ?? 'application/octet-stream');
+					res.setHeader('X-File-Name', decodeURIComponent(new URL(up.url).pathname.split('/').pop() ?? ''));
+					res.end(Buffer.from(await up.arrayBuffer()));
+				} catch (e) {
+					res.statusCode = 502;
+					res.end(String(e));
+				}
+			});
+		},
+	};
+}
+
 export default defineConfig({
-	plugins: [devGameFiles()],
+	plugins: [devGameFiles(), boardProxy()],
 });

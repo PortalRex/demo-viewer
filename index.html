@@ -12,6 +12,7 @@
 			<div class="brand">SAR Run Viewer</div>
 			<div id="run-title" class="run-title"></div>
 			<div id="badges" class="badges"></div>
+			<button id="board-btn" class="close-btn" title="Open or race runs from the leaderboard (board.portal2.sr): their demos downloaded straight into the page">Leaderboard</button>
 			<button id="close-run" class="close-btn" hidden title="Close this run (and the runs raced against it), freeing what was loaded for it">Close</button>
 			<label class="open-btn">
 				<input id="file-input" type="file" accept=".sarp,.dem" multiple hidden>
@@ -24,6 +25,7 @@
 				<h1>Watch a Portal 2 run in your browser</h1>
 				<p>Drop a SAR proof (<code>.sarp</code>) or demos (<code>.dem</code>, all of a run's files at once) here, or use <b>Open file</b>.</p>
 				<p class="muted">The file is read in this page and never uploaded anywhere.</p>
+				<p><button id="drop-board" class="primary">Pick a run from the leaderboard</button></p>
 				<p id="drop-file" class="drop-file"></p>
 			</div>
 		</section>
@@ -47,6 +49,7 @@
 						<button data-cam="chase" title="Follow behind the player, along where they look">Chase</button>
 						<button data-cam="free" title="Fly freely: drag to look, WASD to move, Q/E down/up, Shift faster, Ctrl slower">Free</button>
 					</div>
+					<button id="heat-toggle" class="toggle" hidden title="A heatmap of where this run and the raced runs went: brighter where more of them did">Heat</button>
 					<button id="path-line" class="toggle on" hidden title="Draw the run's path through the map">Path</button>
 					<button id="cm-toggle" class="toggle on" hidden title="Show the challenge mode HUD (portals and time)">Timer</button>
 					<button id="titles-toggle" class="toggle on" hidden title="Show the game's on-screen text (chapter titles)">Titles</button>
@@ -80,6 +83,10 @@
 					</div>
 					<div id="view3d" class="view3d" hidden>
 						<div id="view3d-side" class="view3d-side" hidden>
+							<div class="hud">
+								<div id="inputs-side" class="inputs"></div>
+								<div id="speed-now-side" class="speed-now"></div>
+							</div>
 							<div id="cm-hud-side" class="cm-hud" hidden title="The challenge mode HUD, from this demo's own stats">
 								<div><span>Portals:</span><b id="cm-portals-side"></b></div>
 								<div><span>Time:</span><b id="cm-time-side"></b></div>
@@ -132,9 +139,32 @@
 					<button id="share" title="Copy a link to this moment, with the view and camera (with the recording's URL where it was opened from one)">Link</button>
 				</div>
 				<canvas id="timeline"></canvas>
-				<canvas id="speed"></canvas>
+				<div class="graph">
+					<canvas id="speed"></canvas>
+					<div id="graph-mode" class="seg-toggle graph-mode" hidden title="The graph: the segment's speed, or how far ahead or behind each shown raced run is over it">
+						<button data-g="speed" class="on">Speed</button>
+						<button data-g="gap">Gap</button>
+					</div>
+				</div>
 			</footer>
 		</main>
+
+		<dialog id="board-dialog" class="board-dialog">
+			<div class="board-head">
+				<h2>Leaderboard</h2>
+				<select id="board-chamber" title="The chamber"></select>
+				<button type="button" id="board-close" title="Close">×</button>
+			</div>
+			<div id="board-list" class="board-list"></div>
+			<p id="board-note" class="board-note" hidden></p>
+			<div class="board-buttons">
+				<span id="board-race-note" class="muted">Open a run of this chamber to race others against it.</span>
+				<button type="button" class="board-top" data-n="5">Race top 5</button>
+				<button type="button" class="board-top" data-n="10">Top 10</button>
+				<button type="button" class="board-top" data-n="20">Top 20</button>
+				<button type="button" id="board-race-picked" class="primary">Race ticked (0)</button>
+			</div>
+		</dialog>
 
 		<dialog id="export-dialog" class="export-dialog">
 			<form method="dialog">

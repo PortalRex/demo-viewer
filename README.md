@@ -77,7 +77,14 @@ computer.
 - The path coloured by speed, with portal teleports dashed.
 - The view direction, plus inputs from the recorded user commands (WASD,
   jump, duck, both fire buttons).
-- A speed graph across the segment.
+- A speed graph across the segment, with its tricks marked along the top:
+  bunny hops (chains counted), flings out of portals, portal placements and
+  speed peaks, found from the recording. Click near one to jump to it; they're
+  listed among the events too.
+- With runs raced, a **Gap** graph instead: how far ahead or behind each one is
+  over the segment, a line in its colour.
+- **Heat:** with runs raced, a heatmap of where they all went, brighter where
+  more of them did, so the usual route and the rare ones stand out.
 - Events, console commands, SAR's timer splits and category rules.
 
 **In 3D**
@@ -143,8 +150,15 @@ computer.
   through its player's eyes (its portals, objects and partner view too), and
   the run you were watching races as a ghost in its place. **Split** on a
   row plays that run's own demo beside this one, split screen, in step with
-  it: each half has its own portals, objects and timer as its demo recorded
-  them.
+  it: each half has its own portals, objects, inputs, speed and timer as its
+  demo recorded them.
+- **Leaderboard:** browse any chamber's runs on
+  [board.portal2.sr](https://board.portal2.sr), best first, and open one or
+  race the top 5, 10 or 20 (or the ones ticked) against the run shown, their
+  demos downloaded straight into the page. A co-op run comes with both
+  players' demos, the partner's found beside it where the board lists them
+  at another run. The dev server passes the board's demos through, as the
+  board doesn't serve them to other sites.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the

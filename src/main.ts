@@ -4,6 +4,10 @@ import type {SegmentTrack, Located} from './player/playback.ts';
 import type {Run, Segment} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
+import type {GapLine} from './ui/charts.ts';
+import {tricks} from './player/tricks.ts';
+import {BoardBrowser} from './ui/board.ts';
+import type {DemoFile} from './ui/board.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D, QUALITY} from './ui/view3d.ts';
 import type {CameraMode, CameraState, GhostSpec, NameTag} from './ui/view3d.ts';
@@ -27,6 +31,7 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 
 const pathView = new PathView($<HTMLCanvasElement>('path'));
 const inputs = new InputDisplay($('inputs'));
+const sideInputs = new InputDisplay($('inputs-side'));
 const panels = new Panels((seg, tick) => seekTo(pb!.globalTick(seg, tick)));
 
 let pb: Playback | null = null;
@@ -653,7 +658,12 @@ function prepareSplit(loc: Located): (() => void) | null {
 	const tick = Math.min(track.seg.lastTick, Math.max(track.seg.firstTick, racerTick(loc, track) + shift));
 	side.extraAmbient = view3d.extraAmbient;
 	sideTick = tick;
-	return () => side.update(viewAt(track, tick), tick);
+	return () => {
+		const view = viewAt(track, tick);
+		side.update(view, tick);
+		sideInputs.show(cmdAt(track, tick));
+		$('speed-now-side').textContent = view ? `${Math.round(view.speed)} u/s` : '';
+	};
 }
 // The co-op partner's demo is of the same moments as this one, but its
 // finish (which lines the two up) is recorded when the news reaches the
@@ -899,7 +909,9 @@ function render() {
 		currentSeg = loc.index;
 		pathView.setTrack(loc.track);
 		speedGraph.setTrack(loc.track);
-		panels.setSegment(loc.index, seg);
+		const found = tricks(loc.track);
+		speedGraph.tricks = found;
+		panels.setSegment(loc.index, seg, found);
 		// (the scene kept where the next segment's on the same map: only
 		// the last one's entities let go)
 		if (view3d.mapName === seg.map) view3d.dropSegment();
@@ -923,6 +935,7 @@ function render() {
 	showHudText(loc.tick);
 	if (viewMode !== '3d') showNameTags();
 	timeline.draw(t, loc.index);
+	showGaps(loc);
 	speedGraph.draw(loc.tick);
 	inputs.show(cmd);
 	panels.update(loc.tick);
@@ -1013,6 +1026,7 @@ $('view-mode').onclick = e => {
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
 	$('path-line').hidden = !is3d;
+	showHeatToggle();
 	$('quality').hidden = !is3d;
 	$('export').hidden = !is3d || !canExportVideo();
 	if (is3d) {
@@ -1198,14 +1212,17 @@ function racerAt(loc: Located, track: SegmentTrack): {origin: [number, number, n
 // seconds behind the racer (negative: ahead): when it was closest to where
 // this run's player is, within a few seconds of the same time; and how
 // close that came (squared)
-function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack): {delta: number; d2: number} | null {
+// (or within the racer's ticks given: just after where it was last matched,
+// so a route that comes back near itself isn't matched further along)
+function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack, within?: [number, number]): {delta: number; d2: number; tick: number} | null {
 	if (!at) return null;
 	const views = track.seg.views;
 	const tick = racerTick(loc, track);
 	const window = 6 / track.seg.intervalPerTick;
-	let i = Math.max(0, lastAtOrBefore(views, tick - window));
+	const [from, to] = within ?? [tick - window, tick + window];
+	let i = Math.max(0, lastAtOrBefore(views, from));
 	let best = -1, bestD = Infinity;
-	for (; i < views.length && views[i].tick <= tick + window; i++) {
+	for (; i < views.length && views[i].tick <= to; i++) {
 		const o = views[i].origin;
 		const d = (o[0] - at[0]) ** 2 + (o[1] - at[1]) ** 2 + (o[2] - at[2]) ** 2;
 		if (d < bestD) {
@@ -1215,7 +1232,7 @@ function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack): {de
 	}
 	// (nowhere near: the routes went different ways)
 	if (best < 0 || bestD > 256 ** 2) return null;
-	return {delta: (tick - views[best].tick) * track.seg.intervalPerTick, d2: bestD};
+	return {delta: (tick - views[best].tick) * track.seg.intervalPerTick, d2: bestD, tick: views[best].tick};
 }
 // a racer's segment's player (its model and animation), decoded once it's
 // raced (only that kept, so many racers don't hold every entity of their
@@ -1288,6 +1305,11 @@ function showRacers(loc: Located, view: {origin: number[]} | null) {
 	}
 	view3d.ghosts = marks;
 	pathView.racers = marks;
+	if (pathView.heatShown) {
+		const tracks = [loc.track, ...racers.flatMap(r => r.players.map(p => racerTrack(p, loc)).filter((x): x is SegmentTrack => !!x))];
+		// (the same list kept while it's the same, so the map isn't redone)
+		if (tracks.length !== pathView.heatTracks.length || tracks.some((x, i) => x !== pathView.heatTracks[i])) pathView.heatTracks = tracks;
+	}
 }
 const racerName = (r: Racer) => r.players.map(p => p.name).join(' & ');
 // a racer's row: its name in its colour, its difference, and its toggles.
@@ -1362,6 +1384,8 @@ function changedRacers() {
 		split.classList.toggle('on', splitChoice === r);
 	}
 	showSplitToggle();
+	showHeatToggle();
+	gapsFor = null;
 	const shown = racers.filter(r => r.shown).length;
 	$('ghost-count').textContent = `${shown} of ${racers.length} shown`;
 	$('ghost-all').classList.toggle('on', shown === racers.length);
@@ -1413,6 +1437,10 @@ function nameRacerRow(r: Racer) {
 function addRacer(run: Run) {
 	const maps = new Set(pb?.run.segments.map(s => s.map));
 	if (!run.segments.some(s => maps.has(s.map) && s.views.length)) throw new Error('it has none of the maps this run plays.');
+	// (a demo that's here already, shown or raced, isn't added again: the
+	// shown run among a board's top few)
+	const here = [pb?.run, ...shownPartners.map(p => p.pb.run), ...racers.flatMap(r => r.players.map(p => p.pb.run))];
+	if (here.some(x => x?.fileName === run.fileName && x.fileSize === run.fileSize)) return;
 	// (named after its player, as the demo records them)
 	const player: RacerPlayer = {pb: new Playback(run), name: run.player || run.fileName.replace(/\.[^.]+$/, '')};
 	if (pb && sameBoardRun(run.fileName, pb.run.fileName)) {
@@ -1447,6 +1475,99 @@ $<HTMLInputElement>('ghost-input').onchange = async e => {
 	$('ghost').classList.toggle('on', racers.length > 0);
 	changedRacers();
 };
+
+// ---- the heatmap ----
+// where this run and every raced run went on the map (Top and Side views)
+function showHeatToggle() {
+	$('heat-toggle').hidden = viewMode === '3d' || !racers.length;
+	$('heat-toggle').classList.toggle('on', pathView.heatShown);
+}
+$('heat-toggle').onclick = () => {
+	pathView.heatShown = !pathView.heatShown;
+	showHeatToggle();
+	render();
+};
+
+// ---- the gap graph ----
+// how far ahead or behind each shown raced run is over the segment, worked
+// out once a segment (and again when the raced runs change)
+let graphMode: 'speed' | 'gap' = 'speed';
+let gapsFor: SegmentTrack | null = null;
+$('graph-mode').onclick = e => {
+	const b = (e.target as HTMLElement).closest('button');
+	if (!b) return;
+	graphMode = b.dataset.g as 'speed' | 'gap';
+	for (const x of $('graph-mode').querySelectorAll('button')) x.classList.toggle('on', x === b);
+	render();
+};
+const GAP_SAMPLES = 500;
+const GAP_NEAR = 96;  // units: a raced player this near where this one is was here
+function showGaps(loc: Located) {
+	$('graph-mode').hidden = !racers.length;
+	speedGraph.mode = racers.length ? graphMode : 'speed';
+	if (speedGraph.mode !== 'gap' || gapsFor === loc.track) return;
+	gapsFor = loc.track;
+	const own = loc.track, seg = own.seg;
+	const step = Math.max(1, Math.floor(own.length / GAP_SAMPLES));
+	const lines: GapLine[] = [];
+	for (const r of racers) {
+		if (!r.shown) continue;
+		const tracks = r.players.map(p => racerTrack(p, loc)).filter((x): x is SegmentTrack => !!x);
+		if (!tracks.length) continue;
+		const n = Math.floor((seg.lastTick - seg.firstTick) / step) + 1;
+		const line: GapLine = {color: r.color, ticks: new Float32Array(n), gaps: new Float32Array(n).fill(NaN)};
+		// (each player matched on from where it was last: a second either way
+		// of as far again along its run)
+		const last = new Map<SegmentTrack, number>();
+		for (let i = 0; i < n; i++) {
+			const tick = seg.firstTick + i * step;
+			line.ticks[i] = tick;
+			const at = viewAt(own, tick)?.origin ?? null;
+			// (in co-op, whichever of its players is nearer this one)
+			let best: {delta: number; d2: number} | null = null;
+			for (const track of tracks) {
+				const was = last.get(track), slack = 1 / track.seg.intervalPerTick;
+				let d = racerDelta({...loc, tick}, at, track, was === undefined ? undefined : [was - slack / 4, was + step + slack]);
+				// (closer than the race rows ask: where the routes part, a gap
+				// in the line rather than the nearest of a different way)
+				if (d && d.d2 > GAP_NEAR ** 2) d = null;
+				if (d) last.set(track, d.tick);
+				else last.delete(track);
+				if (d && (!best || d.d2 < best.d2)) best = d;
+			}
+			if (best) line.gaps[i] = best.delta;
+		}
+		lines.push(line);
+	}
+	speedGraph.gaps = lines;
+}
+
+// ---- the leaderboard ----
+// a run picked from it opened (a co-op run's partner's demo with it), or
+// runs raced against the one shown
+const board = new BoardBrowser($('board-dialog') as HTMLDialogElement);
+board.canRace = chamber => !!pb && !!chamber && pb.run.segments.some(s => s.map === chamber.map);
+board.onOpen = async (files: DemoFile[]) => {
+	const [first, ...partners] = files;
+	await open([first]);
+	for (const f of partners) addRacer(await loadRuns([f]));
+	changedRacers();
+};
+board.onRace = async (runs: DemoFile[][]) => {
+	for (const files of runs) {
+		for (const f of files) {
+			try {
+				addRacer(await loadRuns([f]));
+			} catch (err) {
+				showError(`Couldn't race ${f.name}: ${(err as Error).message}`);
+			}
+		}
+	}
+	$('ghost').classList.toggle('on', racers.length > 0);
+	changedRacers();
+};
+$('board-btn').onclick = () => board.openFor(pb?.locate(t).track.seg.map ?? null);
+$('drop-board').onclick = () => board.openFor(null);
 
 // ---- video export ----
 // Part of the run drawn frame by frame at a video's size (each frame waits

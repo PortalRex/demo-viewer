@@ -71,8 +71,10 @@ code { font-family: var(--mono); font-size: 0.92em; }
 /* the split screen's second demo, over the right half (the first view's
    input still reaching the first: it's the one the camera keys drive) */
 .view3d-side { position: absolute; top: 0; right: 0; bottom: 0; width: calc(50% - 1px); z-index: 1; pointer-events: none; background: #0c0e12; }
-/* (the first demo's challenge mode box in its own half) */
-.view3d.halved > .cm-hud { right: calc(50% + 16px); }
+/* (each half's inputs over its view, and its challenge mode box under its
+   player's name, clear of the inputs in a half's width) */
+.view3d-side .hud { z-index: 1; }
+.view3d.halved > .cm-hud, .view3d-side .cm-hud { right: auto; bottom: auto; left: 10px; top: 40px; }
 /* the game's challenge mode stats box, bottom right */
 .hud-text { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
 .cm-hud { position: absolute; z-index: 1; right: 16px; bottom: 16px; min-width: 150px; padding: 5px 9px; background: rgba(0, 0, 0, 0.55); color: #fff; font: 700 13px/1.35 Arial, Helvetica, sans-serif; pointer-events: none; }
@@ -123,6 +125,9 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .clock { margin-left: auto; font-family: var(--mono); font-size: 13px; }
 #timeline { width: 100%; height: 44px; display: block; cursor: pointer; }
 #speed { width: 100%; height: 60px; display: block; margin-top: 4px; cursor: pointer; }
+.graph { position: relative; }
+.graph-mode { position: absolute; top: 6px; right: 4px; }
+.graph-mode button { font-size: 11px; padding: 1px 7px; }
 
 .error { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #3a1717; border: 1px solid var(--bad); color: #ffd7d7; padding: 10px 16px; border-radius: 8px; max-width: 90vw; }
 
@@ -140,6 +145,32 @@ code { font-family: var(--mono); font-size: 0.92em; }
 }
 .drop-file { color: var(--accent); }
 .drop-file:empty { display: none; }
+/* the leaderboard: a chamber's runs, best first */
+.board-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; width: min(720px, calc(100vw - 32px)); }
+.board-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.board-head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.board-head h2 { margin: 0; font-size: 17px; }
+.board-head select { flex: 1; min-width: 0; }
+.board-list { height: min(60vh, 520px); overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; }
+.board-list table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.board-list tr { cursor: pointer; border-bottom: 1px solid var(--line); }
+.board-list tr:hover { background: var(--panel-2); }
+.board-list tr.on { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.board-list tr.no-demo { cursor: default; color: var(--muted); }
+.board-list td { padding: 4px 8px; white-space: nowrap; }
+.board-list .rank { width: 36px; text-align: right; color: var(--muted); font-family: var(--mono); }
+.board-list .who { white-space: normal; overflow-wrap: anywhere; }
+.board-list .time { font-family: var(--mono); text-align: right; }
+.board-list .date { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.board-list .acts { text-align: right; }
+.board-list .acts button { font-size: 11px; padding: 1px 7px; margin-left: 4px; }
+.board-list .empty { padding: 24px; text-align: center; color: var(--muted); }
+.board-note { margin: 8px 0 0; color: var(--accent); }
+.board-buttons { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.board-buttons .muted { margin-right: auto; }
+.board-buttons button.primary, .drop-inner button.primary { background: var(--accent); color: #06121f; font-weight: 600; border: 0; padding: 6px 12px; }
+/* tricks found in the segment, among its events */
+.row .x.trick::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; background: var(--trick); }
 .export-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; width: min(420px, calc(100vw - 32px)); }
 .export-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
 .export-dialog h2 { margin: 0 0 14px; font-size: 17px; }

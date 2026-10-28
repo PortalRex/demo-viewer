@@ -5,6 +5,7 @@ import {segmentDuration} from '../core/model.ts';
 import {describeSarEvent} from '../core/sardata.ts';
 import {Buttons} from '../core/usercmd.ts';
 import type {UserCmd} from '../core/model.ts';
+import type {Trick} from '../player/tricks.ts';
 
 export const fmtTime = (secs: number) => {
 	const sign = secs < 0 ? '-' : '';
@@ -77,15 +78,22 @@ export class Panels {
 		this.renderFile(run);
 	}
 
-	setSegment(index: number, seg: Segment) {
+	// (with the tricks found in it among its events; the portals SAR
+	// recorded are there already)
+	setSegment(index: number, seg: Segment, tricks: Trick[] = []) {
 		for (const li of document.querySelectorAll('#segment-list li')) li.classList.toggle('on', Number((li as HTMLElement).dataset.i) === index);
 
 		const fmt = (tick: number) => fmtTime(Math.max(0, tick - seg.firstTick) * seg.intervalPerTick);
-		const evs = seg.sar.filter(e => SHOWN.has(e.kind));
-		this.fill(this.events, evs.map(e => e.tick), evs.map(e => {
-			const cls = e.kind === 'portal' ? (e.orange ? 'portal-orange' : 'portal-blue') : '';
-			return `<span class="t">${fmt(e.tick)}</span><span class="x ${cls}">${esc(describeSarEvent(e))}</span>`;
-		}), 'No portal placements, pauses or timer events in this segment.', index);
+		const sarPortals = seg.sar.some(e => e.kind === 'portal');
+		const rows = [
+			...seg.sar.filter(e => SHOWN.has(e.kind)).map(e => {
+				const cls = e.kind === 'portal' ? (e.orange ? 'portal-orange' : 'portal-blue') : '';
+				return {tick: e.tick, html: `<span class="t">${fmt(e.tick)}</span><span class="x ${cls}">${esc(describeSarEvent(e))}</span>`};
+			}),
+			...tricks.filter(t => t.kind !== 'portal' || !sarPortals).map(t =>
+				({tick: t.tick, html: `<span class="t">${fmt(t.tick)}</span><span class="x trick" style="--trick: ${t.color}">${esc(t.label)}</span>`})),
+		].sort((a, b) => a.tick - b.tick);
+		this.fill(this.events, rows.map(r => r.tick), rows.map(r => r.html), 'No portal placements, pauses, timer events or tricks in this segment.', index);
 
 		const cmds = seg.consoleCmds.filter(c => !c.initialValue);
 		this.fill(this.console, cmds.map(c => c.tick), cmds.map(c =>
