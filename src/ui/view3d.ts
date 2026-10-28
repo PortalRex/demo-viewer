@@ -1102,7 +1102,7 @@ export class View3D {
 	// free camera: held movement keys, view angles (degrees), drag state
 	private freeKeys = new Set<string>();
 	private freeAngles = [0, 0];  // pitch, yaw
-	private freeDrag: {x: number; y: number} | null = null;
+	private lookDrag: {x: number; y: number} | null = null;
 	private freeFrame = 0;
 	private freeLast = 0;
 	private mapToken = 0;
@@ -1281,6 +1281,8 @@ export class View3D {
 		this.controls.minDistance = 8;
 		this.controls.maxDistance = Infinity;
 		this.controls.enabled = this.mode === 'orbit';
+		// (turning is done here, with the pointer locked: see bindFreeCamera)
+		this.controls.enableRotate = false;
 		this.controls.addEventListener('change', () => this.render());
 		this.bindFreeCamera(this.renderer.domElement);
 		return this.renderer;
@@ -6180,25 +6182,49 @@ export class View3D {
 	}
 
 	// Free camera: drag to look, WASD to fly along the view, Q/E down/up,
-	// Shift faster, Ctrl slower (as noclip)
+	// Shift faster, Ctrl slower (as noclip). Dragging to look (Free) or to
+	// turn about the player (Orbit) locks the pointer to the view while the
+	// button's down: hidden, and kept from running off it (onto another
+	// screen), its movement turning the camera as far as it goes; where the
+	// browser won't lock it, the pointer's position as before
 	private bindFreeCamera(canvas: HTMLCanvasElement) {
 		const MOVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight']);
 		canvas.addEventListener('pointerdown', e => {
-			if (this.mode !== 'free' || e.button !== 0) return;
-			this.freeDrag = {x: e.clientX, y: e.clientY};
+			if ((this.mode !== 'free' && this.mode !== 'orbit') || e.button !== 0) return;
+			this.lookDrag = {x: e.clientX, y: e.clientY};
 			canvas.setPointerCapture(e.pointerId);
+			// (a promise in current browsers: refused, say just after Esc let go of one)
+			(canvas.requestPointerLock() as Promise<void> | undefined)?.catch?.(() => {});
 		});
 		canvas.addEventListener('pointermove', e => {
-			if (!this.freeDrag) return;
-			this.freeAngles[1] -= (e.clientX - this.freeDrag.x) * 0.22;
-			this.freeAngles[0] = Math.max(-89, Math.min(89, this.freeAngles[0] + (e.clientY - this.freeDrag.y) * 0.22));
-			this.freeDrag = {x: e.clientX, y: e.clientY};
-			this.applyFreeView();
-			this.render();
+			if (!this.lookDrag) return;
+			const locked = document.pointerLockElement === canvas;
+			const dx = locked ? e.movementX : e.clientX - this.lookDrag.x, dy = locked ? e.movementY : e.clientY - this.lookDrag.y;
+			this.lookDrag = {x: e.clientX, y: e.clientY};
+			if (this.mode === 'free') {
+				this.freeAngles[1] -= dx * 0.22;
+				this.freeAngles[0] = Math.max(-89, Math.min(89, this.freeAngles[0] + dy * 0.22));
+				this.applyFreeView();
+				this.render();
+			} else if (this.mode === 'orbit' && this.controls) {
+				// (as OrbitControls turns for a drag: a full turn per view height)
+				const orbit = this.controls as unknown as {_rotateLeft(a: number): void; _rotateUp(a: number): void};
+				const turn = 2 * Math.PI * this.controls.rotateSpeed / Math.max(1, canvas.clientHeight);
+				orbit._rotateLeft(dx * turn);
+				orbit._rotateUp(dy * turn);
+				this.controls.update();
+			}
 		});
-		const end = () => (this.freeDrag = null);
+		const end = () => {
+			this.lookDrag = null;
+			if (document.pointerLockElement === canvas) document.exitPointerLock();
+		};
 		canvas.addEventListener('pointerup', end);
 		canvas.addEventListener('pointercancel', end);
+		// (Esc let go of the lock mid-drag: the drag ends with it)
+		document.addEventListener('pointerlockchange', () => {
+			if (document.pointerLockElement !== canvas) this.lookDrag = null;
+		});
 		window.addEventListener('keydown', e => {
 			if (this.mode !== 'free' || !MOVE_KEYS.has(e.code) || e.metaKey || e.altKey) return;
 			if (e.target instanceof Element && e.target.matches('input, select, textarea')) return;

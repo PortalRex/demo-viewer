@@ -206,6 +206,8 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 | **Chase** | Follows behind the player along where they look, closer where a wall is in the way |
 | **Free** | Drag to look, <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to move, <kbd>Q</kbd>/<kbd>E</kbd> down/up, <kbd>Shift</kbd> faster, <kbd>Ctrl</kbd> slower |
 
+While you drag to turn in **Orbit** or **Free**, the pointer is locked to the view (hidden, as in a game), so it can't run off onto another screen; let go of the button, or press <kbd>Esc</kbd>, to get it back.
+
 These toggles in the 3D view are remembered per browser:
 
 | Toggle | What it does |
