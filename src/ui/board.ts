@@ -3,6 +3,8 @@
 // players' demos together)
 import {CHAMBERS, chamberFor} from '../core/chambers.ts';
 import type {Chamber} from '../core/chambers.ts';
+import {boardRunsOf, fmtScore} from '../core/leaderboard.ts';
+import type {BoardJson, BoardRun} from '../core/leaderboard.ts';
 
 const BOARD = 'https://board.portal2.sr';
 // (the dev server passes the board through, as its demos can't be read by
@@ -10,57 +12,15 @@ const BOARD = 'https://board.portal2.sr';
 const BASE = import.meta.env.DEV ? '/__board' : BOARD;
 const SHOWN_RUNS = 200;
 
-interface BoardPlayer {
-	steamId: string;
-	name: string;
-	changelogId: number;
-	hasDemo: boolean;
-}
-// a run on the board: one player's, or a co-op pair's (two rows on the
-// board with the same time, submitted together)
-export interface BoardRun {
-	rank: number;
-	score: number;  // hundredths of a second
-	date: string | null;
-	note: string | null;
-	players: BoardPlayer[];
-	coop: boolean;
+export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {
+	const res = await fetch(`${BASE}/chamber/${chamber.id}/json`);
+	if (!res.ok) throw new Error(`the board answered ${res.status}`);
+	return boardRunsOf(await res.json() as BoardJson, chamber.coop);
 }
 export interface DemoFile {
 	bytes: Uint8Array;
 	name: string;
 	id: number;  // the board's id for it (its changelog entry's)
-}
-
-interface ScoreJson {
-	scoreData: {changelogId: number; playerRank: number; score: number; date: string | null; hasDemo: number; note: string | null};
-	userData: {boardname: string};
-}
-
-export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {
-	const res = await fetch(`${BASE}/chamber/${chamber.id}/json`);
-	if (!res.ok) throw new Error(`the board answered ${res.status}`);
-	const json = await res.json() as Record<string, ScoreJson>;
-	// (keyed by Steam id, which come back in number order: by rank instead)
-	const rows = Object.entries(json).map(([steamId, e]) => ({steamId, ...e})).sort((a, b) => a.scoreData.playerRank - b.scoreData.playerRank);
-	const runs: BoardRun[] = [];
-	const paired = new Set<string>();
-	for (const r of rows) {
-		if (paired.has(r.steamId)) continue;
-		const player = (x: typeof r): BoardPlayer => ({steamId: x.steamId, name: x.userData.boardname, changelogId: x.scoreData.changelogId, hasDemo: !!x.scoreData.hasDemo});
-		const run: BoardRun = {rank: r.scoreData.playerRank, score: r.scoreData.score, date: r.scoreData.date, note: r.scoreData.note, players: [player(r)], coop: chamber.coop};
-		if (chamber.coop) {
-			const partner = rows.find(x => x !== r && !paired.has(x.steamId) && x.scoreData.score === r.scoreData.score
-				&& Math.abs(x.scoreData.changelogId - r.scoreData.changelogId) <= 3);
-			if (partner) {
-				paired.add(partner.steamId);
-				run.players.push(player(partner));
-			}
-		}
-		paired.add(r.steamId);
-		runs.push(run);
-	}
-	return runs;
 }
 
 // A run's demos, once each: kept for the page's life, and in the browser's
@@ -149,10 +109,6 @@ export async function runDemos(runs: BoardRun[], progress: (done: number) => voi
 	return out;
 }
 
-export const fmtScore = (cs: number) => {
-	const m = Math.floor(cs / 6000), s = Math.floor(cs / 100) % 60, c = cs % 100;
-	return `${m ? `${m}:${String(s).padStart(2, '0')}` : s}.${String(c).padStart(2, '0')}`;
-};
 const esc = (s: string) => s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'})[c]!);
 
 // The dialog: pick a chamber (the shown run's map's to begin with), then

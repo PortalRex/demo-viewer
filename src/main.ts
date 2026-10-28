@@ -1,12 +1,15 @@
 import {groupRunFiles, loadRuns} from './core/load.ts';
-import {Playback, viewAt, cmdAt, lastAtOrBefore} from './player/playback.ts';
+import {Playback, viewAt, cmdAt} from './player/playback.ts';
 import type {SegmentTrack, Located} from './player/playback.ts';
+import {alignedTick, boardRun, gapAt, sameBoardRun, trackOnSameMap} from './player/race.ts';
 import type {Run, Segment} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import type {GapLine} from './ui/charts.ts';
 import {tricks} from './player/tricks.ts';
 import {BoardBrowser, boardDemo} from './ui/board.ts';
+import {linkHash, parseLink} from './core/links.ts';
+import type {BoardLink, Moment, ViewMode} from './core/links.ts';
 import type {DemoFile} from './ui/board.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D, QUALITY} from './ui/view3d.ts';
@@ -45,7 +48,6 @@ let playing = false;
 let rate = 1;
 let currentSeg = -1;
 let lastFrame = 0;
-type ViewMode = 'top' | 'side' | '3d';
 let viewMode = 'top' as ViewMode;
 
 // ---- entities and the 3D map ----
@@ -1136,71 +1138,13 @@ function racerColor(): string {
 		if (!racers.some(r => r.color === c)) return c;
 	}
 }
-// a board demo's run (map_time_steamid_id): the same map and time, and an id
-// the same or one apart, is the same co-op run's other player
-function boardRun(fileName: string): {map: string; time: string; id: number} | null {
-	const m = /^(.+)_(\d{3,8})_\d{17}_(\d+)\.(dem|sarp)$/i.exec(fileName);
-	return m && {map: m[1].toLowerCase(), time: m[2], id: Number(m[3])};
-}
-function sameBoardRun(a: string | null, b: string | null) {
-	const x = a ? boardRun(a) : null, y = b ? boardRun(b) : null;
-	return !!x && !!y && x.map === y.map && x.time === y.time && Math.abs(x.id - y.id) <= 1;
-}
-// a racer's segment for one of this run's: the one on the same map (the
-// same one of them, where a run visits a map more than once)
+// (the ghost race's lining up, in player/race.ts, for this run and its racers)
 function racerTrack(p: RacerPlayer, loc: Located): SegmentTrack | null {
-	if (!pb) return null;
-	const map = loc.track.seg.map;
-	const visit = pb.tracks.slice(0, loc.index).filter(tr => tr.seg.map === map).length;
-	return p.pb.tracks.filter(tr => tr.seg.map === map)[visit] ?? null;
+	return pb ? trackOnSameMap(pb, p.pb, loc) : null;
 }
-// where a segment's run finishes (the challenge mode flags, as the board's
-// runs record them) and how many ticks SAR's timer gave it, where known: in
-// the demo, or else in a one-map run's file name as the board names its
-// demos (map_time_steamid_id, the time in hundredths)
-function finishOf(seg: Segment, run: Run): {tick: number; ticks: number | null} | null {
-	let tick: number | null = null, ticks: number | null = null;
-	for (const e of seg.sar) {
-		if (e.kind === 'cmFlags' && ticks === null) tick = e.tick;
-		if (e.kind === 'speedrunTime') {
-			tick = e.tick;
-			ticks = e.splits.reduce((n, s) => n + s.segments.reduce((m, x) => m + x.ticks, 0), 0) || null;
-		}
-	}
-	const named = /_(\d{3,8})_\d{17}_\d+\.(dem|sarp)$/i.exec(run.fileName);
-	if (ticks === null && named && run.segments.length === 1) ticks = Math.round(Number(named[1]) / 100 / seg.intervalPerTick);
-	return tick === null ? null : {tick, ticks};
-}
-// where a racer's segment that records no finish (a demo from before the
-// challenge mode flags) finishes: where its player first comes near where
-// this run's finishes (as it keeps recording after), with its time from its
-// file name where the board's
-const finishesNear = new WeakMap<SegmentTrack, {tick: number; ticks: number | null} | null>();
-function finishNear(track: SegmentTrack, own: SegmentTrack, finish: {tick: number} | null, run: Run): {tick: number; ticks: number | null} | null {
-	if (finishesNear.has(track)) return finishesNear.get(track)!;
-	const at = finish && viewAt(own, finish.tick)?.origin;
-	let found: {tick: number; ticks: number | null} | null = null;
-	if (at) {
-		const v = track.seg.views.find(v => (v.origin[0] - at[0]) ** 2 + (v.origin[1] - at[1]) ** 2 + (v.origin[2] - at[2]) ** 2 < 48 ** 2);
-		if (v) found = {tick: v.tick, ticks: null};
-		const named = /_(\d{3,8})_\d{17}_\d+\.(dem|sarp)$/i.exec(run.fileName);
-		if (found && named && run.segments.length === 1) found.ticks = Math.round(Number(named[1]) / 100 / track.seg.intervalPerTick);
-	}
-	finishesNear.set(track, found);
-	return found;
-}
-// (a racer's tick as many seconds into its run as this one is into its own:
-// from where each run's timer started, the finish less its time (the other
-// run's where one has none, so their finishes meet), as each player's demo
-// of a co-op run starts recording at its own moment; else from where each
-// segment starts)
 function racerTick(loc: Located, track: SegmentTrack) {
 	const other = [...racers.flatMap(r => r.players), ...shownPartners].find(p => p.pb.tracks.includes(track));
-	const a = pb && finishOf(loc.track.seg, pb.run), b = other && (finishOf(track.seg, other.pb.run) ?? finishNear(track, loc.track, a, other.pb.run));
-	const startA = a && b ? a.tick - (a.ticks ?? b.ticks ?? 0) : loc.track.seg.firstTick;
-	const startB = a && b ? b.tick - (b.ticks ?? a.ticks ?? 0) : track.seg.firstTick;
-	const seconds = (loc.tick - startA) * loc.track.seg.intervalPerTick;
-	return startB + seconds / track.seg.intervalPerTick;
+	return alignedTick(loc, pb?.run ?? null, track, other?.pb.run ?? null);
 }
 function racerAt(loc: Located, track: SegmentTrack): {origin: [number, number, number]; angles: [number, number, number]} | null {
 	const tick = racerTick(loc, track);
@@ -1209,30 +1153,8 @@ function racerAt(loc: Located, track: SegmentTrack): {origin: [number, number, n
 	const v = viewAt(track, tick);
 	return v && {origin: v.origin, angles: v.angles};
 }
-// seconds behind the racer (negative: ahead): when it was closest to where
-// this run's player is, within a few seconds of the same time; and how
-// close that came (squared)
-// (or within the racer's ticks given: just after where it was last matched,
-// so a route that comes back near itself isn't matched further along)
-function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack, within?: [number, number]): {delta: number; d2: number; tick: number} | null {
-	if (!at) return null;
-	const views = track.seg.views;
-	const tick = racerTick(loc, track);
-	const window = 6 / track.seg.intervalPerTick;
-	const [from, to] = within ?? [tick - window, tick + window];
-	let i = Math.max(0, lastAtOrBefore(views, from));
-	let best = -1, bestD = Infinity;
-	for (; i < views.length && views[i].tick <= to; i++) {
-		const o = views[i].origin;
-		const d = (o[0] - at[0]) ** 2 + (o[1] - at[1]) ** 2 + (o[2] - at[2]) ** 2;
-		if (d < bestD) {
-			bestD = d;
-			best = i;
-		}
-	}
-	// (nowhere near: the routes went different ways)
-	if (best < 0 || bestD > 256 ** 2) return null;
-	return {delta: (tick - views[best].tick) * track.seg.intervalPerTick, d2: bestD, tick: views[best].tick};
+function racerDelta(loc: Located, at: number[] | null, track: SegmentTrack, within?: [number, number]) {
+	return gapAt(at, track, racerTick(loc, track), within);
 }
 // a racer's segment's player (its model and animation), decoded once it's
 // raced (only that kept, so many racers don't hold every entity of their
@@ -1771,68 +1693,25 @@ const openPath = (path: string) => fetch(path).then(r => (r.ok ? r.arrayBuffer()
 	.catch(e => showError(`Couldn't load ${path}: ${e.message}`));
 
 // ---- links ----
-// A link to a moment of a run: the recording's URL (where it was opened from
-// one; otherwise its file name, for whoever has the file to drop in), the
-// tick, the view, and the 3D camera:
-//   #load=<url>&t=<tick>&view=3d&cam=free&pos=x,y,z&ang=pitch,yaw
-// A run from the leaderboard is named by its board id instead, with its
-// co-op partner's demo, the runs raced against it (theirs too) and which
-// the split screen shows, all downloaded again by whoever opens it:
-//   #board=<id>&with=<id>&race=<id>,<id>,...&split=<racer index|partner>&t=...
-interface Moment {
-	tick: number;
-	view: ViewMode;
-	camera?: CameraState;
-	file?: string;
-}
+// (made and read in core/links.ts)
 function momentLink(): string {
-	const q = new URLSearchParams();
 	const fromBoard = pb && boardIds.get(pb.run);
-	if (fromBoard) q.set('board', String(fromBoard));
-	else if (openedFrom) q.set('load', openedFrom);
-	else if (pb) q.set('file', pb.run.fileName);
 	const ids = (players: RacerPlayer[]) => players.map(p => boardIds.get(p.pb.run)).filter((x): x is number => x !== undefined);
-	const partners = ids(shownPartners), raced = racers.flatMap(r => ids(r.players));
-	if (partners.length) q.set('with', partners.join(','));
-	if (raced.length) q.set('race', raced.join(','));
-	if (splitChoice) q.set('split', splitChoice === 'partner' ? 'partner' : String(racers.indexOf(splitChoice)));
-	q.set('t', String(Math.round(t)));
-	q.set('view', viewMode);
-	if (viewMode === '3d') {
-		const c = view3d.cameraState();
-		q.set('cam', c.mode);
-		if (c.pos) q.set('pos', c.pos.join(','));
-		if (c.ang) q.set('ang', c.ang.join(','));
-		if (c.offset) q.set('off', c.offset.join(','));
-	}
-	// (the URL's own characters kept readable)
-	return `${location.origin}${location.pathname}#${q.toString().replace(/%2F/g, '/').replace(/%2C/g, ',').replace(/%3A/g, ':')}`;
-}
-interface BoardLink {
-	id: number;
-	partners: number[];
-	raced: number[];
-	split: string | null;
-}
-function parseMoment(hash: string): {load: string | null; board: BoardLink | null; moment: Moment | null} {
-	const q = new URLSearchParams(hash.replace(/^#/, ''));
-	const nums = (k: string) => q.get(k)?.split(',').map(Number).filter(Number.isFinite);
-	const load = q.get('load');
-	const id = Number(q.get('board'));
-	const board = id > 0 ? {id, partners: nums('with') ?? [], raced: nums('race') ?? [], split: q.get('split')} : null;
-	if (!q.has('t')) return {load, board, moment: null};
-	const view = q.get('view');
-	const cam = q.get('cam');
-	return {
-		load,
-		board,
+	return location.origin + location.pathname + linkHash({
+		board: fromBoard ? {
+			id: fromBoard,
+			partners: ids(shownPartners),
+			raced: racers.flatMap(r => ids(r.players)),
+			split: splitChoice === 'partner' ? 'partner' : splitChoice ? String(racers.indexOf(splitChoice)) : null,
+		} : null,
+		load: fromBoard ? null : openedFrom,
 		moment: {
-			tick: Number(q.get('t')) || 0,
-			view: view === '3d' || view === 'side' ? view : 'top',
-			camera: cam === 'eyes' || cam === 'orbit' || cam === 'free' || cam === 'chase' ? {mode: cam, pos: nums('pos'), ang: nums('ang'), offset: nums('off')} : undefined,
-			file: q.get('file') ?? undefined,
+			tick: Math.round(t),
+			view: viewMode,
+			camera: viewMode === '3d' ? view3d.cameraState() : undefined,
+			file: fromBoard || openedFrom || !pb ? undefined : pb.run.fileName,
 		},
-	};
+	});
 }
 // a link's moment shown once its run is open
 let pendingMoment: Moment | null = null;
@@ -1882,7 +1761,7 @@ async function openBoardLink(link: BoardLink, moment: Moment | null) {
 	}
 }
 {
-	const {load, board: link, moment} = parseMoment(location.hash);
+	const {load, board: link, moment} = parseLink(location.hash);
 	if (link) openBoardLink(link, moment);
 	else {
 		pendingMoment = moment;

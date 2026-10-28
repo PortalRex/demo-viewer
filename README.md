@@ -209,6 +209,7 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 | `npm run dev` | Dev server with hot reload |
 | `npm run build` | Typecheck and build a static site into `dist/` |
 | `npm run check` | Typecheck only |
+| `npm test` | The tests (`tests/`): race lining up, tricks, the leaderboard's runs, links and the view between views, on small made-up runs |
 | `npm run probe -- <files>` | Print what the readers get from a `.sarp` or `.dem` |
 
 </details>
