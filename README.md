@@ -83,6 +83,11 @@ computer.
   listed among the events too.
 - With runs raced, a **Gap** graph instead: how far ahead or behind each one is
   over the segment, a line in its colour.
+- An **Inputs** graph: the keys this run held, tick by tick, over the
+  seconds around now, beside those of the split screen's run (or the first
+  shown raced run), lined up as the race lines them up.
+- **Trail** and **Shots** (in 3D too): where the player was over the last
+  moment, fading, and a line from the player to each portal as it's placed.
 - **Heat:** with runs raced, a heatmap of where they all went, brighter where
   more of them did, so the usual route and the rare ones stand out.
 - Events, console commands, SAR's timer splits and category rules.
@@ -152,9 +157,18 @@ computer.
   row plays that run's own demo beside this one, split screen, in step with
   it: each half has its own portals, objects, inputs, speed and timer as its
   demo recorded them.
+- **Race tab:** the raced runs section by section. Sections end where every
+  run passes near the same spot on this run's route; each run's time there
+  is when it last came by before going on. The best of each section is
+  marked, with their sum (among the runs on this run's route). The routes the
+  runs took are grouped too (a run that goes another way for part of it is
+  another route), and a route's button shows just its runs, in the views and
+  the heatmap.
 - **Leaderboard:** browse any chamber's runs on
   [board.portal2.sr](https://board.portal2.sr), best first, and open one or
-  race the top 5, 10 or 20 (or the ones ticked) against the run shown, their
+  race the top 5, 10 or 20 (or the ones ticked) against the run shown, or
+  **Race WR history**: every world record the chamber has had (those with
+  demos), each named with when it was set. Their
   demos downloaded straight into the page. A co-op run comes with both
   players' demos, the partner's found beside it where the board lists them
   at another run. Downloaded demos are kept in the browser (the latest 300),

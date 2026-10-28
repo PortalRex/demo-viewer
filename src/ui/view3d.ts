@@ -42,6 +42,9 @@ export type CameraMode = 'eyes' | 'orbit' | 'free' | 'chase';
 // Portal 2's 90° horizontal FOV at 4:3, as a vertical FOV (widescreen keeps it)
 const VERTICAL_FOV = 2 * Math.atan(Math.tan(Math.PI / 4) * 3 / 4) * 180 / Math.PI;
 const DEFAULT_EYE = 64;
+const TRAIL_TIME = 0.6;  // seconds of the trail behind the followed player
+const TRAIL_COPIES = 6;
+const SHOT_TIME = 0.5;   // seconds a portal shot's beam lasts
 // how far ahead of a player their eyes look (the point both turn to)
 const EYE_TARGET_DISTANCE = 128;
 const VIEW_NEARZ = 7;
@@ -976,6 +979,16 @@ export class View3D {
 	private ghostPaths = new Map<SegmentTrack, THREE.LineSegments>();
 	// raced players' own models, glowing (posed once loaded)
 	private ghostRobots = new Map<EntityTrack, THREE.Group>();
+	// The followed player's trail (outside Eyes view): faint copies of their
+	// body where they were over the last TRAIL_TIME, fading with age
+	trailShown = false;
+	private trail: THREE.Mesh[] = [];
+	// Portal shots: a beam from the shooter's eye to each portal just
+	// placed, fading over SHOT_TIME
+	shotsShown = false;
+	private shots: THREE.Mesh[] = [];
+	private shotsNow: {from: THREE.Vector3; to: THREE.Vector3; color: number[]; age: number}[] = [];
+	private shotGeometry = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true).rotateX(Math.PI / 2).translate(0, 0, 0.5);
 	private ghostRobot(track: EntityTrack): THREE.Group | null {
 		let robot = this.ghostRobots.get(track);
 		if (robot) return robot;
@@ -5308,6 +5321,7 @@ export class View3D {
 						const link = Number(e.m_hLinkedPortal ?? -1) & 2047;
 						u.staticAmount.value = this.portalStatic(t, tick, link);
 						this.portals.set(t.index, {obj: o, link, halfW, halfH});
+						if (this.shotsShown) this.noteShot(t, k, pose.origin, tick);
 					}
 				}
 			}
@@ -5322,6 +5336,8 @@ export class View3D {
 		if (ents) this.updateRopes(tick);
 		if (ents) this.updateMovies(tick);
 		this.placeGhosts();
+		this.placeShots();
+		this.shotsNow = [];
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
@@ -5385,6 +5401,7 @@ export class View3D {
 				this.controls.update();
 			}
 		}
+		this.placeTrail(ft, view, tick);
 		// after the camera: the view model and what the recording player
 		// holds follow this frame's view
 		this.updateViewModel(tick);
@@ -5434,6 +5451,75 @@ export class View3D {
 		this.camera.position.copy(eye).addScaledVector(to, reach);
 		this.camera.up.set(0, 0, 1);
 		this.camera.lookAt(eye.clone().addScaledVector(fwd, 80));
+	}
+
+	// A portal placed in the last SHOT_TIME: a beam to it from the eye of the
+	// player who shot it (the one whose aim pointed nearest it then)
+	private noteShot(t: EntityTrack, k: EntityKey, at: THREE.Vector3, tick: number) {
+		const placed = this.portalPlacedAt(t, tick);
+		const age = (tick - placed) * this.interval;
+		if (age < 0 || age >= SHOT_TIME || !this.entities) return;
+		let best: {eye: THREE.Vector3; dot: number} | null = null;
+		for (const p of this.entities.tracks) {
+			if (p.className !== 'CPortal_Player') continue;
+			const pk = keyAt(p, placed);
+			if (!pk || pk.removed) continue;
+			const pose = this.entityPose(p, placed, false);
+			const eye = pose.origin.clone();
+			eye.z += pk.eyeZ ?? DEFAULT_EYE;
+			const aim = new THREE.Vector3(1, 0, 0).applyEuler(toEuler([pose.angles[0], pose.angles[1], 0]));
+			const dot = aim.dot(at.clone().sub(eye).normalize());
+			if (!best || dot > best.dot) best = {eye, dot};
+		}
+		if (!best || best.dot < 0.8) return;
+		this.shotsNow.push({from: best.eye, to: at.clone(), color: this.portalColor(!!t.orange, Number(k.extra?.m_iTeamNum ?? 0)), age});
+	}
+	private placeShots() {
+		while (this.shots.length < this.shotsNow.length) {
+			const beam = new THREE.Mesh(this.shotGeometry, new THREE.MeshBasicMaterial({transparent: true, depthWrite: false, blending: THREE.AdditiveBlending}));
+			beam.name = 'portal shot';
+			this.ghostGroup.add(beam);
+			this.shots.push(beam);
+		}
+		this.shots.forEach((beam, i) => {
+			const s = this.shotsNow[i];
+			beam.visible = !!s;
+			if (!s) return;
+			const length = s.from.distanceTo(s.to);
+			beam.position.copy(s.from);
+			beam.lookAt(s.to);
+			beam.scale.set(1.2, 1.2, length);
+			// (bright as it's fired, fading; divided by the exposure, as it's
+			// drawn into the frame before that's exposed)
+			const fade = 1 - s.age / SHOT_TIME;
+			(beam.material as THREE.MeshBasicMaterial).color.setRGB(...s.color.map(c => (c / 255) * fade * 1.5 / Math.max(this.exposure, 0.05)) as [number, number, number]);
+			beam.updateMatrixWorld(true);
+		});
+	}
+
+	// (the followed player's, or where the recording's view puts them)
+	private placeTrail(ft: EntityTrack | undefined, view: ViewState | null, tick: number) {
+		const shown = this.trailShown && this.mode !== 'eyes' && !this.pip && !!view;
+		while (shown && this.trail.length < TRAIL_COPIES) {
+			const material = ghostMaterial();
+			const copy = new THREE.Mesh(this.ghostBody, material);
+			copy.name = 'trail';
+			this.ghostGroup.add(copy);
+			this.trail.push(copy);
+		}
+		this.trail.forEach((copy, i) => {
+			copy.visible = shown;
+			if (!shown) return;
+			const back = (i + 1) * TRAIL_TIME / TRAIL_COPIES / this.interval;
+			const at = ft && keyAt(ft, Math.floor(tick - back)) ? this.entityPose(ft, tick - back).origin
+				: this.track ? new THREE.Vector3(...(viewAt(this.track, tick - back)?.origin ?? [0, 0, 0])) : null;
+			if (!at) return void (copy.visible = false);
+			copy.position.copy(at);
+			copy.updateMatrixWorld(true);
+			const u = (copy.material as THREE.ShaderMaterial).uniforms;
+			u.color.value.setRGB(0.35, 0.5, 0.7).multiplyScalar(1 - (i + 1) / (TRAIL_COPIES + 1));
+			u.exposure.value = this.exposure;
+		});
 	}
 
 	// (each body where its player stands, turned to its aim, the marker on its

@@ -1,5 +1,6 @@
 // Top-down (or side-on) drawing of the player's path through the current
 // segment, with the view direction and portal placements.
+import {viewAt} from '../player/playback.ts';
 import type {SegmentTrack, ViewState} from '../player/playback.ts';
 import type {SarEvent, Vec3} from '../core/model.ts';
 
@@ -14,6 +15,8 @@ export interface RacerMark {
 }
 
 const GRID_STEPS = [64, 128, 256, 512, 1024, 2048, 4096];
+const TRAIL_TIME = 1;        // seconds of the trail behind the player
+const SHOT_TIME = 0.5;       // seconds a portal shot's line lasts
 const HEAT_CELL = 16;         // units a side of the heatmap's cells
 const HEAT_MAX_CELLS = 1024;  // across, at most (larger maps: larger cells)
 
@@ -38,6 +41,10 @@ export class PathView {
 	heatTracks: SegmentTrack[] = [];
 	heatShown = false;
 	private heat: Heat | null = null;
+	// the player's trail (where they were over the last second, fading) and
+	// portal shots (a line from them to each portal just placed, fading)
+	trailShown = false;
+	shotsShown = false;
 	private scale = 0.1;  // pixels per unit
 	private cx = 0;       // world (projected) coordinates at the canvas center
 	private cy = 0;
@@ -195,6 +202,8 @@ export class PathView {
 		g.globalAlpha = 1;
 
 		this.drawPortals(g, events, tick);
+		if (this.trailShown) this.drawTrail(g, track, tick);
+		if (this.shotsShown) this.drawShots(g, track, events, tick);
 		for (const r of this.racers) if (r.view) this.drawRacer(g, r.view, r.color);
 		if (view) this.drawPlayer(g, view);
 		this.drawScale(g, w, h);
@@ -282,6 +291,41 @@ export class PathView {
 		}
 		g.putImageData(pixels, 0, 0);
 		return {key, image, x0, y0, cell, runs: tracks.length};
+	}
+
+	private drawTrail(g: CanvasRenderingContext2D, track: SegmentTrack, tick: number) {
+		const views = track.seg.views, interval = track.seg.intervalPerTick;
+		for (let i = views.length - 1; i >= 0; i--) {
+			const age = (tick - views[i].tick) * interval;
+			if (age < 0) continue;
+			if (age > TRAIL_TIME) break;
+			const [x, y] = this.toScreen(...this.project(views[i].origin));
+			g.fillStyle = `rgba(140, 190, 255, ${(0.7 * (1 - age / TRAIL_TIME)).toFixed(3)})`;
+			g.beginPath();
+			g.arc(x, y, 3.5, 0, Math.PI * 2);
+			g.fill();
+		}
+	}
+
+	private drawShots(g: CanvasRenderingContext2D, track: SegmentTrack, events: SarEvent[], tick: number) {
+		const interval = track.seg.intervalPerTick;
+		g.lineWidth = 2;
+		for (const e of events) {
+			if (e.kind !== 'portal') continue;
+			const age = (tick - e.tick) * interval;
+			if (age < 0 || age > SHOT_TIME) continue;
+			const from = viewAt(track, e.tick);
+			if (!from) continue;
+			const [ax, ay] = this.toScreen(...this.project(from.origin));
+			const [bx, by] = this.toScreen(...this.project(e.pos));
+			g.strokeStyle = e.orange ? '#ff8a1f' : '#3f9bff';
+			g.globalAlpha = 1 - age / SHOT_TIME;
+			g.beginPath();
+			g.moveTo(ax, ay);
+			g.lineTo(bx, by);
+			g.stroke();
+		}
+		g.globalAlpha = 1;
 	}
 
 	private drawGrid(g: CanvasRenderingContext2D, w: number, h: number) {

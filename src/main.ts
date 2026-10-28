@@ -630,6 +630,8 @@ function ensureSideView(): View3D {
 	v.pipEnabled = false;
 	v.setQuality(QUALITY[quality]);
 	v.setPathShown(pathShown);
+	v.trailShown = view3d.trailShown;
+	v.shotsShown = view3d.shotsShown;
 	// (its loads redraw as the first view's do, and count for an export's settling)
 	v.onLoaded = () => view3d.onLoaded();
 	if (import.meta.env.DEV) (window as unknown as {sideView: View3D}).sideView = v;  // for debugging in the console
@@ -1413,6 +1415,40 @@ $<HTMLInputElement>('ghost-input').onchange = async e => {
 	$('ghost').classList.toggle('on', racers.length > 0);
 	changedRacers();
 };
+
+// ---- trail and portal shots ----
+// (each remembered per browser, for the map views and both 3D views)
+function remembered(key: string): boolean {
+	try {
+		return localStorage.getItem(key) === 'on';
+	} catch {
+		return false;
+	}
+}
+function toggleSetting(id: string, key: string, set: (on: boolean) => void) {
+	let on = remembered(key);
+	const apply = () => {
+		$(id).classList.toggle('on', on);
+		set(on);
+	};
+	apply();
+	$(id).onclick = () => {
+		on = !on;
+		try {
+			localStorage.setItem(key, on ? 'on' : 'off');
+		} catch {}
+		apply();
+		render();
+	};
+}
+toggleSetting('trail-toggle', 'trail', on => {
+	pathView.trailShown = view3d.trailShown = on;
+	if (sideView) sideView.trailShown = on;
+});
+toggleSetting('shots-toggle', 'shots', on => {
+	pathView.shotsShown = view3d.shotsShown = on;
+	if (sideView) sideView.shotsShown = on;
+});
 
 // ---- the heatmap ----
 // where this run and every raced run went on the map (Top and Side views)
