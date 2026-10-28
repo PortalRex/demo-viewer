@@ -90,6 +90,13 @@ computer.
   moment, fading, and a line from the player to each portal as it's placed.
 - **Heat:** with runs raced, a heatmap of where they all went, brighter where
   more of them did, so the usual route and the rare ones stand out.
+- **Swarm:** a board's top 100 runs as dots moving through the map with the
+  run shown, gold at the top to blue at the back (from the leaderboard's
+  **Swarm top 100**; light enough to cost a fraction of a millisecond a frame).
+- **Map image:** a picture of the map's routes from above (or the side) to
+  save: where the raced and swarm runs went as a glow, each route's fastest
+  run in its colour, named where it leaves the main route, this run bold over
+  them with its tricks marked.
 - Events, console commands, SAR's timer splits and category rules.
 
 **In 3D**

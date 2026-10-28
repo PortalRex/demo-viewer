@@ -4,9 +4,11 @@ import type {SegmentTrack, Located} from './player/playback.ts';
 import {alignedTick, boardRun, finishNear, finishOf, gapAt, sameBoardRun, trackOnSameMap} from './player/race.ts';
 import {routes, sections, sectionTimes} from './player/sections.ts';
 import {rankColor, swarmAt, swarmRun} from './player/swarm.ts';
+import {drawRouteMap} from './ui/routemap.ts';
+import {chamberFor} from './core/chambers.ts';
 import type {SwarmRun} from './player/swarm.ts';
 import type {RunPath, Sections} from './player/sections.ts';
-import type {Run, Segment} from './core/model.ts';
+import type {Run, Segment, Vec3} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import type {GapLine, InputLane} from './ui/charts.ts';
@@ -1476,12 +1478,61 @@ toggleSetting('shots-toggle', 'shots', on => {
 // where this run and every raced run went on the map (Top and Side views)
 function showHeatToggle() {
 	$('heat-toggle').hidden = viewMode === '3d' || !racers.length;
+	$('routemap-btn').hidden = viewMode === '3d' || (!racers.length && !swarm.length);
 	$('heat-toggle').classList.toggle('on', pathView.heatShown);
 }
 $('heat-toggle').onclick = () => {
 	pathView.heatShown = !pathView.heatShown;
 	showHeatToggle();
 	render();
+};
+
+// ---- the route map ----
+// A picture of the map's routes (ui/routemap.ts) from this run and every
+// raced and swarm run on this segment, saved as a PNG
+$('routemap-btn').onclick = () => {
+	if (!pb) return;
+	const loc = pb.locate(t);
+	const own = racePath(loc, loc.track, pb.run, null);
+	const others: RunPath[] = [];
+	const seen = new Set([pb.run.fileName]);
+	const add = (run: Run, track: SegmentTrack | null) => {
+		if (!track || seen.has(run.fileName)) return;
+		seen.add(run.fileName);
+		others.push(racePath(loc, track, run, own));
+	};
+	for (const r of racers) for (const p of r.players.slice(0, 1)) add(p.pb.run, racerTrack(p, loc));
+	for (const s of swarm) add(s.pb.run, trackOnSameMap(pb, s.pb, loc));
+	// (fastest first: each route led by its fastest run; this one first of all)
+	const time = (p: RunPath) => (p.end - p.start) * p.track.seg.intervalPerTick;
+	const paths = [own, ...others.sort((a, b) => time(a) - time(b))];
+	const groups = routes(paths);
+	const points = (p: RunPath) => p.track.seg.views.filter(v => v.tick >= p.start && v.tick <= p.end).map(v => v.origin);
+	const leaders: Vec3[][] = [];
+	paths.forEach((p, i) => (leaders[groups[i]] ??= points(p)));
+	const map = loc.track.seg.map;
+	const image = drawRouteMap({
+		title: chamberFor(map)?.name ?? map,
+		subtitle: `${paths.length} runs · ${new Set(groups).size} route${new Set(groups).size === 1 ? '' : 's'} (the rarest not drawn) · this run ${fmtTime(time(own))} (${pb.run.player || pb.run.fileName})`,
+		view: viewMode === 'side' ? 'side' : 'top',
+		own: points(own),
+		runs: paths.map((p, i) => ({points: points(p), route: groups[i]})),
+		leaders,
+		// (a speed peak just after a fling is that fling's: just the fling named)
+		tricks: tricks(loc.track).filter((k, _, all) => k.kind !== 'portal' && k.tick >= own.start && k.tick <= own.end
+			&& !(k.kind === 'peak' && all.some(f => f.kind === 'fling' && Math.abs(f.tick - k.tick) * loc.track.seg.intervalPerTick < 0.5))).flatMap(k => {
+			const v = viewAt(loc.track, k.tick);
+			return v ? [{pos: v.origin, label: k.label, color: k.color}] : [];
+		}),
+	});
+	image.toBlob(blob => {
+		if (!blob) return;
+		const a = document.createElement('a');
+		a.href = URL.createObjectURL(blob);
+		a.download = `${map}_routes.png`;
+		a.click();
+		setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+	}, 'image/png');
 };
 
 // ---- the gap graph ----
@@ -1711,6 +1762,7 @@ board.onSwarm = async runs => {
 	}
 	swarm = loaded;
 	swarmShown = true;
+	showHeatToggle();
 	render();
 };
 $('board-btn').onclick = () => board.openFor(pb?.locate(t).track.seg.map ?? null);
