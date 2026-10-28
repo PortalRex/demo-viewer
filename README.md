@@ -214,6 +214,22 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 
 </details>
 
+### Hosting
+
+`npm run build` makes a static site in `dist/` for any static host (Cloudflare
+Pages, GitHub Pages, Netlify). Nothing from the game is hosted: each viewer
+picks their own Portal 2 folder, and the browser remembers it, so later
+visits only ask to allow it again.
+
+The leaderboard's demos need a pass-through, as the board doesn't serve them
+to other sites: `deploy/board-proxy` is a Cloudflare Worker that does it
+(scores and demos only, demos cached). Deploy it with `wrangler deploy` in
+that folder, then build the viewer with its address:
+
+```bash
+VITE_BOARD_PROXY=https://sar-viewer-board.<you>.workers.dev npm run build
+```
+
 ## Controls
 
 | | |

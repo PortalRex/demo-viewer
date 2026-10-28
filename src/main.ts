@@ -19,7 +19,7 @@ import {background} from './ui/background.ts';
 import type {EntityTimeline, EntityTrack} from './net/entities.ts';
 import {loadBspOffThread} from './game/bsppool.ts';
 import type {BspMap} from './game/bsp.ts';
-import {devGameFS, pickGameFolder, mapPaths} from './game/gamefs.ts';
+import {devGameFS, pickGameFolder, mapPaths, rememberedGameFolder, reuseGameFolder} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
 import {recordMp4, canExportVideo} from './ui/export.ts';
@@ -336,19 +336,20 @@ function message3d(html: string | null) {
 	if (html !== null) el.innerHTML = `<div class="box">${html}</div>`;
 }
 
-async function connectGame() {
+async function connectGame(reuse?: FileSystemDirectoryHandle) {
 	try {
-		const fs = await pickGameFolder();
-		if (fs) {
-			gameFS = fs;
-			gameFiles = null;
-			mapCache.clear();
-			segIn3d = segLoading = -1;
-			load3dMap();
-		}
+		const fs = reuse ? await reuseGameFolder(reuse) : await pickGameFolder();
+		if (fs) useGameFolder(fs);
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') message3d(`<h2>Couldn't open the folder</h2>${(e as Error).message}`);
 	}
+}
+function useGameFolder(fs: GameFS) {
+	gameFS = fs;
+	gameFiles = null;
+	mapCache.clear();
+	segIn3d = segLoading = -1;
+	load3dMap();
 }
 
 // A map's BSP, loaded once (in a worker) and kept while it's one of the last
@@ -409,13 +410,19 @@ async function load3dMap() {
 	// (out of the 3D view, only with a game folder that needs no asking for)
 	const background = viewMode !== '3d';
 	gameFS ??= await devGameFS();
+	// (the folder picked on an earlier visit: straight away where the browser
+	// still allows reading it, else offered again, a click to allow it)
+	const remembered = gameFS ? null : await rememberedGameFolder();
+	if (remembered?.allowed) gameFS = await reuseGameFolder(remembered.dir);
 	if (!gameFS) {
 		if (background) return;
+		const again = remembered ? `<br><button class="primary" id="reuse-game">Use ${remembered.dir.name.replace(/[&<>"]/g, '')} again</button> ` : '<br>';
 		message3d(`<h2>The 3D view uses your own copy of the game</h2>
 			Pick your <b>Portal 2</b> folder (the one with portal2.exe, usually in steamapps/common).
 			The map is read from it in this page; nothing is uploaded.
-			<br><button class="primary" id="connect-game">Choose Portal 2 folder</button>`);
-		$('connect-game').onclick = connectGame;
+			${again}<button class="${remembered ? '' : 'primary'}" id="connect-game">Choose ${remembered ? 'another' : 'Portal 2'} folder</button>`);
+		$('connect-game').onclick = () => connectGame();
+		if (remembered) $('reuse-game').onclick = () => connectGame(remembered.dir);
 		return;
 	}
 	const token = ++mapToken;
@@ -457,7 +464,7 @@ async function load3dMap() {
 		if (token === mapToken) segLoading = -1;
 		if (token === mapToken) message3d(`<h2>Couldn't load the map</h2>${(e as Error).message}<br><button class="primary" id="connect-game">Choose another folder</button>`);
 		const b = document.getElementById('connect-game');
-		if (b) b.onclick = connectGame;
+		if (b) b.onclick = () => connectGame();
 	}
 }
 

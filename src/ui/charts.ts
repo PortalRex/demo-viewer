@@ -1,6 +1,7 @@
 // The run timeline (segments end to end) and the speed graph for the current
 // segment. Both seek on click/drag.
 import type {Playback, SegmentTrack} from '../player/playback.ts';
+import {tricks} from '../player/tricks.ts';
 import type {Trick} from '../player/tricks.ts';
 import {speedColor} from './pathview.ts';
 
@@ -52,12 +53,18 @@ export class Timeline {
 			const x0 = x(tr.start), x1 = x(tr.start + tr.length);
 			g.fillStyle = i === current ? '#26405f' : i % 2 ? '#1d232c' : '#222934';
 			g.fillRect(x0, 8, Math.max(1, x1 - x0 - 1), h - 16);
-			// portal placements and pauses
+			// portal placements and pauses, and the other tricks (hops,
+			// flings, speed peaks) along the top
 			for (const e of tr.seg.sar) {
 				if (e.kind !== 'portal' && e.kind !== 'pause') continue;
 				const ex = x(tr.start + (e.tick - tr.seg.firstTick));
 				g.fillStyle = e.kind === 'pause' ? '#e8b84a' : e.orange ? '#ff8a1f' : '#3f9bff';
 				g.fillRect(ex, e.kind === 'pause' ? 8 : h - 12, 1.5, 4);
+			}
+			for (const k of tricks(tr)) {
+				if (k.kind === 'portal') continue;
+				g.fillStyle = k.color;
+				g.fillRect(x(tr.start + (k.tick - tr.seg.firstTick)), 2, 1.5, 5);
 			}
 			if (x1 - x0 > 46) {
 				g.fillStyle = i === current ? '#e6e9ef' : '#8a93a3';

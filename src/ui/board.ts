@@ -8,8 +8,9 @@ import type {BoardJson, BoardRun} from '../core/leaderboard.ts';
 
 const BOARD = 'https://board.portal2.sr';
 // (the dev server passes the board through, as its demos can't be read by
-// another site; a built page asks the board itself)
-const BASE = import.meta.env.DEV ? '/__board' : BOARD;
+// another site; a built page asks its proxy (VITE_BOARD_PROXY: see
+// deploy/board-proxy), else the board itself, whose demos it then can't read)
+const BASE: string = import.meta.env.DEV ? '/__board' : (import.meta.env.VITE_BOARD_PROXY || BOARD).replace(/\/$/, '');
 const SHOWN_RUNS = 200;
 
 export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {

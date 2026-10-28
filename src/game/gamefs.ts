@@ -159,7 +159,48 @@ export async function pickGameFolder(): Promise<GameFS | null> {
 	const picker = (window as unknown as {showDirectoryPicker?: (o?: object) => Promise<FileSystemDirectoryHandle>}).showDirectoryPicker;
 	if (!picker) throw new Error('This browser can\'t open folders. Use Chrome or Edge for the 3D view.');
 	const dir = await picker({id: 'portal2', mode: 'read'});
+	rememberFolder(dir);
 	return new DirectoryFS(dir);
+}
+
+// The picked folder remembered (the browser keeps its handle in IndexedDB),
+// so a later visit only asks to allow reading it again rather than picking
+// it: the browser grants that again on a click, or by itself where it was
+// allowed for good
+type Permission = {queryPermission(o: object): Promise<PermissionState>; requestPermission(o: object): Promise<PermissionState>};
+const FOLDER_DB = 'sar-viewer', FOLDER_STORE = 'folders', FOLDER_KEY = 'portal2';
+function folderStore(mode: IDBTransactionMode): Promise<IDBObjectStore> {
+	return new Promise((done, fail) => {
+		const open = indexedDB.open(FOLDER_DB, 1);
+		open.onupgradeneeded = () => open.result.createObjectStore(FOLDER_STORE);
+		open.onsuccess = () => done(open.result.transaction(FOLDER_STORE, mode).objectStore(FOLDER_STORE));
+		open.onerror = () => fail(open.error);
+	});
+}
+function rememberFolder(dir: FileSystemDirectoryHandle) {
+	folderStore('readwrite').then(s => s.put(dir, FOLDER_KEY)).catch(() => {});
+}
+// the folder picked before, and whether reading it is allowed now (else it
+// needs reuseGameFolder, on a click); null where there's none
+export async function rememberedGameFolder(): Promise<{dir: FileSystemDirectoryHandle; allowed: boolean} | null> {
+	try {
+		const store = await folderStore('readonly');
+		const dir = await new Promise<FileSystemDirectoryHandle | undefined>((done, fail) => {
+			const get = store.get(FOLDER_KEY);
+			get.onsuccess = () => done(get.result);
+			get.onerror = () => fail(get.error);
+		});
+		if (!dir) return null;
+		return {dir, allowed: await (dir as unknown as Permission).queryPermission({mode: 'read'}) === 'granted'};
+	} catch {
+		return null;  // (no IndexedDB, or a browser without folder handles)
+	}
+}
+// (called from a click: the browser asks the user to allow it)
+export async function reuseGameFolder(dir: FileSystemDirectoryHandle): Promise<GameFS | null> {
+	const allowed = await (dir as unknown as Permission).queryPermission({mode: 'read'}) === 'granted'
+		|| await (dir as unknown as Permission).requestPermission({mode: 'read'}) === 'granted';
+	return allowed ? new DirectoryFS(dir) : null;
 }
 
 export async function devGameFS(): Promise<GameFS | null> {
