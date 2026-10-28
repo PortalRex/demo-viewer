@@ -6,7 +6,7 @@ import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import type {GapLine} from './ui/charts.ts';
 import {tricks} from './player/tricks.ts';
-import {BoardBrowser} from './ui/board.ts';
+import {BoardBrowser, boardDemo} from './ui/board.ts';
 import type {DemoFile} from './ui/board.ts';
 import {Panels, InputDisplay, fmtTime} from './ui/panels.ts';
 import {View3D, QUALITY} from './ui/view3d.ts';
@@ -1547,22 +1547,30 @@ function showGaps(loc: Located) {
 // runs raced against the one shown
 const board = new BoardBrowser($('board-dialog') as HTMLDialogElement);
 board.canRace = chamber => !!pb && !!chamber && pb.run.segments.some(s => s.map === chamber.map);
+// (each run from it remembered by its board id, for links to it)
+const boardIds = new WeakMap<Run, number>();
+async function openFromBoard(first: DemoFile, partners: DemoFile[]) {
+	await open([first]);
+	if (!pb) return;
+	boardIds.set(pb.run, first.id);
+	for (const f of partners) await raceFromBoard(f);
+	changedRacers();
+}
+async function raceFromBoard(f: DemoFile) {
+	try {
+		const run = await loadRuns([f]);
+		boardIds.set(run, f.id);
+		addRacer(run);
+	} catch (err) {
+		showError(`Couldn't race ${f.name}: ${(err as Error).message}`);
+	}
+}
 board.onOpen = async (files: DemoFile[]) => {
 	const [first, ...partners] = files;
-	await open([first]);
-	for (const f of partners) addRacer(await loadRuns([f]));
-	changedRacers();
+	await openFromBoard(first, partners);
 };
 board.onRace = async (runs: DemoFile[][]) => {
-	for (const files of runs) {
-		for (const f of files) {
-			try {
-				addRacer(await loadRuns([f]));
-			} catch (err) {
-				showError(`Couldn't race ${f.name}: ${(err as Error).message}`);
-			}
-		}
-	}
+	for (const files of runs) for (const f of files) await raceFromBoard(f);
 	$('ghost').classList.toggle('on', racers.length > 0);
 	changedRacers();
 };
@@ -1767,6 +1775,10 @@ const openPath = (path: string) => fetch(path).then(r => (r.ok ? r.arrayBuffer()
 // one; otherwise its file name, for whoever has the file to drop in), the
 // tick, the view, and the 3D camera:
 //   #load=<url>&t=<tick>&view=3d&cam=free&pos=x,y,z&ang=pitch,yaw
+// A run from the leaderboard is named by its board id instead, with its
+// co-op partner's demo, the runs raced against it (theirs too) and which
+// the split screen shows, all downloaded again by whoever opens it:
+//   #board=<id>&with=<id>&race=<id>,<id>,...&split=<racer index|partner>&t=...
 interface Moment {
 	tick: number;
 	view: ViewMode;
@@ -1775,8 +1787,15 @@ interface Moment {
 }
 function momentLink(): string {
 	const q = new URLSearchParams();
-	if (openedFrom) q.set('load', openedFrom);
+	const fromBoard = pb && boardIds.get(pb.run);
+	if (fromBoard) q.set('board', String(fromBoard));
+	else if (openedFrom) q.set('load', openedFrom);
 	else if (pb) q.set('file', pb.run.fileName);
+	const ids = (players: RacerPlayer[]) => players.map(p => boardIds.get(p.pb.run)).filter((x): x is number => x !== undefined);
+	const partners = ids(shownPartners), raced = racers.flatMap(r => ids(r.players));
+	if (partners.length) q.set('with', partners.join(','));
+	if (raced.length) q.set('race', raced.join(','));
+	if (splitChoice) q.set('split', splitChoice === 'partner' ? 'partner' : String(racers.indexOf(splitChoice)));
 	q.set('t', String(Math.round(t)));
 	q.set('view', viewMode);
 	if (viewMode === '3d') {
@@ -1789,15 +1808,24 @@ function momentLink(): string {
 	// (the URL's own characters kept readable)
 	return `${location.origin}${location.pathname}#${q.toString().replace(/%2F/g, '/').replace(/%2C/g, ',').replace(/%3A/g, ':')}`;
 }
-function parseMoment(hash: string): {load: string | null; moment: Moment | null} {
+interface BoardLink {
+	id: number;
+	partners: number[];
+	raced: number[];
+	split: string | null;
+}
+function parseMoment(hash: string): {load: string | null; board: BoardLink | null; moment: Moment | null} {
 	const q = new URLSearchParams(hash.replace(/^#/, ''));
 	const nums = (k: string) => q.get(k)?.split(',').map(Number).filter(Number.isFinite);
 	const load = q.get('load');
-	if (!q.has('t')) return {load, moment: null};
+	const id = Number(q.get('board'));
+	const board = id > 0 ? {id, partners: nums('with') ?? [], raced: nums('race') ?? [], split: q.get('split')} : null;
+	if (!q.has('t')) return {load, board, moment: null};
 	const view = q.get('view');
 	const cam = q.get('cam');
 	return {
 		load,
+		board,
 		moment: {
 			tick: Number(q.get('t')) || 0,
 			view: view === '3d' || view === 'side' ? view : 'top',
@@ -1834,10 +1862,32 @@ $('share').onclick = async () => {
 	}
 	setTimeout(() => (b.textContent = 'Link'), 1500);
 };
+// a leaderboard link's runs downloaded (all at once), the shown one opened
+// and the rest raced, then its split screen and moment shown
+async function openBoardLink(link: BoardLink, moment: Moment | null) {
+	$('drop-file').textContent = 'Downloading the runs from the leaderboard…';
+	try {
+		const [first, ...rest] = await Promise.all([link.id, ...link.partners, ...link.raced].map(boardDemo));
+		await openFromBoard(first, rest.slice(0, link.partners.length));
+		if (!pb) return;
+		for (const f of rest.slice(link.partners.length)) await raceFromBoard(f);
+		$('ghost').classList.toggle('on', racers.length > 0);
+		if (link.split) splitWith(link.split === 'partner' ? 'partner' : racers[Number(link.split)] ?? null);
+		changedRacers();
+		if (moment) showMoment(moment);
+	} catch (e) {
+		showError(`Couldn't download the link's runs from the leaderboard: ${(e as Error).message}`);
+	} finally {
+		$('drop-file').textContent = '';
+	}
+}
 {
-	const {load, moment} = parseMoment(location.hash);
-	pendingMoment = moment;
-	if (load) openPath(load);
-	else if (moment?.file) $('drop-file').textContent = `This link shows ${moment.file} at tick ${moment.tick}: drop that file here to watch it.`;
+	const {load, board: link, moment} = parseMoment(location.hash);
+	if (link) openBoardLink(link, moment);
+	else {
+		pendingMoment = moment;
+		if (load) openPath(load);
+		else if (moment?.file) $('drop-file').textContent = `This link shows ${moment.file} at tick ${moment.tick}: drop that file here to watch it.`;
+	}
 }
 if (import.meta.env.DEV) (window as unknown as {openFixture: typeof openPath}).openFixture = openPath;

@@ -29,6 +29,7 @@ export interface BoardRun {
 export interface DemoFile {
 	bytes: Uint8Array;
 	name: string;
+	id: number;  // the board's id for it (its changelog entry's)
 }
 
 interface ScoreJson {
@@ -72,7 +73,7 @@ export function boardDemo(changelogId: number): Promise<DemoFile> {
 			const res = await fetch(`${BASE}/getDemo?id=${changelogId}`);
 			if (!res.ok) throw new Error(`the board answered ${res.status}`);
 			const name = res.headers.get('X-File-Name') || decodeURIComponent(new URL(res.url).pathname.split('/').pop() ?? '') || `${changelogId}.dem`;
-			return {bytes: new Uint8Array(await res.arrayBuffer()), name};
+			return {bytes: new Uint8Array(await res.arrayBuffer()), name, id: changelogId};
 		})();
 		demos.set(changelogId, p);
 		p.catch(() => demos.delete(changelogId));
