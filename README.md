@@ -138,7 +138,10 @@ computer.
   colour and one row. Demos from before the challenge-mode finish was recorded
   are lined up by where their player reaches the finish. Click a run's row to
   show or hide it, Ctrl-click it to show only that one (again for all), or use
-  **All**, **None** and **Paths** at the top of the list.
+  **All**, **None** and **Paths** at the top of the list. **Watch** on a run's
+  row swaps it with the one shown, at the same moment of the race: you see it
+  through its player's eyes (its portals, objects and partner view too), and
+  the run you were watching races as a ghost in its place.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the

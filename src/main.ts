@@ -466,19 +466,8 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 	try {
 		const run = await loadRuns(files);
 		if (!run.segments.some(s => s.views.length)) throw new Error('This file has no gameplay to show.');
-		pb = new Playback(run);
-		$('drop').hidden = true;
-		$('viewer').hidden = false;
-		$('close-run').hidden = false;
-		panels.setRun(run, i => seekTo(pb!.tracks[i].start));
-		timeline.pb = pb;
-		currentSeg = -1;
-		segIn3d = segLoading = -1;
-		entityCache.clear();
-		t = 0;
-		setPlaying(false);
-		document.title = `${run.fileName} · SAR Run Viewer`;
-		requestAnimationFrame(() => render());
+		shownPartners = [];
+		showRun(new Playback(run));
 		afterOpen();
 		// (and now, where frames don't come, a hidden tab: the first render
 		// starts the 3D view loading in the background)
@@ -486,6 +475,23 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 	} catch (e) {
 		showError(`Couldn't open ${name}: ${(e as Error).message}`);
 	}
+}
+// a run made the one shown (opened, or a raced one swapped in), from its start
+function showRun(playback: Playback) {
+	const run = playback.run;
+	pb = playback;
+	$('drop').hidden = true;
+	$('viewer').hidden = false;
+	$('close-run').hidden = false;
+	panels.setRun(run, i => seekTo(pb!.tracks[i].start));
+	timeline.pb = pb;
+	currentSeg = -1;
+	segIn3d = segLoading = -1;
+	entityCache.clear();
+	t = 0;
+	setPlaying(false);
+	document.title = `${run.fileName} · SAR Run Viewer`;
+	requestAnimationFrame(() => render());
 }
 
 // back to the start page: the run, its raced runs and its map let go
@@ -499,6 +505,7 @@ function closeRun() {
 	entityCache.clear();
 	for (const r of racers) r.row.remove();
 	racers = [];
+	shownPartners = [];
 	view3d.ghosts = [];
 	pathView.racers = [];
 	$('ghost-hud').hidden = true;
@@ -913,6 +920,10 @@ interface Racer {
 }
 const RACER_COLORS = ['#ff8c26', '#4cb8ff', '#d45cff', '#3fd6c8', '#ffd84a', '#ff5c7a', '#9be34a', '#ff9ad5'];
 let racers: Racer[] = [];
+// the demos of the shown run's other players (its co-op partner's, as the
+// board names them): not raced, as the shown demo has them, but kept for
+// when another run is watched and this one races again
+let shownPartners: RacerPlayer[] = [];
 // (the first of these not taken; then hues spread around the wheel, each
 // as far from the ones before it as it can be)
 function racerColor(): string {
@@ -1124,9 +1135,17 @@ function racerRow(r: Racer): HTMLElement {
 		$('ghost').classList.toggle('on', racers.length > 0);
 		changedRacers();
 	};
+	const watch = document.createElement('button');
+	watch.textContent = 'Watch';
+	watch.title = "Watch from this run's player: it becomes the run shown, at the same moment, and the one shown now races as a ghost in its place";
+	watch.onclick = e => {
+		e.stopPropagation();
+		watchRacer(r);
+	};
 	const buttons = document.createElement('div');
 	buttons.className = 'ghost-buttons';
 	buttons.append(
+		watch,
 		toggle('Ghost', 'Show its players', () => (r.shown = !r.shown)),
 		toggle('Path', 'Draw its path through the map', () => (r.path = !r.path)),
 		remove);
@@ -1171,6 +1190,27 @@ $('ghost-paths').onclick = () => {
 	for (const r of racers) r.path = on && r.shown;
 	changedRacers();
 };
+// a raced run swapped with the one shown: its first player's demo shown
+// from the same moment of the race (its co-op partner's kept aside, the
+// shown demo having them), and the one shown racing in its row, in its
+// colour, with its own partner's demo again
+function watchRacer(r: Racer) {
+	if (!pb || exporting) return;
+	const loc = pb.locate(t);
+	const [p, ...partners] = r.players;
+	const track = racerTrack(p, loc);
+	const tick = track ? racerTick(loc, track) : null;
+	const was = playing;
+	const old = pb;
+	r.players = [{pb: old, name: old.run.player || old.run.fileName.replace(/\.[^.]+$/, '')}, ...shownPartners];
+	shownPartners = partners;
+	r.key = boardRun(old.run.fileName) ? old.run.fileName : null;
+	nameRacerRow(r);
+	showRun(p.pb);
+	if (track && tick !== null) seekTo(Math.min(p.pb.total, Math.max(0, p.pb.globalTick(p.pb.tracks.indexOf(track), tick))));
+	setPlaying(was);
+	changedRacers();
+}
 function nameRacerRow(r: Racer) {
 	r.row.querySelector('.ghost-name')!.textContent = racerName(r);
 	r.row.title = `${racerName(r)} (${r.players.map(p => p.pb.run.fileName).join(', ')}): how far ahead (−) or behind (+) this run is, where it was at this spot`;
@@ -1180,9 +1220,12 @@ function nameRacerRow(r: Racer) {
 function addRacer(run: Run) {
 	const maps = new Set(pb?.run.segments.map(s => s.map));
 	if (!run.segments.some(s => maps.has(s.map) && s.views.length)) throw new Error('it has none of the maps this run plays.');
-	if (pb && sameBoardRun(run.fileName, pb.run.fileName)) return;
 	// (named after its player, as the demo records them)
 	const player: RacerPlayer = {pb: new Playback(run), name: run.player || run.fileName.replace(/\.[^.]+$/, '')};
+	if (pb && sameBoardRun(run.fileName, pb.run.fileName)) {
+		shownPartners.push(player);
+		return;
+	}
 	const team = racers.find(r => sameBoardRun(r.key, run.fileName));
 	if (team) {
 		team.players.push(player);
