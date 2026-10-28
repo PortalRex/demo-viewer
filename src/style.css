@@ -162,7 +162,7 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .drop-file:empty { display: none; }
 /* Guess the time: its panel over the view, and everything that would tell
    the run's time, or whose it is, hidden while it's played */
-.quiz { position: fixed; z-index: 20; left: 50%; top: 60px; transform: translateX(-50%); width: min(560px, calc(100% - 24px)); background: rgba(16, 19, 25, 0.94); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
+.quiz-panel { position: fixed; z-index: 20; left: 50%; top: 100px; transform: translateX(-50%); width: min(560px, calc(100% - 24px)); background: rgba(16, 19, 25, 0.94); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
 .quiz-head { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
 .quiz-head b { color: var(--text); font-size: 15px; }
 .quiz-head button { margin-left: auto; }
