@@ -409,6 +409,9 @@ function rigidTree(rm: RayMesh, bone: number): {tree: MeshBVH; tris: Uint32Array
 
 export function skinnedGeometry(g: ModelGroup, base: THREE.BufferGeometry): THREE.BufferGeometry {
 	const geo = base.clone();
+	// (the object's own copy: freed with it, though the model cache's isn't)
+	const {shared: _, ...own} = base.userData;
+	geo.userData = own;
 	geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(g.skinIndex, 4));
 	geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(g.skinWeight, 4));
 	return geo;

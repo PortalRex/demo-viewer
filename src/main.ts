@@ -255,7 +255,9 @@ function timed<T>(p: Promise<T>, name: string, start: number): Promise<T> {
 if (import.meta.env.DEV) (window as unknown as {timings: typeof timings}).timings = timings;
 // (models parse in workers, off the page's thread)
 installModelWorkers();
-const entityCache = new Map<number, Promise<EntityTimeline | null>>();
+// (by segment: kept while its run is open or raced, so watching a raced run
+// and back again doesn't decode either again)
+const entityCache = new Map<Segment, Promise<EntityTimeline | null>>();
 const mapCache = new Map<string, Promise<BspMap>>();
 let gameFS: GameFS | null = null;
 let gameFiles: GameFiles | null = null;
@@ -288,9 +290,9 @@ let cancelBackgroundLoad: (() => void) | undefined;
 // second), once a segment
 function entitiesFor(index: number): Promise<EntityTimeline | null> {
 	if (!pb) return Promise.resolve(null);
-	let p = entityCache.get(index);
+	const seg = pb.run.segments[index];
+	let p = entityCache.get(seg);
 	if (!p) {
-		const seg = pb.run.segments[index];
 		const tables = seg.dataTables ?? pb.run.dataTables;
 		p = !tables ? Promise.resolve(null) : new Promise<EntityTimeline | null>(done => {
 			const t = performance.now();
@@ -315,7 +317,7 @@ function entitiesFor(index: number): Promise<EntityTimeline | null> {
 				return false;
 			}, true);
 		});
-		entityCache.set(index, p);
+		entityCache.set(seg, p);
 	}
 	return p;
 }
@@ -429,7 +431,8 @@ async function load3dMap() {
 		if (token !== mapToken) return;
 		files.mapPak = mapPaks.get(seg.map) ?? null;
 		let t = performance.now();
-		view3d.setMap(bsp, files, mats);
+		// (the same map kept as it is: another segment or run on it)
+		if (!view3d.holdsMap(bsp, files)) view3d.setMap(bsp, files, mats);
 		timing('setMap', t);
 		const ents = await entitiesFor(currentSeg);
 		if (token !== mapToken) return;
@@ -467,6 +470,7 @@ async function open(files: {bytes: Uint8Array; name: string}[]) {
 		const run = await loadRuns(files);
 		if (!run.segments.some(s => s.views.length)) throw new Error('This file has no gameplay to show.');
 		shownPartners = [];
+		entityCache.clear();
 		showRun(new Playback(run));
 		afterOpen();
 		// (and now, where frames don't come, a hidden tab: the first render
@@ -487,7 +491,6 @@ function showRun(playback: Playback) {
 	timeline.pb = pb;
 	currentSeg = -1;
 	segIn3d = segLoading = -1;
-	entityCache.clear();
 	t = 0;
 	setPlaying(false);
 	document.title = `${run.fileName} · SAR Run Viewer`;
@@ -721,7 +724,10 @@ function render() {
 		pathView.setTrack(loc.track);
 		speedGraph.setTrack(loc.track);
 		panels.setSegment(loc.index, seg);
-		view3d.setMap(null);
+		// (the scene kept where the next segment's on the same map: only
+		// the last one's entities let go)
+		if (view3d.mapName === seg.map) view3d.dropSegment();
+		else view3d.setMap(null);
 		segIn3d = segLoading = -1;
 		// (out of the 3D view, once the segment stays: not for each one
 		// scrubbed past)

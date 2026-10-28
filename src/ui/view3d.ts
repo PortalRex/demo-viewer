@@ -255,6 +255,8 @@ function makeGhost(body: THREE.BufferGeometry): THREE.Group {
 function disposeGhostRobot(robot: THREE.Object3D) {
 	robot.traverse(o => {
 		if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose();
+		// (and its bones' texture)
+		(o as THREE.SkinnedMesh).skeleton?.dispose();
 	});
 	(robot.userData.material as THREE.Material | undefined)?.dispose();
 }
@@ -1422,6 +1424,23 @@ export class View3D {
 			this.compileSoon();
 			this.loaded();
 		});
+	}
+
+	// whether the view's scene is already this map's (from these files)
+	holdsMap(bsp: BspMap, files: GameFiles): boolean {
+		return this.bsp === bsp && this.files === files && !!this.library;
+	}
+
+	// the map the scene is of (null: none)
+	get mapName(): string | null {
+		return this.bsp?.name ?? null;
+	}
+
+	// the shown segment's entities let go, the map's scene kept (the next
+	// segment's on it too: setSegment brings its own)
+	dropSegment() {
+		this.entities = null;
+		this.clearEntities();
 	}
 
 	setMap(bsp: BspMap | null, files: GameFiles | null = null, materials: Materials | null = null) {
@@ -6555,6 +6574,8 @@ function disposeOwn(root: THREE.Object3D) {
 		const mesh = o as THREE.Mesh;
 		if (!mesh.isMesh && !(o as THREE.Line).isLine) return;
 		if (!mesh.geometry.userData.shared) mesh.geometry.dispose();
+		// (an animated model's bones: their texture is its own)
+		(o as THREE.SkinnedMesh).skeleton?.dispose();
 		for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
 			// its own lit copies and effect materials (with the texture copies
 			// they made); the library's shared ones stay
