@@ -63,17 +63,45 @@ export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {
 	return runs;
 }
 
-// a run's demos, once each (kept for the page's life: racing the same
-// runs again doesn't fetch them again)
+// A run's demos, once each: kept for the page's life, and in the browser's
+// cache storage (the most recent few hundred) so racing the same runs again
+// another day doesn't download them again. A demo on the board doesn't
+// change once submitted
 const demos = new Map<number, Promise<DemoFile>>();
-export function boardDemo(changelogId: number): Promise<DemoFile> {
+const CACHE = 'board-demos';
+const CACHED_DEMOS = 300;
+const cacheKey = (id: number) => `/board-demo/${id}`;
+async function cached(id: number): Promise<DemoFile | null> {
+	try {
+		const res = await (await caches.open(CACHE)).match(cacheKey(id));
+		if (!res) return null;
+		return {bytes: new Uint8Array(await res.arrayBuffer()), name: res.headers.get('X-File-Name') ?? `${id}.dem`, id};
+	} catch {
+		return null;  // (no cache storage: an insecure page, or storage blocked)
+	}
+}
+async function keep(d: DemoFile) {
+	try {
+		const cache = await caches.open(CACHE);
+		await cache.put(cacheKey(d.id), new Response(d.bytes, {headers: {'X-File-Name': d.name}}));
+		// (the oldest let go past the limit: the cache lists them in the order put)
+		const keys = await cache.keys();
+		for (const k of keys.slice(0, Math.max(0, keys.length - CACHED_DEMOS))) await cache.delete(k);
+	} catch {}
+}
+// (store: false for one only looked at, kept if it turns out to be wanted)
+export function boardDemo(changelogId: number, store = true): Promise<DemoFile> {
 	let p = demos.get(changelogId);
 	if (!p) {
 		p = (async () => {
+			const kept = await cached(changelogId);
+			if (kept) return kept;
 			const res = await fetch(`${BASE}/getDemo?id=${changelogId}`);
 			if (!res.ok) throw new Error(`the board answered ${res.status}`);
 			const name = res.headers.get('X-File-Name') || decodeURIComponent(new URL(res.url).pathname.split('/').pop() ?? '') || `${changelogId}.dem`;
-			return {bytes: new Uint8Array(await res.arrayBuffer()), name, id: changelogId};
+			const demo = {bytes: new Uint8Array(await res.arrayBuffer()), name, id: changelogId};
+			if (store) keep(demo);
+			return demo;
 		})();
 		demos.set(changelogId, p);
 		p.catch(() => demos.delete(changelogId));
@@ -89,9 +117,12 @@ async function partnerDemo(own: DemoFile, changelogId: number): Promise<DemoFile
 	if (!run) return null;
 	for (const id of [changelogId + 1, changelogId - 1]) {
 		try {
-			const d = await boardDemo(id);
+			const d = await boardDemo(id, false);
 			const other = /^(.+?_\d+)_(\d{17})_\d+\.dem$/i.exec(d.name);
-			if (other && other[1] === run[1] && other[2] !== run[2]) return d;
+			if (other && other[1] === run[1] && other[2] !== run[2]) {
+				keep(d);
+				return d;
+			}
 			demos.delete(id);  // (someone else's run: not kept)
 		} catch {}
 	}

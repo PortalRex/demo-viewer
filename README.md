@@ -157,8 +157,11 @@ computer.
   race the top 5, 10 or 20 (or the ones ticked) against the run shown, their
   demos downloaded straight into the page. A co-op run comes with both
   players' demos, the partner's found beside it where the board lists them
-  at another run. The dev server passes the board's demos through, as the
-  board doesn't serve them to other sites.
+  at another run. Downloaded demos are kept in the browser (the latest 300),
+  so racing them again is instant, and **Link** links the run, its partner,
+  the raced runs and the split screen by their board ids. The dev server
+  passes the board's demos through, as the board doesn't serve them to other
+  sites.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the

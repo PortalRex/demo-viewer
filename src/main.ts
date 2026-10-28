@@ -1867,7 +1867,7 @@ $('share').onclick = async () => {
 async function openBoardLink(link: BoardLink, moment: Moment | null) {
 	$('drop-file').textContent = 'Downloading the runs from the leaderboard…';
 	try {
-		const [first, ...rest] = await Promise.all([link.id, ...link.partners, ...link.raced].map(boardDemo));
+		const [first, ...rest] = await Promise.all([link.id, ...link.partners, ...link.raced].map(id => boardDemo(id)));
 		await openFromBoard(first, rest.slice(0, link.partners.length));
 		if (!pb) return;
 		for (const f of rest.slice(link.partners.length)) await raceFromBoard(f);
