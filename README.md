@@ -141,7 +141,10 @@ computer.
   **All**, **None** and **Paths** at the top of the list. **Watch** on a run's
   row swaps it with the one shown, at the same moment of the race: you see it
   through its player's eyes (its portals, objects and partner view too), and
-  the run you were watching races as a ghost in its place.
+  the run you were watching races as a ghost in its place. **Split** on a
+  row plays that run's own demo beside this one, split screen, in step with
+  it: each half has its own portals, objects and timer as its demo recorded
+  them.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the
@@ -217,6 +220,7 @@ These toggles in the 3D view are remembered per browser:
 | **Titles** | The game's on-screen text, such as chapter titles. |
 | **Names** | Each player's name over their head (raced runs' in their colour), drawn into exported videos too. |
 | **Partner** | The co-op partner's view in the corner. |
+| **Split** | Split screen in Eyes view: the co-op partner beside this player, or a raced run (picked with its row's **Split**), each half labelled with its player. Where the partner's own demo is loaded too (pick it with **Ghost**), the right half plays it: their own view, lined up by where both demos have the partner. Without it, the partner is seen through this demo's network data. Exports include both halves. |
 | **Bright** | Brightens dark maps the way autorender does. |
 | **Quality** | High, Medium or Low: resolution, antialiasing, bloom, shadow detail, and in co-op how often the partner's view is redrawn (every frame, every 2nd, every 3rd). |
 

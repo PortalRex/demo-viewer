@@ -52,6 +52,7 @@
 					<button id="titles-toggle" class="toggle on" hidden title="Show the game's on-screen text (chapter titles)">Titles</button>
 					<button id="names-toggle" class="toggle on" hidden title="Show each player's name over their head (raced runs' in their colour)">Names</button>
 					<button id="pip-toggle" class="toggle on" hidden title="Show the co-op partner's view in the corner, as autorender's co-op renders do">Partner</button>
+					<button id="split-toggle" class="toggle" hidden title="Split screen (Eyes view): the co-op partner's view, or a raced run's player's (pick one with its row's Split), beside this one">Split</button>
 					<button id="bright-toggle" class="toggle" hidden title="Brighten dark maps as autorender does (mat_ambient_light 0.05; on by default where autorender uses it)">Bright</button>
 					<button id="ghost" class="toggle" title="Race other runs of this map (as many as you like): each one's player shown as a ghost in its own colour, with how far ahead or behind this one is; each can be hidden, have its path drawn or be taken off">Ghost</button>
 					<input id="ghost-input" type="file" accept=".sarp,.dem" multiple hidden>
@@ -78,6 +79,12 @@
 						<div id="ghost-list"></div>
 					</div>
 					<div id="view3d" class="view3d" hidden>
+						<div id="view3d-side" class="view3d-side" hidden>
+							<div id="cm-hud-side" class="cm-hud" hidden title="The challenge mode HUD, from this demo's own stats">
+								<div><span>Portals:</span><b id="cm-portals-side"></b></div>
+								<div><span>Time:</span><b id="cm-time-side"></b></div>
+							</div>
+						</div>
 						<div id="view3d-msg" class="view3d-msg" hidden></div>
 						<canvas id="hud-text" class="hud-text"></canvas>
 						<canvas id="name-tags" class="hud-text"></canvas>

@@ -289,11 +289,12 @@ let cancelBackgroundLoad: (() => void) | undefined;
 // records between frames: all at once stopped the page for a fifth of a
 // second), once a segment
 function entitiesFor(index: number): Promise<EntityTimeline | null> {
-	if (!pb) return Promise.resolve(null);
-	const seg = pb.run.segments[index];
+	return pb ? entitiesOf(pb.run.segments[index], pb.run) : Promise.resolve(null);
+}
+function entitiesOf(seg: Segment, run: Run): Promise<EntityTimeline | null> {
 	let p = entityCache.get(seg);
 	if (!p) {
-		const tables = seg.dataTables ?? pb.run.dataTables;
+		const tables = seg.dataTables ?? run.dataTables;
 		p = !tables ? Promise.resolve(null) : new Promise<EntityTimeline | null>(done => {
 			const t = performance.now();
 			let steps: Generator<void, EntityTimeline>;
@@ -510,6 +511,11 @@ function closeRun() {
 	racers = [];
 	shownPartners = [];
 	view3d.ghosts = [];
+	splitChoice = null;
+	view3d.split = false;
+	view3d.halfWidth = false;
+	sideView?.setMap(null);
+	sideSeg = sideLoading = null;
 	pathView.racers = [];
 	$('ghost-hud').hidden = true;
 	$('ghost').classList.remove('on');
@@ -572,6 +578,137 @@ $('pip-toggle').onclick = () => {
 	view3d.pipEnabled = pipShown;
 	render();
 };
+// Split screen: the co-op partner, or a raced run, beside this one (in Eyes
+// view: turning it on switches to it). A raced run, or the partner where
+// their own demo's loaded too, plays its demo in a second 3D view over the
+// right half, in step with this one: its portals, cubes and partner as it
+// recorded them. A partner without a demo of their own is seen through
+// this one's (see View3D.split)
+let splitChoice: 'partner' | Racer | null = null;
+function splitWith(choice: 'partner' | Racer | null) {
+	splitChoice = choice;
+	if (choice && view3d.mode !== 'eyes') ($('cam-mode').querySelector('[data-cam="eyes"]') as HTMLButtonElement).click();
+	changedRacers();
+}
+function showSplitToggle() {
+	const coop = view3d.players().length > 1;
+	$('split-toggle').hidden = viewMode !== '3d' || (!coop && !racers.length);
+	$('split-toggle').classList.toggle('on', splitChoice !== null);
+}
+$('split-toggle').onclick = () => {
+	if (splitChoice) return splitWith(null);
+	const coop = view3d.players().length > 1;
+	const racer = racers.find(r => r.shown) ?? racers[0];
+	splitWith(coop || !racer ? 'partner' : racer);
+};
+// (made the first time it's wanted: a second WebGL context and its own
+// copies of the map and models)
+let sideView: View3D | null = null;
+let sideSeg: Segment | null = null;      // the segment it holds
+let sideLoading: Segment | null = null;  // the one a load is under way for
+let sideTick = 0;                        // the tick it's drawn at
+function ensureSideView(): View3D {
+	if (sideView) return sideView;
+	const v = sideView = new View3D($('view3d-side'));
+	v.setMode('eyes');
+	v.pipEnabled = false;
+	v.setQuality(QUALITY[quality]);
+	v.setPathShown(pathShown);
+	// (its loads redraw as the first view's do, and count for an export's settling)
+	v.onLoaded = () => view3d.onLoaded();
+	if (import.meta.env.DEV) (window as unknown as {sideView: View3D}).sideView = v;  // for debugging in the console
+	return v;
+}
+// the split screen's demo at this moment: its player's segment on this map
+function splitDemo(loc: Located): {player: RacerPlayer; track: SegmentTrack} | null {
+	const players = splitChoice === 'partner' ? shownPartners : splitChoice?.players ?? [];
+	for (const player of players) {
+		const track = racerTrack(player, loc);
+		if (track) return {player, track};
+	}
+	return null;
+}
+// Before the first view's drawn: which way it's split. Returns the second
+// demo's drawing, for after it
+function prepareSplit(loc: Located): (() => void) | null {
+	const eyes = viewMode === '3d' && view3d.mode === 'eyes';
+	const demo = eyes ? splitDemo(loc) : null;
+	view3d.split = eyes && splitChoice === 'partner' && !demo;
+	view3d.halfWidth = !!demo;
+	$('view3d-side').hidden = !demo;
+	if (!demo) {
+		// (its map and models let go when it's done with)
+		if (!splitChoice && sideView && (sideSeg || sideLoading)) {
+			sideSeg = sideLoading = null;
+			sideView.setMap(null);
+		}
+		return null;
+	}
+	const side = ensureSideView();
+	const {player, track} = demo;
+	if (sideSeg !== track.seg) loadSide(player, track);
+	if (sideSeg !== track.seg) return null;
+	// (held at its end once it's finished, as its own finish)
+	const shift = splitChoice === 'partner' ? partnerShift(loc, track) : 0;
+	const tick = Math.min(track.seg.lastTick, Math.max(track.seg.firstTick, racerTick(loc, track) + shift));
+	side.extraAmbient = view3d.extraAmbient;
+	sideTick = tick;
+	return () => side.update(viewAt(track, tick), tick);
+}
+// The co-op partner's demo is of the same moments as this one, but its
+// finish (which lines the two up) is recorded when the news reaches the
+// partner's game, a network delay late. So it's lined up by where this
+// demo has the partner instead: the shift (in ticks) that best puts the
+// partner's own view where this one's network data has them. Worked out
+// once a segment, from this demo's entities (in the 3D view)
+const partnerShifts = new WeakMap<SegmentTrack, number>();
+function partnerShift(loc: Located, track: SegmentTrack): number {
+	const known = partnerShifts.get(track);
+	if (known !== undefined) return known;
+	if (segIn3d !== loc.index) return 0;
+	const seg = loc.track.seg;
+	const samples: {at: number[]; base: number}[] = [];
+	for (let tick = seg.firstTick + 60; tick < seg.lastTick - 60; tick += 15) {
+		const at = view3d.otherPlayers(tick, false)[0];
+		if (at) samples.push({at, base: racerTick({...loc, tick}, track)});
+	}
+	if (samples.length < 10) return 0;  // (the entities not in yet: lined up by the finish till they are)
+	const MAX_SHIFT = 60;
+	let best = 0, bestError = Infinity;
+	for (let shift = -MAX_SHIFT; shift <= MAX_SHIFT; shift++) {
+		let error = 0;
+		for (const s of samples) {
+			const v = viewAt(track, s.base + shift);
+			error += v ? Math.min(256, Math.hypot(v.origin[0] - s.at[0], v.origin[1] - s.at[1], v.origin[2] - s.at[2])) : 256;
+		}
+		if (error < bestError) {
+			bestError = error;
+			best = shift;
+		}
+	}
+	partnerShifts.set(track, best);
+	return best;
+}
+async function loadSide(player: RacerPlayer, track: SegmentTrack) {
+	const seg = track.seg;
+	if (sideLoading === seg || !gameFS || !gameFiles || !materials) return;
+	const side = ensureSideView();
+	sideLoading = seg;
+	try {
+		const [bsp, ents] = await Promise.all([bspFor(seg.map, gameFS, gameFiles), entitiesOf(seg, player.pb.run)]);
+		if (sideLoading !== seg) return;
+		// (the map kept where it's the same one: another segment on it)
+		if (side.mapName === seg.map) side.dropSegment();
+		else side.setMap(bsp, gameFiles.withPak(mapPaks.get(seg.map) ?? null), materials);
+		side.setSegment(track, ents);
+		sideSeg = seg;
+	} catch (e) {
+		console.warn(`couldn't load ${player.name}'s ${seg.map} for the split screen`, e);
+	} finally {
+		if (sideLoading === seg) sideLoading = null;
+	}
+	if (!playing) render();
+}
 let hudText: HudText | null = null;
 // players' names over their heads (remembered per browser)
 let namesShown = true;
@@ -634,7 +771,36 @@ function showNameTags() {
 	const g = c.getContext('2d')!;
 	g.setTransform(dpr, 0, 0, dpr, 0, 0);
 	g.clearRect(0, 0, w, h);
-	if (is3d && namesShown) drawNameTags(g, view3d.nameTags(), w, h, 1);
+	if (is3d && namesShown) drawNameTags(g, allNameTags(), w, h, 1);
+	const labels = is3d ? splitLabels() : null;
+	if (labels) drawSplitLabels(g, labels, w, h, 1);
+}
+// (the second demo's player named as its demo names them)
+function splitLabels(): [string, string] | null {
+	if (!view3d.halfWidth) return view3d.splitLabels();
+	const demo = pb && splitDemo(pb.locate(t));
+	return demo ? [view3d.viewName() ?? pb!.run.player, demo.player.name] : null;
+}
+// the name tags of both halves (the second demo's in the right)
+function allNameTags(): NameTag[] {
+	const tags = view3d.nameTags();
+	if (!view3d.halfWidth || !sideView || $('view3d-side').hidden) return tags;
+	return [...tags, ...sideView.nameTags().filter(t => t.x >= 0 && t.x <= 1).map(t => ({...t, x: 0.5 + t.x / 2}))];
+}
+// split screen: who each half shows, in its top left corner
+function drawSplitLabels(g: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, labels: [string, string], w: number, h: number, s: number) {
+	g.font = `700 ${13 * s}px Arial, Helvetica, sans-serif`;
+	g.textAlign = 'left';
+	g.textBaseline = 'middle';
+	labels.forEach((label, i) => {
+		const x = i * w / 2 + 10 * s, y = 10 * s, bh = 22 * s;
+		g.fillStyle = 'rgba(0, 0, 0, 0.55)';
+		g.beginPath();
+		g.roundRect(x, y, g.measureText(label).width + 16 * s, bh, 4 * s);
+		g.fill();
+		g.fillStyle = '#fff';
+		g.fillText(label, x + 8 * s, y + bh / 2 + 0.5 * s);
+	});
 }
 
 view3d.onDrawn = showNameTags;
@@ -676,14 +842,24 @@ $('bright-toggle').onclick = () => {
 	render();
 };
 
-function showCmHud(stats: {portals: number; seconds: number} | null) {
-	$('cm-toggle').hidden = !stats;
-	$('cm-hud').hidden = !stats || !cmShown;
-	if (!stats || !cmShown) return;
-	const cs = Math.floor(stats.seconds * 100 + 1e-6);
-	const pad = (n: number) => String(n).padStart(2, '0');
-	$('cm-portals').textContent = String(stats.portals);
-	$('cm-time').textContent = `${pad(Math.floor(cs / 6000))}:${pad(Math.floor(cs / 100) % 60)}.${pad(cs % 100)}`;
+// (and the split screen's second demo's, in its half)
+function showCmHud(stats: {portals: number; seconds: number} | null, sideStats: {portals: number; seconds: number} | null) {
+	$('cm-toggle').hidden = !stats && !sideStats;
+	$('view3d').classList.toggle('halved', view3d.halfWidth);
+	const show = (stats: {portals: number; seconds: number} | null, suffix: string) => {
+		$('cm-hud' + suffix).hidden = !stats || !cmShown;
+		if (!stats || !cmShown) return;
+		const cs = Math.floor(stats.seconds * 100 + 1e-6);
+		const pad = (n: number) => String(n).padStart(2, '0');
+		$('cm-portals' + suffix).textContent = String(stats.portals);
+		$('cm-time' + suffix).textContent = `${pad(Math.floor(cs / 6000))}:${pad(Math.floor(cs / 100) % 60)}.${pad(cs % 100)}`;
+	};
+	show(stats, '');
+	show(sideStats, '-side');
+}
+// the second demo's challenge mode HUD at the tick it's drawn at
+function sideCmStats(): {portals: number; seconds: number} | null {
+	return sideView && view3d.halfWidth && sideSeg && view3d.mode === 'eyes' ? sideView.cmStats(sideTick) : null;
 }
 
 function seekTo(tick: number) {
@@ -739,9 +915,11 @@ function render() {
 	const cmd = cmdAt(loc.track, loc.tick);
 	showBright(viewMode === '3d' ? seg.map : null);
 	showRacers(loc, view);
+	const drawSide = prepareSplit(loc);
 	if (viewMode === '3d') view3d.update(view, loc.tick);
 	else pathView.draw(view, loc.tick, seg.sar);
-	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null);
+	drawSide?.();
+	showCmHud(viewMode === '3d' && view3d.mode === 'eyes' ? view3d.cmStats(loc.tick) : null, viewMode === '3d' ? sideCmStats() : null);
 	showHudText(loc.tick);
 	if (viewMode !== '3d') showNameTags();
 	timeline.draw(t, loc.index);
@@ -786,6 +964,7 @@ try {
 const showPath = () => {
 	$('path-line').classList.toggle('on', pathShown);
 	view3d.setPathShown(pathShown);
+	sideView?.setPathShown(pathShown);
 };
 showPath();
 $('path-line').onclick = () => {
@@ -810,6 +989,7 @@ $<HTMLSelectElement>('quality').onchange = e => {
 		localStorage.setItem('quality', quality);
 	} catch {}
 	view3d.setQuality(QUALITY[quality]);
+	sideView?.setQuality(QUALITY[quality]);
 };
 $('follow').onclick = () => {
 	pathView.follow = !pathView.follow;
@@ -829,6 +1009,7 @@ $('view-mode').onclick = e => {
 	$('view3d').hidden = !is3d;
 	$('cam-mode').hidden = !is3d;
 	if (!is3d) $('view-as').hidden = $('pip-toggle').hidden = true;
+	showSplitToggle();
 	$('follow').hidden = is3d;
 	$('fit').hidden = is3d;
 	$('path-line').hidden = !is3d;
@@ -845,6 +1026,7 @@ function showViewAs() {
 	const box = $('view-as');
 	const players = view3d.players();
 	box.hidden = $('pip-toggle').hidden = players.length < 2;
+	showSplitToggle();
 	box.innerHTML = '';
 	for (const p of players) {
 		const b = document.createElement('button');
@@ -999,7 +1181,7 @@ function finishNear(track: SegmentTrack, own: SegmentTrack, finish: {tick: numbe
 // of a co-op run starts recording at its own moment; else from where each
 // segment starts)
 function racerTick(loc: Located, track: SegmentTrack) {
-	const other = racers.flatMap(r => r.players).find(p => p.pb.tracks.includes(track));
+	const other = [...racers.flatMap(r => r.players), ...shownPartners].find(p => p.pb.tracks.includes(track));
 	const a = pb && finishOf(loc.track.seg, pb.run), b = other && (finishOf(track.seg, other.pb.run) ?? finishNear(track, loc.track, a, other.pb.run));
 	const startA = a && b ? a.tick - (a.ticks ?? b.ticks ?? 0) : loc.track.seg.firstTick;
 	const startB = a && b ? b.tick - (b.ticks ?? a.ticks ?? 0) : track.seg.firstTick;
@@ -1138,9 +1320,11 @@ function racerRow(r: Racer): HTMLElement {
 		e.stopPropagation();
 		racers = racers.filter(x => x !== r);
 		row.remove();
+		if (splitChoice === r) splitChoice = null;
 		$('ghost').classList.toggle('on', racers.length > 0);
 		changedRacers();
 	};
+	const split = toggle('Split', "Split screen: this run's demo played beside the one shown, in step with it (Eyes view)", () => splitWith(splitChoice === r ? null : r));
 	const watch = document.createElement('button');
 	watch.textContent = 'Watch';
 	watch.title = "Watch from this run's player: it becomes the run shown, at the same moment, and the one shown now races as a ghost in its place";
@@ -1154,6 +1338,7 @@ function racerRow(r: Racer): HTMLElement {
 		watch,
 		toggle('Ghost', 'Show its players', () => (r.shown = !r.shown)),
 		toggle('Path', 'Draw its path through the map', () => (r.path = !r.path)),
+		split,
 		remove);
 	row.append(name, delta, buttons);
 	row.onclick = e => {
@@ -1171,10 +1356,12 @@ function racerRow(r: Racer): HTMLElement {
 function changedRacers() {
 	for (const r of racers) {
 		r.row.classList.toggle('off', !r.shown);
-		const [ghost, path] = r.row.querySelectorAll('.ghost-buttons .toggle');
+		const [ghost, path, split] = r.row.querySelectorAll('.ghost-buttons .toggle');
 		ghost.classList.toggle('on', r.shown);
 		path.classList.toggle('on', r.path);
+		split.classList.toggle('on', splitChoice === r);
 	}
+	showSplitToggle();
 	const shown = racers.filter(r => r.shown).length;
 	$('ghost-count').textContent = `${shown} of ${racers.length} shown`;
 	$('ghost-all').classList.toggle('on', shown === racers.length);
@@ -1300,21 +1487,21 @@ async function exportSettle(tick: number) {
 		while (performance.now() - start < 30000 && !exportCancelled) {
 			seekTo(tick);
 			await new Promise(r => setTimeout(r, 100));
-			if (segIn3d === currentSeg && performance.now() - quiet > 1500) break;
+			if (segIn3d === currentSeg && !sideLoading && performance.now() - quiet > 1500) break;
 		}
 	} finally {
 		view3d.onLoaded = orig;
 	}
 	seekTo(tick);
 }
-function drawCmHud(g: OffscreenCanvasRenderingContext2D, stats: {portals: number; seconds: number}, w: number, h: number) {
+function drawCmHud(g: OffscreenCanvasRenderingContext2D, stats: {portals: number; seconds: number}, w: number, h: number, right = w) {
 	// (as the page's HUD box, scaled with the video's height)
 	const s = h / 540;
 	const cs = Math.floor(stats.seconds * 100 + 1e-6);
 	const pad = (n: number) => String(n).padStart(2, '0');
 	const rows = [['Portals:', String(stats.portals)], ['Time:', `${pad(Math.floor(cs / 6000))}:${pad(Math.floor(cs / 100) % 60)}.${pad(cs % 100)}`]];
 	const bw = 150 * s, line = 13 * 1.35 * s, bh = line * 2 + 10 * s;
-	const x = w - 16 * s - bw, y = h - 16 * s - bh;
+	const x = right - 16 * s - bw, y = h - 16 * s - bh;
 	g.fillStyle = 'rgba(0, 0, 0, 0.55)';
 	g.fillRect(x, y, bw, bh);
 	g.fillStyle = '#fff';
@@ -1390,6 +1577,7 @@ $('export-go').onclick = async () => {
 		await hud?.load();
 		note.textContent = 'Getting the first frame ready…';
 		view3d.setCaptureSize([width, height]);
+		sideView?.setCaptureSize([Math.round(width / 2) - 1, height]);
 		await exportSettle(from);
 		const video = await recordMp4({
 			width, height, fps, frames,
@@ -1399,6 +1587,7 @@ $('export-go').onclick = async () => {
 				if (segIn3d !== currentSeg) await exportSettle(tick);
 				// (copied straight after it's drawn: the canvas isn't kept)
 				g.drawImage(view3d.canvas!, 0, 0, width, height);
+				if (view3d.halfWidth && sideView?.canvas && !$('view3d-side').hidden) g.drawImage(sideView.canvas, width / 2 + 1, 0, width / 2 - 1, height);
 				const loc = pb!.locate(tick);
 				const messages = view3d.hudMessages();
 				if (hud && messages && titlesShown) {
@@ -1406,8 +1595,12 @@ $('export-go').onclick = async () => {
 					g.drawImage(hud.canvas, 0, 0);
 				}
 				const stats = view3d.mode === 'eyes' && cmShown ? view3d.cmStats(loc.tick) : null;
-				if (stats) drawCmHud(g, stats, width, height);
-				if (namesShown) drawNameTags(g, view3d.nameTags(), width, height, height / 540);
+				if (stats) drawCmHud(g, stats, width, height, view3d.halfWidth ? width / 2 : width);
+				const sideStats = cmShown ? sideCmStats() : null;
+				if (sideStats) drawCmHud(g, sideStats, width, height);
+				if (namesShown) drawNameTags(g, allNameTags(), width, height, height / 540);
+				const labels = splitLabels();
+				if (labels) drawSplitLabels(g, labels, width, height, height / 540);
 				if (racers.length) drawRacers(g, width, height);
 				return out;
 			},
@@ -1432,6 +1625,7 @@ $('export-go').onclick = async () => {
 	} finally {
 		exporting = false;
 		view3d.setCaptureSize(null);
+		sideView?.setCaptureSize(null);
 		note.textContent = noteText;
 		render();
 	}

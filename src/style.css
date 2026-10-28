@@ -68,6 +68,11 @@ code { font-family: var(--mono); font-size: 0.92em; }
 #path:active { cursor: grabbing; }
 .view3d { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .view3d canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* the split screen's second demo, over the right half (the first view's
+   input still reaching the first: it's the one the camera keys drive) */
+.view3d-side { position: absolute; top: 0; right: 0; bottom: 0; width: calc(50% - 1px); z-index: 1; pointer-events: none; background: #0c0e12; }
+/* (the first demo's challenge mode box in its own half) */
+.view3d.halved > .cm-hud { right: calc(50% + 16px); }
 /* the game's challenge mode stats box, bottom right */
 .hud-text { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
 .cm-hud { position: absolute; z-index: 1; right: 16px; bottom: 16px; min-width: 150px; padding: 5px 9px; background: rgba(0, 0, 0, 0.55); color: #fff; font: 700 13px/1.35 Arial, Helvetica, sans-serif; pointer-events: none; }

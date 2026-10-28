@@ -1084,12 +1084,44 @@ export class View3D {
 	// from their taunt camera; none while they taunt for the remote view or
 	// the recording player has a team taunt partner (C_Portal_Player::CreateMove)
 	pipEnabled = true;
-	private pip: {taunt: boolean} | null = null;
+	private pip: {taunt: boolean; split: boolean} | null = null;
 	private pipShown = false;
 	private pipSkipped = 0;  // frames since the partner's view was drawn
 	private pipCatchUp: (() => void) | undefined;
 	private pipFrame: THREE.WebGLRenderTarget | null = null;
 	private pipParticles = new Set<string>();
+	// Split screen (Eyes view): the view in two side by side, the left as
+	// it is and the right through the co-op partner's eyes (or, following
+	// the partner, the recording player's). Drawn as the partner's corner
+	// view is (see updatePip), at half the width
+	private splitOn = false;
+	get split() {
+		return this.splitOn;
+	}
+	set split(on: boolean) {
+		this.splitOn = on;
+		this.pipShown = false;  // (so the next frame draws the other view at its new size)
+	}
+	// Or the left half only, the right left to another view (another demo's,
+	// drawn over it)
+	halfWidth = false;
+	private splitTags: NameTag[] = [];  // name tags in the right half
+	private splitNames: [string, string] | null = null;
+	get splitShown(): boolean {
+		return this.pipShown && this.splitOn && this.mode === 'eyes';
+	}
+	private get halved(): boolean {
+		return this.splitShown || (this.halfWidth && this.mode === 'eyes');
+	}
+	// who each half shows, while split
+	splitLabels(): [string, string] | null {
+		return this.splitShown ? this.splitNames : null;
+	}
+	// whose eyes the view is through (Eyes view)
+	viewName(): string | null {
+		const t = this.followTrack;
+		return t ? this.playerName(t) : null;
+	}
 	// (each view meters its own exposure, and has its own portal and water
 	// views: drawn at its size, and not reallocated every frame between them)
 	private pipMeter = {
@@ -1592,6 +1624,7 @@ export class View3D {
 		this.particleRuns.clear();
 		this.fizzlers.clear();
 		this.paint = null;
+		this.paintSplat = null;
 		paintUniforms.paintOn.value = 0;
 
 		// fog until the recording names the player's fog controller: the
@@ -2312,7 +2345,7 @@ export class View3D {
 		const top = (o: THREE.Object3D) => (o.userData.anim as AnimatedModel | undefined)?.poseBounds.max.z ?? 72;
 		for (const [t, o] of this.objects) {
 			if (t.className !== 'CPortal_Player' || !o.visible) continue;
-			tag(o.position, top(o), ents.playerNames.get(t.index) ?? (/eggbot/.test(t.model) ? 'P-body' : /ballbot/.test(t.model) ? 'ATLAS' : 'Chell'), null);
+			tag(o.position, top(o), this.playerName(t), null);
 		}
 		for (const g of this.ghosts) {
 			if (!g.view || !g.name) continue;
@@ -2320,12 +2353,19 @@ export class View3D {
 			const robot = g.body && this.ghostRobots.get(g.body.track);
 			tag(new THREE.Vector3(...g.view.origin), robot?.visible ? top(robot) : 72, g.name, g.color);
 		}
+		// (split: each half's own, squeezed into it, those off its edges left out)
+		if (!this.pip && this.halved) {
+			const into = (half: NameTag[], left: number) => half.filter(t => t.x >= 0 && t.x <= 1).map(t => ({...t, x: left + t.x / 2}));
+			return [...into(tags, 0), ...into(this.splitTags, 0.5)];
+		}
 		return tags;
 	}
 
 	// where the other co-op players stand at a tick (the recording's own view
-	// gives its player's), so raced runs compare player with player
-	otherPlayers(tick: number): number[][] {
+	// gives its player's), so raced runs compare player with player; as
+	// drawn (interpolated in the past, as the client does), or where the
+	// network has them at the tick
+	otherPlayers(tick: number, delayed = true): number[][] {
 		const ents = this.entities;
 		if (!ents) return [];
 		const out: number[][] = [];
@@ -2333,7 +2373,7 @@ export class View3D {
 			if (t.className !== 'CPortal_Player' || t === ents.player) continue;
 			const k = keyAt(t, tick);
 			if (!k || k.removed) continue;
-			const o = this.entityPose(t, tick).origin;
+			const o = this.entityPose(t, tick, delayed).origin;
 			out.push([o.x, o.y, o.z]);
 		}
 		return out;
@@ -2367,6 +2407,9 @@ export class View3D {
 
 	private get followTrack(): EntityTrack | undefined {
 		return this.followed ?? this.entities?.player;
+	}
+	private playerName(t: EntityTrack): string {
+		return this.entities?.playerNames.get(t.index) ?? (/eggbot/.test(t.model) ? 'P-body' : /ballbot/.test(t.model) ? 'ATLAS' : 'Chell');
 	}
 
 	// the run's path drawn through the map (on by default)
@@ -2509,14 +2552,13 @@ export class View3D {
 			const inverse = new THREE.Matrix4().compose(new THREE.Vector3(...k.origin), new THREE.Quaternion().setFromEuler(toEuler(k.angles)), new THREE.Vector3(1, 1, 1)).invert();
 			return {model: Number(model[1]), toLocal: p => new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(inverse).toArray()};
 		}) : null;
-		paintUniforms.paintMap.value = this.paint?.texture ?? null;
-		paintUniforms.paintOn.value = this.paint ? 1 : 0;
+		this.bindShared();
 		if (this.paint && this.bsp?.lightmap) {
-			paintUniforms.paintTiles.value.set(this.bsp.lightmap.width / 12.8, this.bsp.lightmap.height / 12.8);
 			this.library?.textures.get('paint/splatnormal_default', true).then(tex => {
 				if (!tex) return;
 				tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
 				tex.needsUpdate = true;
+				this.paintSplat = tex;
 				paintUniforms.paintSplat.value = tex;
 				this.loaded();
 			});
@@ -5147,13 +5189,28 @@ export class View3D {
 		}
 	}
 
+	// The shader state the views share (module-wide uniforms) as this view
+	// has it: set again before each update, as another view (a second
+	// demo's, side by side) may have set it since
+	private paintSplat: THREE.Texture | null = null;
+	private bindShared() {
+		paintUniforms.paintMap.value = this.paint?.texture ?? null;
+		paintUniforms.paintOn.value = this.paint ? 1 : 0;
+		if (this.paint && this.bsp?.lightmap) paintUniforms.paintTiles.value.set(this.bsp.lightmap.width / 12.8, this.bsp.lightmap.height / 12.8);
+		if (this.paintSplat) paintUniforms.paintSplat.value = this.paintSplat;
+		bumpLightUniforms.bumpLight0.value = this.bumpTex[0] ?? null;
+		bumpLightUniforms.bumpLight1.value = this.bumpTex[1] ?? null;
+		bumpLightUniforms.bumpLight2.value = this.bumpTex[2] ?? null;
+	}
+
 	private frameNumber = 0;
 	update(view: ViewState | null, tick: number) {
 		// (the partner's view first, so what's left set up is the main view's;
 		// at a lower rate where the quality asks, and drawn once more when
 		// frames stop coming, so a paused view shows its partner's at the tick)
 		if (!this.pip) {
-			if (this.capturing || !this.pipShown || ++this.pipSkipped >= this.quality.partnerEvery) {
+			// (every frame while split: half the screen isn't a corner)
+			if (this.capturing || !this.pipShown || this.splitOn || ++this.pipSkipped >= this.quality.partnerEvery) {
 				this.pipCatchUp?.();
 				this.pipCatchUp = undefined;
 				this.pipShown = this.updatePip(view, tick);
@@ -5164,6 +5221,7 @@ export class View3D {
 				this.onLoaded();
 			}, 100);
 		}
+		this.bindShared();
 		this.meterTick = tick;
 		this.frameNumber++;
 		this.seenCache.clear();
@@ -5887,7 +5945,8 @@ export class View3D {
 	// meter, without the main view's bloom and screen fade
 	private compositePip(r: THREE.WebGLRenderer) {
 		const css = r.getSize(new THREE.Vector2());
-		const w = css.x * PIP_SCALE, h = css.y * PIP_SCALE, inset = css.y * PIP_INSET;
+		const split = this.splitShown;
+		const w = split ? css.x / 2 - 1 : css.x * PIP_SCALE, h = split ? css.y : css.y * PIP_SCALE, inset = split ? 0 : css.y * PIP_INSET;
 		const u = this.composite.uniforms;
 		u.frame.value = this.pipFrame!.texture;
 		u.exposure.value = this.pipMeter.exposure;
@@ -5901,41 +5960,57 @@ export class View3D {
 		r.autoClear = auto;
 	}
 
-	// Draws the partner's view (see pipEnabled) when it's due; true if it was
+	// Draws the other view when it's due: the partner's in the corner (see
+	// pipEnabled), or the split screen's right half; true if it was
 	private updatePip(view: ViewState | null, tick: number): boolean {
 		const ents = this.entities, me = ents?.player;
-		if (!this.pipEnabled || this.mode !== 'eyes' || this.followed || !ents || !me) return false;
-		const mk = keyAt(me, tick);
+		const split = this.splitOn;
+		if (!ents || this.mode !== 'eyes' || this.halfWidth) return false;
+		if (!me || (!split && (!this.pipEnabled || this.followed))) return false;
+		// (the other co-op player: the partner, or the recording one while
+		// the camera follows the partner)
+		const main = this.followTrack!;
+		const mk = keyAt(main, tick);
 		const partner = ents.tracks.find(t => {
-			const k = t.className === 'CPortal_Player' && t.index !== me.index ? keyAt(t, tick) : undefined;
+			const k = t.className === 'CPortal_Player' && t.index !== main.index ? keyAt(t, tick) : undefined;
 			return !!k && !k.removed && k.visible;
 		});
 		const pk = partner && keyAt(partner, tick);
 		if (!mk || !pk) return false;
 		const taunting = (Number(pk.extra?.['m_Shared.m_nPlayerCond'] ?? 0) & 1) !== 0;
-		if (Number(mk.extra?.m_nTeamTauntState ?? 0) >= 2 || (taunting && Number(pk.extra?.m_bTauntRemoteView ?? 0))) return false;
+		if (!split && (Number(mk.extra?.m_nTeamTauntState ?? 0) >= 2 || (taunting && Number(pk.extra?.m_bTauntRemoteView ?? 0)))) return false;
+		const eye = this.entityPose(partner!, tick).origin;
+		eye.z += pk.eyeZ ?? DEFAULT_EYE;
+		return this.drawOther(view, tick, {taunt: taunting, split}, partner === me ? null : partner!, eye, this.playerName(partner!));
+	}
+	// (the other view drawn through the whole update, with its own meter,
+	// then everything put back as the main view had it)
+	private drawOther(view: ViewState | null, tick: number, pip: {taunt: boolean; split: boolean}, followed: EntityTrack | null, eye: THREE.Vector3, name: string): boolean {
+		const ents = this.entities!;
+		const mainName = this.followed ? this.playerName(this.followed) : ents.player ? this.playerName(ents.player) : 'Player';
 		this.swapMeter();
 		// (read at once: a later read would land in the main view's meter)
 		const sync = this.syncMeter;
 		this.syncMeter = true;
-		this.followed = partner!;
-		this.pip = {taunt: taunting};
+		const saved = {followed: this.followed, position: this.camera.position.clone(), quaternion: this.camera.quaternion.clone()};
+		this.followed = followed;
+		this.pip = pip;
 		// (what's placed before the camera in an update (doorway fade brushes,
-		// beams turned to it) takes the camera where it is: the partner's eye
-		// for theirs, and the main view's own back for it)
-		const saved = [this.camera.position.clone(), this.camera.quaternion.clone()] as const;
-		this.camera.position.copy(this.entityPose(partner!, tick).origin);
-		this.camera.position.z += pk.eyeZ ?? DEFAULT_EYE;
+		// beams turned to it) takes the camera where it is: the other eye
+		// for its view, and the main view's own back for it)
+		this.camera.position.copy(eye);
 		try {
 			this.update(view, tick);
+			this.splitTags = pip.split ? this.nameTags() : [];
 		} finally {
 			this.pip = null;
-			this.followed = null;
+			this.followed = saved.followed;
 			this.syncMeter = sync;
 			this.swapMeter();
-			this.camera.position.copy(saved[0]);
-			this.camera.quaternion.copy(saved[1]);
+			this.camera.position.copy(saved.position);
+			this.camera.quaternion.copy(saved.quaternion);
 		}
+		this.splitNames = [mainName, name];
 		return true;
 	}
 	private swapMeter() {
@@ -6093,8 +6168,14 @@ export class View3D {
 		// is still compiling sits this frame out (the meter's too), rather
 		// than the page stalling until the driver has built it
 		const size = r.getDrawingBufferSize(new THREE.Vector2());
-		// (the partner's view: drawn small, into a frame of its own)
-		if (this.pip) size.set(Math.max(1, Math.round(size.x * PIP_SCALE)), Math.max(1, Math.round(size.y * PIP_SCALE)));
+		// (the partner's view: drawn small, into a frame of its own; split,
+		// each view half the width)
+		if (this.pip && !this.pip.split) size.set(Math.max(1, Math.round(size.x * PIP_SCALE)), Math.max(1, Math.round(size.y * PIP_SCALE)));
+		else if (this.pip?.split || (!this.pip && this.halved)) size.x = Math.max(1, Math.round(size.x / 2));
+		if (Math.abs(this.camera.aspect - size.x / size.y) > 1e-6) {
+			this.camera.aspect = size.x / size.y;
+			this.camera.updateProjectionMatrix();
+		}
 		let frame = this.pip ? this.pipFrame : this.frame;
 		if (!frame) {
 			frame = this.hdrFrame(size.x, size.y);
@@ -6176,7 +6257,17 @@ export class View3D {
 		this.composite.uniforms.frame.value = frame.texture;
 		this.composite.uniforms.exposure.value = this.exposure;
 		this.screenFade(this.meterTick);
-		r.render(this.compositeScene, this.compositeCam);
+		if (this.halved) {
+			// (the left half; the canvas cleared first, for the gap between them)
+			const css = r.getSize(new THREE.Vector2());
+			r.clear();
+			r.setViewport(0, 0, css.x / 2 - 1, css.y);
+			const auto = r.autoClear;
+			r.autoClear = false;
+			r.render(this.compositeScene, this.compositeCam);
+			r.autoClear = auto;
+			r.setViewport(0, 0, css.x, css.y);
+		} else r.render(this.compositeScene, this.compositeCam);
 		if (this.pipShown && this.pipFrame && this.mode === 'eyes') this.compositePip(r);
 		this.onDrawn();
 	}
