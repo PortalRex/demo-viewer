@@ -46,6 +46,28 @@ export function boardRunsOf(json: BoardJson, coop: boolean): BoardRun[] {
 	return runs;
 }
 
+// A chamber's world records, newest first, as the board's changelog gives
+// them (?wr=1: a row a player, a co-op record's two submitted together, the
+// same time on the same day); banned ones left out
+export type WrJson = {score: number; id: number; player_name: string; profile_number: string; time_gained: string | null; hasDemo: number; banned: number; note: string | null}[];
+export interface WrRun {
+	date: string | null;
+	score: number;
+	players: BoardPlayer[];
+}
+export function wrHistoryOf(json: WrJson, coop: boolean): WrRun[] {
+	const out: WrRun[] = [];
+	for (const e of json) {
+		if (e.banned) continue;
+		const player: BoardPlayer = {steamId: e.profile_number, name: e.player_name, changelogId: e.id, hasDemo: !!e.hasDemo};
+		const day = e.time_gained?.slice(0, 10) ?? null;
+		const pair = coop ? out.find(r => r.score === e.score && (r.date?.slice(0, 10) ?? null) === day && r.players.length === 1) : undefined;
+		if (pair) pair.players.push(player);
+		else out.push({date: e.time_gained, score: e.score, players: [player]});
+	}
+	return out;
+}
+
 // a time in hundredths as the board shows it (17.56, 1:02.30)
 export const fmtScore = (cs: number) => {
 	const m = Math.floor(cs / 6000), s = Math.floor(cs / 100) % 60, c = cs % 100;

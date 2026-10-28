@@ -3,8 +3,8 @@
 // players' demos together)
 import {CHAMBERS, chamberFor} from '../core/chambers.ts';
 import type {Chamber} from '../core/chambers.ts';
-import {boardRunsOf, fmtScore} from '../core/leaderboard.ts';
-import type {BoardJson, BoardRun} from '../core/leaderboard.ts';
+import {boardRunsOf, fmtScore, wrHistoryOf} from '../core/leaderboard.ts';
+import type {BoardJson, BoardRun, WrJson} from '../core/leaderboard.ts';
 
 const BOARD = 'https://board.portal2.sr';
 // (the dev server passes the board through, as its demos can't be read by
@@ -18,10 +18,21 @@ export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {
 	if (!res.ok) throw new Error(`the board answered ${res.status}`);
 	return boardRunsOf(await res.json() as BoardJson, chamber.coop);
 }
+// A chamber's world records with demos, newest first, as runs to race: each
+// noted with when it was set
+export async function boardWrHistory(chamber: Chamber): Promise<BoardRun[]> {
+	const res = await fetch(`${BASE}/changelog/json?chamber=${chamber.id}&wr=1`);
+	if (!res.ok) throw new Error(`the board answered ${res.status}`);
+	return wrHistoryOf(await res.json() as WrJson, chamber.coop).filter(r => r.players.some(p => p.hasDemo)).map(r => ({
+		rank: 1, score: r.score, date: r.date, coop: chamber.coop, players: r.players,
+		note: r.date ? new Date(r.date).toLocaleDateString('en', {month: 'short', year: 'numeric', timeZone: 'UTC'}) : null,
+	}));
+}
 export interface DemoFile {
 	bytes: Uint8Array;
 	name: string;
-	id: number;  // the board's id for it (its changelog entry's)
+	id: number;      // the board's id for it (its changelog entry's)
+	note?: string;   // what the race calls it besides its players (a world record's date)
 }
 
 // A run's demos, once each: kept for the page's life, and in the browser's
@@ -151,6 +162,7 @@ export class BoardBrowser {
 			b.onclick = () => this.race(this.runs.filter(r => r.players.some(p => p.hasDemo)).slice(0, Number(b.dataset.n)));
 		}
 		this.el('board-race-picked').onclick = () => this.race(this.runs.filter(r => this.picked.has(r)));
+		this.el('board-wr').onclick = () => this.raceWrHistory();
 	}
 
 	private el<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -206,6 +218,7 @@ export class BoardBrowser {
 		const race = this.canRace(this.chamber) && !this.busy;
 		for (const b of this.dialog.querySelectorAll<HTMLButtonElement>('.board-top')) b.disabled = !race || !this.runs.length;
 		this.el<HTMLButtonElement>('board-race-picked').disabled = !race || !this.picked.size;
+		this.el<HTMLButtonElement>('board-wr').disabled = !race;
 		this.el('board-race-note').hidden = this.canRace(this.chamber);
 	}
 
@@ -233,13 +246,28 @@ export class BoardBrowser {
 		this.note(null);
 	}
 
-	private async race(runs: BoardRun[]) {
+	// every world record the chamber has had (with a demo) raced against the
+	// shown run, each noted with when it was set
+	private async raceWrHistory() {
+		if (this.busy || !this.chamber || !this.canRace(this.chamber)) return;
+		this.note('Looking up the world records…');
+		try {
+			const runs = await boardWrHistory(this.chamber);
+			if (!runs.length) return this.note('No world record on this chamber has a demo.');
+			await this.race(runs, true);
+		} catch (e) {
+			this.note(`Couldn't look them up: ${(e as Error).message}`);
+		}
+	}
+
+	private async race(runs: BoardRun[], noted = false) {
 		if (this.busy || !runs.length || !this.canRace(this.chamber)) return;
 		this.busy = true;
 		this.showButtons();
 		this.note(`Downloading 0 of ${runs.length}…`);
 		try {
-			const files = await runDemos(runs, done => this.note(`Downloading ${done} of ${runs.length}…`));
+			let files = await runDemos(runs, done => this.note(`Downloading ${done} of ${runs.length}…`));
+			if (noted) files = files.map((f, i) => f.map(d => ({...d, note: runs[i].note ?? undefined})));
 			await this.onRace(files.filter(f => f.length));
 			this.picked.clear();
 			this.showPicked();

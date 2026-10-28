@@ -1240,7 +1240,10 @@ function showRacers(loc: Located, view: {origin: number[]} | null) {
 		if (tracks.length !== pathView.heatTracks.length || tracks.some((x, i) => x !== pathView.heatTracks[i])) pathView.heatTracks = tracks;
 	}
 }
-const racerName = (r: Racer) => r.players.map(p => p.name).join(' & ');
+const racerName = (r: Racer) => {
+	const note = r.players.map(p => runNotes.get(p.pb.run)).find(Boolean);
+	return (note ? `${note} · ` : '') + r.players.map(p => p.name).join(' & ');
+};
 // a racer's row: its name in its colour, its difference, and its toggles.
 // Clicking the row shows or hides its players; Ctrl- (or Alt-) clicking it
 // shows only it (all of them again, where it already was)
@@ -1476,8 +1479,10 @@ function showGaps(loc: Located) {
 // runs raced against the one shown
 const board = new BoardBrowser($('board-dialog') as HTMLDialogElement);
 board.canRace = chamber => !!pb && !!chamber && pb.run.segments.some(s => s.map === chamber.map);
-// (each run from it remembered by its board id, for links to it)
+// (each run from it remembered by its board id, for links to it, and what
+// the race calls it besides its players: a world record's date)
 const boardIds = new WeakMap<Run, number>();
+const runNotes = new WeakMap<Run, string>();
 async function openFromBoard(first: DemoFile, partners: DemoFile[]) {
 	await open([first]);
 	if (!pb) return;
@@ -1485,13 +1490,17 @@ async function openFromBoard(first: DemoFile, partners: DemoFile[]) {
 	for (const f of partners) await raceFromBoard(f);
 	changedRacers();
 }
-async function raceFromBoard(f: DemoFile) {
+// (false where it couldn't be raced: a demo too old to read, or of other maps)
+async function raceFromBoard(f: DemoFile, quiet = false): Promise<boolean> {
 	try {
 		const run = await loadRuns([f]);
 		boardIds.set(run, f.id);
+		if (f.note) runNotes.set(run, f.note);
 		addRacer(run);
+		return true;
 	} catch (err) {
-		showError(`Couldn't race ${f.name}: ${(err as Error).message}`);
+		if (!quiet) showError(`Couldn't race ${f.name}: ${(err as Error).message}`);
+		return false;
 	}
 }
 board.onOpen = async (files: DemoFile[]) => {
@@ -1499,7 +1508,10 @@ board.onOpen = async (files: DemoFile[]) => {
 	await openFromBoard(first, partners);
 };
 board.onRace = async (runs: DemoFile[][]) => {
-	for (const files of runs) for (const f of files) await raceFromBoard(f);
+	// (those that couldn't be raced named once, not each on its own)
+	const failed: string[] = [];
+	for (const files of runs) for (const f of files) if (!await raceFromBoard(f, true)) failed.push(f.name);
+	if (failed.length) showError(`Couldn't race ${failed.length === 1 ? failed[0] : `${failed.length} of them (${failed.join(', ')})`}: too old to read, or not of this run's maps.`);
 	$('ghost').classList.toggle('on', racers.length > 0);
 	changedRacers();
 };

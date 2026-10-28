@@ -1,7 +1,7 @@
 // The leaderboard's rows made into runs, its chambers, and links to them
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {boardRunsOf, fmtScore} from '../src/core/leaderboard.ts';
+import {boardRunsOf, fmtScore, wrHistoryOf} from '../src/core/leaderboard.ts';
 import type {BoardJson} from '../src/core/leaderboard.ts';
 import {CHAMBERS, chamberFor} from '../src/core/chambers.ts';
 import {linkHash, parseLink} from '../src/core/links.ts';
@@ -56,4 +56,17 @@ test('a link to a file or a URL', () => {
 	assert.equal(linkHash({load: 'runs/a.dem', board: null, moment: {tick: 5, view: 'top'}}), '#load=runs/a.dem&t=5&view=top');
 	assert.equal(linkHash({load: null, board: null, moment: {tick: 5, view: 'side', file: 'a.dem'}}), '#file=a.dem&t=5&view=side');
 	assert.deepEqual(parseLink('#load=runs/a.dem'), {load: 'runs/a.dem', board: null, moment: null});
+});
+
+test("a chamber's world records, a co-op record's two players as one, banned ones left out", () => {
+	const wr = (name: string, score: number, id: number, day: string, hasDemo = 1, banned = 0) =>
+		({score, id, player_name: name, profile_number: String(id), time_gained: `${day}T12:00:00Z`, hasDemo, banned, note: null});
+	const json = [
+		wr('A', 1756, 304460, '2024-11-01'), wr('B', 1756, 304459, '2024-11-01'),
+		wr('C', 1874, 13437, '2015-01-05', 0, 1), wr('D', 1874, 14800, '2015-01-05', 0, 1),
+		wr('E', 1895, 12095, '2014-11-08', 0), wr('F', 1895, 19592, '2014-11-08', 0),
+	];
+	const coop = wrHistoryOf(json, true);
+	assert.deepEqual(coop.map(r => [r.score, r.players.map(p => p.name)]), [[1756, ['A', 'B']], [1895, ['E', 'F']]]);
+	assert.equal(wrHistoryOf(json, false).length, 4);
 });

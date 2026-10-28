@@ -1,11 +1,12 @@
 // The leaderboard passed through for a hosted viewer, as the dev server
 // does (vite.config.ts): board.portal2.sr doesn't serve its demo files for
-// other sites to read. Just a chamber's scores and a run's demo pass, with
-// the demo's name in X-File-Name (from where the board redirects to it).
+// other sites to read. Just a chamber's scores, its world records and a
+// run's demo pass, with the demo's name in X-File-Name (from where the
+// board redirects to it).
 // Demos don't change once submitted, so they're kept in Cloudflare's cache.
 //   wrangler deploy   (see wrangler.toml; set the viewer's VITE_BOARD_PROXY to its URL)
 const BOARD = 'https://board.portal2.sr';
-const ALLOWED = /^\/(chamber\/\d+\/json|getDemo\?id=\d+)$/;
+const ALLOWED = /^\/(chamber\/\d+\/json|changelog\/json\?chamber=\d+&wr=1|getDemo\?id=\d+)$/;
 const CORS = {
 	'Access-Control-Allow-Origin': '*',
 	'Access-Control-Allow-Methods': 'GET, OPTIONS',
