@@ -13,6 +13,11 @@ import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
 import type {GapLine, InputLane} from './ui/charts.ts';
 import {tricks} from './player/tricks.ts';
+import {movement, stateAt, DUCKED, GROUND} from './player/movement.ts';
+import type {Movement} from './player/movement.ts';
+import {strafe, strafeOver} from './player/strafe.ts';
+import {Buttons} from './core/usercmd.ts';
+
 import {BoardBrowser, boardDemo} from './ui/board.ts';
 import {Quiz} from './ui/quiz.ts';
 import {linkHash, parseLink} from './core/links.ts';
@@ -38,6 +43,7 @@ import {Zip} from './game/zip.ts';
 import type {GameFS} from './game/gamefs.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const esc = (s: string) => s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'})[c]!);
 
 const pathView = new PathView($<HTMLCanvasElement>('path'));
 const inputs = new InputDisplay($('inputs'));
@@ -638,6 +644,7 @@ function ensureSideView(): View3D {
 	v.setPathShown(pathShown);
 	v.trailShown = view3d.trailShown;
 	v.shotsShown = view3d.shotsShown;
+	v.hitboxShown = view3d.hitboxShown;
 	// (its loads redraw as the first view's do, and count for an export's settling)
 	v.onLoaded = () => view3d.onLoaded();
 	if (import.meta.env.DEV) (window as unknown as {sideView: View3D}).sideView = v;  // for debugging in the console
@@ -944,9 +951,13 @@ function render() {
 	}
 	const view = viewAt(loc.track, loc.tick);
 	const cmd = cmdAt(loc.track, loc.tick);
+	if (pathView.hitboxShown || view3d.hitboxShown) pathView.hitboxDucked = view3d.hitboxDucked = (stateAt(moveOf(loc.track), loc.tick) & DUCKED) !== 0;
+
 	showBright(viewMode === '3d' ? seg.map : null);
 	showRacers(loc, view);
+	showLoss(loc);
 	const drawSide = prepareSplit(loc);
+
 	if (viewMode === '3d') view3d.update(view, loc.tick);
 	else pathView.draw(view, loc.tick, seg.sar);
 	drawSide?.();
@@ -1108,6 +1119,30 @@ $<HTMLInputElement>('file-input').onchange = async e => {
 	if (list.length) open(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
 };
 
+// a folder (a full-game run's demos): every demo in it, and in its folders,
+// as one run, in name order
+const isRunFile = (name: string) => /\.(sarp|dem)$/i.test(name);
+const readFiles = (list: File[]) => Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name})));
+$<HTMLInputElement>('folder-input').onchange = async e => {
+	const input = e.target as HTMLInputElement;
+	const list = [...(input.files ?? [])].filter(x => isRunFile(x.name));
+	input.value = '';
+	if (list.length) open(await readFiles(list));
+	else showError('No demos (.dem) or proofs (.sarp) in that folder.');
+};
+async function folderFiles(dir: FileSystemDirectoryEntry): Promise<File[]> {
+	const reader = dir.createReader(), out: File[] = [];
+	// (read in batches until one comes back empty)
+	for (;;) {
+		const batch = await new Promise<FileSystemEntry[]>((done, fail) => reader.readEntries(done, fail));
+		if (!batch.length) return out;
+		for (const entry of batch) {
+			if (entry.isDirectory) out.push(...await folderFiles(entry as FileSystemDirectoryEntry));
+			else if (isRunFile(entry.name)) out.push(await new Promise<File>((done, fail) => (entry as FileSystemFileEntry).file(done, fail)));
+		}
+	}
+}
+
 const drop = $('drop');
 window.addEventListener('dragover', e => {
 	e.preventDefault();
@@ -1117,8 +1152,22 @@ window.addEventListener('dragleave', () => drop.classList.remove('over'));
 window.addEventListener('drop', async e => {
 	e.preventDefault();
 	drop.classList.remove('over');
-	const list = [...(e.dataTransfer?.files ?? [])].filter(x => /\.(sarp|dem)$/i.test(x.name));
-	if (list.length) open(await Promise.all(list.map(async x => ({bytes: new Uint8Array(await x.arrayBuffer()), name: x.name}))));
+	// (a folder dropped: all of it one run; its entries taken before the
+	// event's over)
+	const entries = [...(e.dataTransfer?.items ?? [])].map(i => i.webkitGetAsEntry?.()).filter((x): x is FileSystemEntry => !!x);
+	if (entries.some(x => x.isDirectory)) {
+		const found: File[] = [];
+		for (const x of entries) {
+			if (x.isDirectory) found.push(...await folderFiles(x as FileSystemDirectoryEntry));
+			else if (isRunFile(x.name)) found.push(await new Promise<File>((done, fail) => (x as FileSystemFileEntry).file(done, fail)));
+		}
+		if (found.length) open(await readFiles(found));
+		else showError('No demos (.dem) or proofs (.sarp) in that folder.');
+		return;
+	}
+	const list = [...(e.dataTransfer?.files ?? [])].filter(x => isRunFile(x.name));
+	if (list.length) open(await readFiles(list));
+
 });
 
 // ---- ghost race ----
@@ -1474,6 +1523,28 @@ toggleSetting('shots-toggle', 'shots', on => {
 	pathView.shotsShown = view3d.shotsShown = on;
 	if (sideView) sideView.shotsShown = on;
 });
+toggleSetting('hitbox-toggle', 'hitbox', on => {
+	pathView.hitboxShown = view3d.hitboxShown = on;
+	if (sideView) sideView.hitboxShown = on;
+});
+
+// ---- how the player's moving ----
+// (player/movement.ts: exact from the recording player's flags once the 3D
+// view's decoded the segment's entities, a guess until then)
+const segPlayers = new WeakMap<Segment, EntityTrack | null>();
+const segPlayersAsked = new WeakSet<Segment>();
+function moveOf(track: SegmentTrack): Movement {
+	const seg = track.seg, decoding = entityCache.get(seg);
+	if (decoding && !segPlayersAsked.has(seg)) {
+		segPlayersAsked.add(seg);
+		decoding.then(e => {
+			segPlayers.set(seg, e?.player ?? null);
+			if (!playing) render();
+		});
+	}
+	return movement(track, segPlayers.get(seg) ?? null);
+}
+
 
 // ---- the heatmap ----
 // where this run and every raced run went on the map (Top and Side views)
@@ -1539,7 +1610,7 @@ $('routemap-btn').onclick = () => {
 // ---- the gap graph ----
 // how far ahead or behind each shown raced run is over the segment, worked
 // out once a segment (and again when the raced runs change)
-let graphMode: 'speed' | 'gap' | 'inputs' = 'speed';
+let graphMode: 'speed' | 'gap' | 'inputs' | 'strafe' = 'speed';
 let gapsFor: SegmentTrack | null = null;
 $('graph-mode').onclick = e => {
 	const b = (e.target as HTMLElement).closest('button');
@@ -1554,56 +1625,135 @@ function showGaps(loc: Located) {
 	($('graph-mode').querySelector('[data-g="gap"]') as HTMLElement).hidden = !racers.length;
 	speedGraph.mode = graphMode === 'gap' && !racers.length ? 'speed' : graphMode;
 	$('speed').classList.toggle('tall', speedGraph.mode === 'inputs');
+	$('speed').classList.toggle('mid', speedGraph.mode === 'strafe');
+	speedGraph.move = speedGraph.mode === 'inputs' ? null : moveOf(loc.track);
 	if (speedGraph.mode === 'inputs') speedGraph.lanes = inputLanes(loc);
+	if (speedGraph.mode === 'strafe') showStrafe(loc);
 	if (speedGraph.mode !== 'gap' || gapsFor === loc.track) return;
 	gapsFor = loc.track;
-	const own = loc.track, seg = own.seg;
-	const step = Math.max(1, Math.floor(own.length / GAP_SAMPLES));
+	const step = Math.max(1, Math.floor(loc.track.length / GAP_SAMPLES));
 	const lines: GapLine[] = [];
 	for (const r of racers) {
-		if (!r.shown) continue;
-		const tracks = r.players.map(p => racerTrack(p, loc)).filter((x): x is SegmentTrack => !!x);
-		if (!tracks.length) continue;
-		const n = Math.floor((seg.lastTick - seg.firstTick) / step) + 1;
-		const line: GapLine = {color: r.color, ticks: new Float32Array(n), gaps: new Float32Array(n).fill(NaN)};
-		// (each player matched on from where it was last: a second either way
-		// of as far again along its run)
-		const last = new Map<SegmentTrack, number>();
-		for (let i = 0; i < n; i++) {
-			const tick = seg.firstTick + i * step;
-			line.ticks[i] = tick;
-			const at = viewAt(own, tick)?.origin ?? null;
-			// (in co-op, whichever of its players is nearer this one)
-			let best: {delta: number; d2: number} | null = null;
-			for (const track of tracks) {
-				const was = last.get(track), slack = 1 / track.seg.intervalPerTick;
-				let d = racerDelta({...loc, tick}, at, track, was === undefined ? undefined : [was - slack / 4, was + step + slack]);
-				// (closer than the race rows ask: where the routes part, a gap
-				// in the line rather than the nearest of a different way)
-				if (d && d.d2 > GAP_NEAR ** 2) d = null;
-				if (d) last.set(track, d.tick);
-				else last.delete(track);
-				if (d && (!best || d.d2 < best.d2)) best = d;
-			}
-			if (best) line.gaps[i] = best.delta;
-		}
-		lines.push(line);
+		const line = r.shown ? gapLineOf(r, loc, step) : null;
+		if (line) lines.push(line);
 	}
 	speedGraph.gaps = lines;
 }
+// a raced run's gap over this segment, every `step` ticks
+function gapLineOf(r: Racer, loc: Located, step: number): GapLine | null {
+	const own = loc.track, seg = own.seg;
+	const tracks = r.players.map(p => racerTrack(p, loc)).filter((x): x is SegmentTrack => !!x);
+	if (!tracks.length) return null;
+	const n = Math.floor((seg.lastTick - seg.firstTick) / step) + 1;
+	const line: GapLine = {color: r.color, ticks: new Float32Array(n), gaps: new Float32Array(n).fill(NaN)};
+	// (each player matched on from where it was last: a second either way
+	// of as far again along its run)
+	const last = new Map<SegmentTrack, number>();
+	for (let i = 0; i < n; i++) {
+		const tick = seg.firstTick + i * step;
+		line.ticks[i] = tick;
+		const at = viewAt(own, tick)?.origin ?? null;
+		// (in co-op, whichever of its players is nearer this one)
+		let best: {delta: number; d2: number} | null = null;
+		for (const track of tracks) {
+			const was = last.get(track), slack = 1 / track.seg.intervalPerTick;
+			let d = racerDelta({...loc, tick}, at, track, was === undefined ? undefined : [was - slack / 4, was + step + slack]);
+			// (closer than the race rows ask: where the routes part, a gap
+			// in the line rather than the nearest of a different way)
+			if (d && d.d2 > GAP_NEAR ** 2) d = null;
+			if (d) last.set(track, d.tick);
+			else last.delete(track);
+			if (d && (!best || d.d2 < best.d2)) best = d;
+		}
+		if (best) line.gaps[i] = best.delta;
+	}
+	return line;
+}
+
+// ---- time gained and lost ----
+// The path (Top and Side views) coloured by where this run gained or lost
+// time on the fastest shown raced run: by how fast the gap between them
+// grew or shrank there. Worked out once a segment, raced run and toggle
+let lossShown = false;
+let lossFor = '';
+const LOSS_SAMPLES = 2500;
+const LOSS_WINDOW = 0.5;  // seconds either way the gap's change is measured over
+const LOSS_FULL = 0.5;    // seconds lost (or gained) a second: the strongest colour
+function showLoss(loc: Located) {
+	$('loss-toggle').hidden = viewMode === '3d' || !racers.length;
+	if (!lossShown || viewMode === '3d' || !racers.length || !pb) {
+		pathView.lossColors = null;
+		lossFor = '';
+		return;
+	}
+	const table = raceTableFor(loc), at = fastestOnRoute(table);
+	const ref = at > 0 ? table.runs[at] : null;
+	const key = ref ? `${loc.index}|${racers.indexOf(ref)}|${ref.players[0].pb.run.fileName}` : '';
+
+	if (key === lossFor) return;
+	lossFor = key;
+	pathView.lossColors = null;
+	if (!ref) return;
+	const step = Math.max(1, Math.floor(loc.track.length / LOSS_SAMPLES));
+	const line = gapLineOf(ref, loc, step);
+	if (!line) return;
+	const seg = loc.track.seg, window = LOSS_WINDOW / seg.intervalPerTick;
+	const gapAtTick = (tick: number) => {
+		const f = (tick - seg.firstTick) / step, i = Math.floor(f);
+		if (i < 0 || i + 1 >= line.gaps.length) return NaN;
+		return line.gaps[i] + (line.gaps[i + 1] - line.gaps[i]) * (f - i);
+	};
+	const mix = (a: number[], b: number[], f: number) => `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join(', ')})`;
+	pathView.lossColors = seg.views.map(v => {
+		const rate = (gapAtTick(v.tick + window) - gapAtTick(v.tick - window)) / (2 * LOSS_WINDOW);
+		if (!Number.isFinite(rate)) return 'rgb(90, 98, 110)';
+		const f = Math.min(1, Math.abs(rate) / LOSS_FULL);
+		return mix([150, 158, 170], rate > 0 ? [255, 70, 70] : [60, 220, 120], f);
+	});
+	pathView.lossNote = `on ${racerName(ref)}`;
+}
+toggleSetting('loss-toggle', 'loss', on => {
+	lossShown = on;
+	lossFor = '';
+});
 
 // the Inputs graph's runs: this one, and the one split screen shows (or the
 // first shown raced run), its commands lined up as the race lines it up
 function inputLanes(loc: Located): InputLane[] {
 	const own = loc.track;
-	const lanes: InputLane[] = [{name: pb?.run.player || 'This run', color: '#e6e9ef', cmd: t => cmdHeld(own, t)}];
-	const r = splitChoice && splitChoice !== 'partner' ? splitChoice : racers.find(x => x.shown);
+	const ownMove = moveOf(own);
+	const lanes: InputLane[] = [{name: pb?.run.player || 'This run', color: '#e6e9ef', cmd: t => cmdHeld(own, t), state: t => stateAt(ownMove, t)}];
+	const r = splitChoice && splitChoice !== 'partner' ? splitChoice : inputsRacer && racers.includes(inputsRacer) ? inputsRacer : racers.find(x => x.shown);
 	const p = r?.players.find(p => racerTrack(p, loc));
 	const track = p && racerTrack(p, loc);
 	if (r && p && track) {
-		lanes.push({name: racerName(r), color: r.color, cmd: t => cmdHeld(track, Math.round(racerTick({...loc, tick: t}, track)))});
+		const move = moveOf(track);
+		const at = (t: number) => Math.round(racerTick({...loc, tick: t}, track));
+		lanes.push({name: racerName(r), color: r.color, cmd: t => cmdHeld(track, at(t)), state: t => stateAt(move, at(t))});
 	}
 	return lanes;
+}
+// the raced run the Inputs graph sets beside this one (where split screen
+// doesn't say): one a Race tab section's Compare picked
+let inputsRacer: Racer | null = null;
+
+// The Strafe graph (player/strafe.ts) and what it says: this segment's air
+// strafing, and this jump's (the stretch in the air now, or the last one)
+function showStrafe(loc: Located) {
+	const move = moveOf(loc.track), s = strafe(loc.track, move);
+	speedGraph.strafe = s;
+	if (!s) return;
+	let from = Math.round(loc.tick), to = from;
+	const air = (t: number) => t >= move.first && t < move.first + move.states.length && !(stateAt(move, t) & GROUND);
+	while (from > move.first && !air(from)) from--;
+	to = from;
+	while (air(from - 1)) from--;
+	while (air(to + 1)) to++;
+	const pct = (o: {gained: number; ideal: number}) => `${Math.round(100 * Math.max(0, o.gained) / Math.max(1e-6, o.ideal))}%`;
+	const all = strafeOver(s, s.first, s.first + s.ideal.length);
+	const jump = strafeOver(s, from, to);
+	speedGraph.strafeNote = !all.ticks ? 'No air strafing in this segment (no strafe key held in the air)'
+		: `Strafing: ${pct(all)} of the speed the best strafes could gain (${Math.round(all.ideal - all.gained)} u/s left)${jump.ticks ? ` · this jump ${pct(jump)}` : ''}${move.exact ? '' : ' · ground and crouch guessed'}`;
 }
 // (the command at a tick, or the one a tick or two before it, as some demos
 // have one every other tick: none past that, as where none were recorded)
@@ -1623,6 +1773,7 @@ interface RaceTable {
 	runs: (Racer | null)[];  // (null: this run)
 	sections: Sections | null;
 	routes: number[];
+	paths: RunPath[];
 }
 let raceTable: RaceTable | null = null;
 let routeShown: number | null = null;  // the route whose runs alone are shown
@@ -1638,9 +1789,22 @@ function racePath(loc: Located, track: SegmentTrack, run: Run, own: RunPath | nu
 }
 function showRaceTab(loc: Located) {
 	if (!pb || !racers.length || $('tab-race').hidden) return;
+	const table = raceTableFor(loc);
+	if (table !== drawnRaceTable) {
+		drawnRaceTable = table;
+		drawRaceTab();
+	}
+	// (the section this run is in, marked)
+	const gates = table.sections?.gates ?? [];
+	const now = gates.findIndex(g => loc.tick < g.tick);
+	$('tab-race').querySelectorAll('th[data-g]').forEach((th, i) => th.classList.toggle('now', i === now));
+}
+let drawnRaceTable: RaceTable | null = null;
+// (worked out once a segment and set of raced runs; the Loss colours use it too)
+function raceTableFor(loc: Located): RaceTable {
 	const racersKey = racers.map(r => r.players.map(p => p.pb.run.fileName).join('+')).join(',');
 	if (raceTable?.track !== loc.track || raceTable.racersKey !== racersKey) {
-		const own = racePath(loc, loc.track, pb.run, null);
+		const own = racePath(loc, loc.track, pb!.run, null);
 		const paths: RunPath[] = [own];
 		const runs: (Racer | null)[] = [null];
 		for (const r of racers) {
@@ -1659,17 +1823,25 @@ function showRaceTab(loc: Located) {
 			paths.push(best.path);
 			runs.push(r);
 		}
-		raceTable = {track: loc.track, racersKey, runs, sections: sections(paths), routes: routes(paths)};
-		drawRaceTab();
+		raceTable = {track: loc.track, racersKey, runs, sections: sections(paths), routes: routes(paths), paths};
 	}
-	// (the section this run is in, marked)
-	const gates = raceTable.sections?.gates ?? [];
-	const now = gates.findIndex(g => loc.tick < g.tick);
-	$('tab-race').querySelectorAll('th[data-g]').forEach((th, i) => th.classList.toggle('now', i === now));
+	return raceTable;
+}
+// the fastest shown raced run on this run's route (else on any), and its
+// row in the table
+function fastestOnRoute(table: RaceTable): number {
+	const time = (i: number) => table.paths[i].end - table.paths[i].start;
+	let best = -1;
+	for (const sameRoute of [true, false]) {
+		table.runs.forEach((r, i) => {
+			if (r?.shown && (!sameRoute || table.routes[i] === table.routes[0]) && (best < 0 || time(i) < time(best))) best = i;
+		});
+		if (best >= 0) return best;
+	}
+	return best;
 }
 function drawRaceTab() {
 	const table = raceTable!, el = $('tab-race');
-	const esc = (s: string) => s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'})[c]!);
 	const letter = (k: number) => String.fromCharCode(65 + k);
 	const counts = new Map<number, number>();
 	for (const k of table.routes) counts.set(k, (counts.get(k) ?? 0) + 1);
@@ -1694,12 +1866,15 @@ function drawRaceTab() {
 		});
 		html += `<tr class="sob"><td class="who" title="The best of each section among the runs on this run's route (route ${letter(table.routes[0])}), added up">Sum of best (${letter(table.routes[0])})</td>${best.map(b => `<td>${Number.isFinite(b) ? b.toFixed(2) : '—'}</td>`).join('')}<td>${sumOfBest.toFixed(2)}</td></tr></tbody></table>`;
 		html += `<p class="race-note">Each section ends where every run passes near the same spot; a run's time there is when it last came nearest before going on. Gold: the best of each section among the runs on this run's route.</p>`;
-		el.innerHTML = html;
+		el.innerHTML = html + lossReport(table, s, times);
 	}
 	el.onclick = e => {
 		const target = e.target as HTMLElement;
 		const th = target.closest<HTMLElement>('th[data-g]');
 		if (th && pb && s) return seekTo(pb.globalTick(currentSeg, s.gates[Number(th.dataset.g)].tick));
+		const compare = target.closest<HTMLElement>('[data-compare]');
+		if (compare && pb && s) return compareSection(table, s, Number(compare.dataset.compare), Number(compare.dataset.run));
+
 		const route = target.closest<HTMLElement>('[data-route]');
 		if (!route) return;
 		routeShown = route.dataset.route === '' ? null : Number(route.dataset.route);
@@ -1710,6 +1885,92 @@ function drawRaceTab() {
 }
 // (drawn once the tab's shown, after the panels have shown it)
 $('race-tab').addEventListener('click', () => soon(() => !playing && render()));
+
+// ---- where this run lost time ----
+// The sections this run lost most in against the fastest raced run on its
+// route, each with what that run did differently there: its tricks, top
+// speed, jumps, portals, time in the air and air strafing
+const REPORT_SECTIONS = 3;
+const REPORT_MIN_LOSS = 0.05;  // seconds: less isn't worth a line
+interface SectionFacts {
+	jumps: number;
+	portals: number;
+	bhops: number;
+	flings: number;
+	topSpeed: number;
+	air: number;           // share of the section in the air
+	strafe: number | null; // share of the best strafes' speed gained
+}
+function sectionFacts(path: RunPath, from: number, to: number): SectionFacts {
+	const {track} = path, seg = track.seg;
+	let jumps = 0, was = 0;
+	for (const c of seg.userCmds) {
+		if (c.tick < from || c.tick > to) continue;
+		if (c.buttons & ~was & Buttons.JUMP) jumps++;
+		was = c.buttons;
+	}
+	const found = tricks(track).filter(k => k.tick >= from && k.tick <= to);
+	let topSpeed = 0;
+	seg.views.forEach((v, i) => v.tick >= from && v.tick <= to && !track.teleports[i] && (topSpeed = Math.max(topSpeed, track.speeds[i])));
+	const move = moveOf(track);
+	let air = 0;
+	for (let t = Math.ceil(from); t <= to; t++) if (!(stateAt(move, t) & GROUND)) air++;
+	const s = strafe(track, move), o = s && strafeOver(s, from, to);
+	return {
+		jumps, topSpeed, air: air / Math.max(1, to - from),
+		portals: found.filter(k => k.kind === 'portal').length,
+		bhops: found.filter(k => k.kind === 'bhop').length,
+		flings: found.filter(k => k.kind === 'fling').length,
+		strafe: o && o.ticks >= 10 ? Math.max(0, o.gained) / Math.max(1e-6, o.ideal) : null,
+	};
+}
+// (a section's ticks of a path: from the gate before to its own)
+function sectionTicks(s: Sections, path: RunPath, i: number, j: number): [number, number] {
+	const dt = path.track.seg.intervalPerTick, a = s.arrivals[i];
+	return [path.start + (j ? a[j - 1] : 0) / dt, path.start + a[j] / dt];
+}
+function lossReport(table: RaceTable, s: Sections, times: number[][]): string {
+	const totals = s.arrivals.map(a => a[a.length - 1]);
+	let ref = -1;
+	table.runs.forEach((r, i) => {
+		if (r && table.routes[i] === table.routes[0] && Number.isFinite(totals[i]) && (ref < 0 || totals[i] < totals[ref])) ref = i;
+	});
+	if (ref < 0) return '';
+	const racer = table.runs[ref]!, name = esc(racerName(racer)), own = esc(pb!.run.player || 'this run');
+	const lost = times[0].map((t, j) => ({j, by: t - times[ref][j]})).filter(x => x.by >= REPORT_MIN_LOSS).sort((a, b) => b.by - a.by).slice(0, REPORT_SECTIONS);
+	let html = `<h3>Where ${own} lost time</h3>`;
+	if (!lost.length) return html + `<p class="race-note">Against <b style="color: ${racer.color}">${name}</b>, the fastest raced run on this route: no section lost by ${REPORT_MIN_LOSS} s or more.</p>`;
+	html += `<p class="race-note">The sections lost most against <b style="color: ${racer.color}">${name}</b>, the fastest raced run on this route, and what it did differently there.</p>`;
+	const pct = (f: number) => `${Math.round(100 * f)}%`;
+	for (const {j, by} of lost) {
+		const [a0, a1] = sectionTicks(s, table.paths[0], 0, j), [b0, b1] = sectionTicks(s, table.paths[ref], ref, j);
+		const mine = sectionFacts(table.paths[0], a0, a1), theirs = sectionFacts(table.paths[ref], b0, b1);
+		const notes: string[] = [];
+		const count = (n: number, one: string, many = `${one}s`) => `${n || 'no'} ${n === 1 ? one : many}`;
+		if (theirs.flings !== mine.flings) notes.push(`${count(theirs.flings, 'fling')} against ${count(mine.flings, 'fling')}`);
+		if (theirs.bhops !== mine.bhops) notes.push(`${count(theirs.bhops, 'bunny hop chain')} against ${count(mine.bhops, 'chain')}`);
+		if (Math.abs(theirs.topSpeed - mine.topSpeed) > 0.15 * Math.max(theirs.topSpeed, mine.topSpeed)) notes.push(`top speed ${Math.round(theirs.topSpeed)} u/s against ${Math.round(mine.topSpeed)}`);
+		if (theirs.portals !== mine.portals) notes.push(`${count(theirs.portals, 'portal')} against ${mine.portals}`);
+		if (theirs.jumps !== mine.jumps) notes.push(`${count(theirs.jumps, 'jump')} against ${mine.jumps}`);
+		if (Math.abs(theirs.air - mine.air) > 0.2) notes.push(`${pct(theirs.air)} of it in the air against ${pct(mine.air)}`);
+		if (theirs.strafe !== null && mine.strafe !== null && Math.abs(theirs.strafe - mine.strafe) > 0.15) notes.push(`air strafing ${pct(theirs.strafe)} of the best against ${pct(mine.strafe)}`);
+		html += `<div class="loss-item"><div class="loss-head"><b>Section ${j + 1}</b><span class="loss-by">−${by.toFixed(2)} s</span><span class="muted">${times[0][j].toFixed(2)} against ${times[ref][j].toFixed(2)}</span>`
+			+ `<button data-compare="${j}" data-run="${ref}" title="Go to the section's start with ${name} beside this run: its inputs in the Inputs graph (and in split screen, in 3D)">Compare</button></div>`
+			+ `<div class="loss-notes">${notes.length ? `${name}: ${notes.join('; ')}.` : 'No move stands out: the difference is in the line taken and the timing (the Loss colours and the Inputs graph show where).'}</div></div>`;
+	}
+	return html;
+}
+// a section of the report, side by side: its start, that run's inputs beside
+// this one's (and in split screen, in 3D)
+function compareSection(table: RaceTable, s: Sections, j: number, ref: number) {
+	const racer = table.runs[ref];
+	if (!pb || !racer) return;
+	inputsRacer = racer;
+	if (viewMode === '3d') splitWith(racer);
+	($('graph-mode').querySelector('[data-g="inputs"]') as HTMLButtonElement).click();
+	seekTo(pb.globalTick(currentSeg, j ? s.gates[j - 1].tick : table.paths[0].start));
+}
+
 
 // ---- Guess the time ----
 // (ui/quiz.ts: it picks the runs; here they're opened and played. Until a

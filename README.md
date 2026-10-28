@@ -71,6 +71,10 @@ computer.
 - SAR proofs (`.sarp`), with the hash chain, signature and whether the
   recording stopped cleanly.
 - Demos (`.dem`). Open all of a run's demos at once and they play as one run.
+- A whole folder (**Open folder**, or drop it on the page): a full-game run's
+  demos played back to back as one timeline. The timeline names each chamber
+  with its time, and the Splits tab lists every chamber's time and the
+  running total; click one to go to it.
 - Single-player and co-op, from either player's recording.
 
 **On the map**
@@ -85,7 +89,23 @@ computer.
   over the segment, a line in its colour.
 - An **Inputs** graph: the keys this run held, tick by tick, over the
   seconds around now, beside those of the split screen's run (or the first
-  shown raced run), lined up as the race lines them up.
+  shown raced run), lined up as the race lines them up. Below the keys, when
+  each player was in the air, crouched or in a funnel.
+- A **movement lane** along the bottom of the other graphs: on the ground, in
+  the air or in a funnel, crouched, and portals passed through. Exact from
+  the player's flags once the 3D view has decoded the segment, guessed from
+  the motion and the duck key until then.
+- A **Strafe** graph: for each tick in the air, the speed the run gained
+  against the most the best air strafe could have gained from the same
+  speed, with the share for the segment and for the jump you're in. It uses
+  Portal 2's air movement as SAR's TAS strafer models it, and counts only
+  ticks the model explains (a wall or a button's push isn't the strafing).
+  It needs a view every tick, so a co-op partner's recording can't be told.
+  Steering often matters more than speed, so 100% isn't always the aim.
+- **Hitbox** (in 3D too): the player's collision box, 32 units square and
+  72 tall (36 crouched, drawn purple).
+- **Loss:** with runs raced, this run's path coloured by where it gained
+  (green) or lost (red) time on the fastest shown raced run on its route.
 - **Trail** and **Shots** (in 3D too): where the player was over the last
   moment, fading, and a line from the player to each portal as it's placed.
 - **Heat:** with runs raced, a heatmap of where they all went, brighter where
@@ -171,6 +191,12 @@ computer.
   runs took are grouped too (a run that goes another way for part of it is
   another route), and a route's button shows just its runs, in the views and
   the heatmap.
+- **Where this run lost time** (Race tab): the three sections it lost most in
+  against the fastest raced run on its route, each with what that run did
+  differently there (flings, bunny hops, top speed, portals, jumps, time in
+  the air, air strafing). **Compare** goes to the section's start with that
+  run's inputs beside this one's (and in split screen, in 3D).
+
 - **Leaderboard:** browse any chamber's runs on
   [board.portal2.sr](https://board.portal2.sr), best first, and open one or
   race the top 5, 10 or 20 (or the ones ticked) against the run shown, or

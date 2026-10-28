@@ -19,6 +19,8 @@ const TRAIL_TIME = 1;        // seconds of the trail behind the player
 const SHOT_TIME = 0.5;       // seconds a portal shot's line lasts
 const HEAT_CELL = 16;         // units a side of the heatmap's cells
 const HEAT_MAX_CELLS = 1024;  // across, at most (larger maps: larger cells)
+const HULL_HALF = 16, HULL_TALL = 72, HULL_DUCKED = 36;  // the player's collision box
+
 
 // Where many runs went: each cell of a grid over the map counted once for
 // every run whose path crosses it, as an image (a pixel a cell) and where
@@ -47,6 +49,13 @@ export class PathView {
 	shotsShown = false;
 	// the swarm's dots (see player/swarm.ts), colours as CSS
 	swarm: {pos: Vec3; color: string}[] = [];
+	// the player's hitbox (crouched: half as tall)
+	hitboxShown = false;
+	hitboxDucked = false;
+	// the path coloured by where it gained or lost time on another run (a
+	// colour a view, CSS; null: by speed), and what it's against
+	lossColors: string[] | null = null;
+	lossNote = '';
 	private scale = 0.1;  // pixels per unit
 	private cx = 0;       // world (projected) coordinates at the canvas center
 	private cy = 0;
@@ -163,21 +172,25 @@ export class PathView {
 		const current = view?.viewIndex ?? -1;
 
 		// whole path, dim; then the part already travelled, coloured by speed
+		// (or all of it by time gained and lost, the part to come dimmer)
 		g.lineWidth = 1.5;
 		g.lineJoin = 'round';
 		g.strokeStyle = 'rgba(138, 147, 163, 0.28)';
 		this.strokePath(g, 0, views.length - 1);
-		g.lineWidth = 2.5;
-		for (let i = 1; i <= current; i++) {
+		const loss = this.lossColors?.length === views.length ? this.lossColors : null;
+		g.lineWidth = loss ? 3.5 : 2.5;
+		for (let i = 1; i <= (loss ? views.length - 1 : current); i++) {
 			if (track.teleports[i]) continue;
 			const [ax, ay] = this.toScreen(...this.project(views[i - 1].origin));
 			const [bx, by] = this.toScreen(...this.project(views[i].origin));
-			g.strokeStyle = speedColor(track.speeds[i]);
+			g.strokeStyle = loss ? loss[i] : speedColor(track.speeds[i]);
+			g.globalAlpha = loss && i > current ? 0.55 : 1;
 			g.beginPath();
 			g.moveTo(ax, ay);
 			g.lineTo(bx, by);
 			g.stroke();
 		}
+		g.globalAlpha = 1;
 		// teleports as dashed links
 		g.setLineDash([4, 5]);
 		g.lineWidth = 1;
@@ -208,8 +221,37 @@ export class PathView {
 		if (this.trailShown) this.drawTrail(g, track, tick);
 		if (this.shotsShown) this.drawShots(g, track, events, tick);
 		for (const r of this.racers) if (r.view) this.drawRacer(g, r.view, r.color);
+		if (view && this.hitboxShown) this.drawHitbox(g, view);
 		if (view) this.drawPlayer(g, view);
 		this.drawScale(g, w, h);
+		if (loss && this.lossNote) this.drawLossKey(g);
+	}
+
+	// the player's collision box, from their feet: 32 units square, 72 tall
+	// (36 crouched)
+	private drawHitbox(g: CanvasRenderingContext2D, view: ViewState) {
+		const [x, y] = this.toScreen(...this.project(view.origin));
+		const half = HULL_HALF * this.scale, tall = (this.hitboxDucked ? HULL_DUCKED : HULL_TALL) * this.scale;
+		g.strokeStyle = this.hitboxDucked ? '#d45cff' : '#ffd84a';
+		g.lineWidth = 1.5;
+		g.setLineDash([4, 3]);
+		if (this.mode === 'top') g.strokeRect(x - half, y - half, half * 2, half * 2);
+		else g.strokeRect(x - half, y - tall, half * 2, tall);
+		g.setLineDash([]);
+	}
+
+	private drawLossKey(g: CanvasRenderingContext2D) {
+		g.font = '11px ui-monospace, Consolas, monospace';
+		g.textAlign = 'left';
+		const items: [string, string][] = [['#47d17b', 'gaining'], ['#ff5c5c', 'losing'], ['#8a93a3', `time ${this.lossNote}`]];
+		let x = 12;
+		for (const [color, label] of items) {
+			g.fillStyle = color;
+			g.fillRect(x, 12, 14, 4);
+			g.fillStyle = '#c5cad3';
+			g.fillText(label, x + 19, 18);
+			x += 19 + g.measureText(label).width + 14;
+		}
 	}
 
 	private strokePath(g: CanvasRenderingContext2D, from: number, to: number, track = this.track!) {

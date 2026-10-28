@@ -1018,6 +1018,11 @@ export class View3D {
 	// placed, fading over SHOT_TIME
 	shotsShown = false;
 	private shots: THREE.Mesh[] = [];
+	// The followed player's collision box (outside Eyes view): 32 units
+	// square, 72 tall, 36 crouched (from their flags, else hitboxDucked)
+	hitboxShown = false;
+	hitboxDucked = false;
+	private hitbox: THREE.LineSegments | null = null;
 	private shotsNow: {from: THREE.Vector3; to: THREE.Vector3; color: number[]; age: number}[] = [];
 	private shotGeometry = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true).rotateX(Math.PI / 2).translate(0, 0, 0.5);
 	// The swarm (see player/swarm.ts): a glowing dot at chest height where
@@ -5438,6 +5443,7 @@ export class View3D {
 			}
 		}
 		this.placeTrail(ft, view, tick);
+		this.placeHitbox(feet, other ? keyAt(this.followed!, tick) : pk);
 		// after the camera: the view model and what the recording player
 		// holds follow this frame's view
 		this.updateViewModel(tick);
@@ -5568,8 +5574,32 @@ export class View3D {
 		u.pxPerUnit.value = height / (2 * Math.tan(this.camera.fov * Math.PI / 360));
 	}
 
+	// (a unit tall, stretched to the player's height)
+	private placeHitbox(feet: THREE.Vector3 | null, key: EntityKey | undefined) {
+		const shown = this.hitboxShown && this.mode !== 'eyes' && !this.pip && !!feet;
+		if (shown && !this.hitbox) {
+			const box = new THREE.BoxGeometry(32, 32, 1);
+			box.translate(0, 0, 0.5);
+			this.hitbox = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({color: 0xffd84a, depthTest: false, transparent: true}));
+			box.dispose();
+			this.hitbox.renderOrder = 10;
+			this.hitbox.name = 'hitbox';
+			this.scene.add(this.hitbox);
+		}
+		if (!this.hitbox) return;
+		this.hitbox.visible = shown;
+		if (!shown) return;
+		const flags = Number(key?.extra?.m_fFlags ?? NaN);
+		const ducked = Number.isNaN(flags) ? this.hitboxDucked : (flags & 2) !== 0;
+		this.hitbox.position.copy(feet!);
+		this.hitbox.scale.set(1, 1, ducked ? 36 : 72);
+		(this.hitbox.material as THREE.LineBasicMaterial).color.set(ducked ? 0xd45cff : 0xffd84a);
+		this.hitbox.updateMatrixWorld(true);
+	}
+
 	// (the followed player's, or where the recording's view puts them)
-	private placeTrail(ft: EntityTrack | undefined, view: ViewState | null, tick: number) {
+	private placeTrail(
+ft: EntityTrack | undefined, view: ViewState | null, tick: number) {
 		const shown = this.trailShown && this.mode !== 'eyes' && !this.pip && !!view;
 		while (shown && this.trail.length < TRAIL_COPIES) {
 			const material = ghostMaterial();

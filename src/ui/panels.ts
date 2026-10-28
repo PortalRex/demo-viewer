@@ -6,6 +6,7 @@ import {describeSarEvent} from '../core/sardata.ts';
 import {Buttons} from '../core/usercmd.ts';
 import type {UserCmd} from '../core/model.ts';
 import type {Trick} from '../player/tricks.ts';
+import {chamberStretches} from '../player/fullgame.ts';
 
 export const fmtTime = (secs: number) => {
 	const sign = secs < 0 ? '-' : '';
@@ -74,7 +75,7 @@ export class Panels {
 			if (li) onSegment(Number(li.dataset.i));
 		};
 
-		this.renderSplits(run);
+		this.renderSplits(run, onSegment);
 		this.renderFile(run);
 	}
 
@@ -130,8 +131,25 @@ export class Panels {
 		}
 	}
 
-	private renderSplits(run: Run) {
+	// SAR's timer's splits, where it wrote them; and a run of many maps (a
+	// full game's demos) chamber by chamber, as long as each took, a click
+	// going to it
+	private renderSplits(run: Run, onSegment: (i: number) => void) {
 		const el = document.getElementById('tab-splits')!;
+		const stretches = chamberStretches(run);
+		let chambers = '';
+		if (stretches.length > 1) {
+			let total = 0;
+			chambers = `<h3>Chambers · ${stretches.length}</h3><table class="race-table chambers"><thead><tr><th></th><th>Chamber</th><th>Time</th><th>Run</th></tr></thead><tbody>`
+				+ stretches.map((c, i) => {
+					total += c.seconds;
+					return `<tr data-i="${c.first}" title="${esc(c.map)}${c.last > c.first ? ` (${c.last - c.first + 1} segments)` : ''}: go to it"><td>${i + 1}</td><td class="who">${esc(c.name)}</td><td>${fmtTime(c.seconds)}</td><td>${fmtTime(total)}</td></tr>`;
+				}).join('') + '</tbody></table>';
+		}
+		el.onclick = e => {
+			const row = (e.target as HTMLElement).closest<HTMLElement>('tr[data-i]');
+			if (row) onSegment(Number(row.dataset.i));
+		};
 		let summary: Extract<SarEvent, {kind: 'speedrunTime'}> | undefined;
 		let interval = 1 / 60;
 		for (const s of run.segments) {
@@ -143,9 +161,10 @@ export class Panels {
 			}
 		}
 		if (!summary) {
-			el.innerHTML = '<div class="empty">No speedrun timer data. SAR writes split times when its timer finishes or the recording stops during a run.</div>';
+			el.innerHTML = chambers + '<div class="empty">No speedrun timer data. SAR writes split times when its timer finishes or the recording stops during a run.</div>';
 			return;
 		}
+
 		let total = 0;
 		const parts = summary.splits.map(sp => {
 			const ticks = sp.segments.reduce((n, s) => n + s.ticks, 0);
@@ -153,7 +172,7 @@ export class Panels {
 			return `<div class="split"><div class="name"><span>${esc(sp.name)}</span><span>${fmtTime(ticks * interval)}</span></div>
 				${sp.segments.length > 1 ? sp.segments.map(s => `<div class="seg"><span>${esc(s.name)}</span><span>${fmtTime(s.ticks * interval)}</span></div>`).join('') : ''}</div>`;
 		});
-		el.innerHTML = `<h3>${summary.complete ? 'Finished run' : 'Run in progress'} · ${fmtTime(total * interval)}</h3>${parts.join('')}`
+		el.innerHTML = chambers + `<h3>${summary.complete ? 'Finished run' : 'Run in progress'} · ${fmtTime(total * interval)}</h3>${parts.join('')}`
 			+ (summary.rules.length ? `<h3>Category rules</h3><dl class="kv">${summary.rules.map(r => `<dt>${esc(r.name)}</dt><dd>${esc(r.description)}</dd>`).join('')}</dl>` : '');
 	}
 
