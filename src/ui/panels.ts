@@ -41,7 +41,7 @@ export class Panels {
 			const b = (e.target as HTMLElement).closest('button');
 			if (!b) return;
 			for (const x of tabs.querySelectorAll('button')) x.classList.toggle('on', x === b);
-			for (const t of ['events', 'console', 'splits', 'file']) document.getElementById(`tab-${t}`)!.hidden = t !== b.dataset.tab;
+			for (const t of ['events', 'console', 'splits', 'file', 'race']) document.getElementById(`tab-${t}`)!.hidden = t !== b.dataset.tab;
 		});
 	}
 

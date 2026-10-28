@@ -1,7 +1,9 @@
 import {groupRunFiles, loadRuns} from './core/load.ts';
 import {Playback, viewAt, cmdAt} from './player/playback.ts';
 import type {SegmentTrack, Located} from './player/playback.ts';
-import {alignedTick, boardRun, gapAt, sameBoardRun, trackOnSameMap} from './player/race.ts';
+import {alignedTick, boardRun, finishNear, finishOf, gapAt, sameBoardRun, trackOnSameMap} from './player/race.ts';
+import {routes, sections, sectionTimes} from './player/sections.ts';
+import type {RunPath, Sections} from './player/sections.ts';
 import type {Run, Segment} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
@@ -945,6 +947,7 @@ function render() {
 	if (viewMode !== '3d') showNameTags();
 	timeline.draw(t, loc.index);
 	showGaps(loc);
+	showRaceTab(loc);
 	speedGraph.draw(loc.tick);
 	inputs.show(cmd);
 	panels.update(loc.tick);
@@ -1235,7 +1238,7 @@ function showRacers(loc: Located, view: {origin: number[]} | null) {
 	view3d.ghosts = marks;
 	pathView.racers = marks;
 	if (pathView.heatShown) {
-		const tracks = [loc.track, ...racers.flatMap(r => r.players.map(p => racerTrack(p, loc)).filter((x): x is SegmentTrack => !!x))];
+		const tracks = [loc.track, ...racers.filter(r => r.shown).flatMap(r => r.players.map(p => racerTrack(p, loc)).filter((x): x is SegmentTrack => !!x))];
 		// (the same list kept while it's the same, so the map isn't redone)
 		if (tracks.length !== pathView.heatTracks.length || tracks.some((x, i) => x !== pathView.heatTracks[i])) pathView.heatTracks = tracks;
 	}
@@ -1318,6 +1321,9 @@ function changedRacers() {
 	showSplitToggle();
 	showHeatToggle();
 	gapsFor = null;
+	$('race-tab').hidden = !racers.length;
+	if (raceTable && !$('tab-race').hidden) drawRaceTab();
+	if (!racers.length && !$('tab-race').hidden) (document.querySelector('#tabs [data-tab="events"]') as HTMLButtonElement).click();
 	const shown = racers.filter(r => r.shown).length;
 	$('ghost-count').textContent = `${shown} of ${racers.length} shown`;
 	$('ghost-all').classList.toggle('on', shown === racers.length);
@@ -1473,6 +1479,105 @@ function showGaps(loc: Located) {
 	}
 	speedGraph.gaps = lines;
 }
+
+// ---- sections and routes ----
+// The Race tab: the raced runs section by section against this one (each
+// section's time, the best of each, and their sum), and which route each
+// took, a route's button showing just its runs. Worked out once a segment,
+// and again when the raced runs change
+interface RaceTable {
+	track: SegmentTrack;
+	racersKey: string;
+	runs: (Racer | null)[];  // (null: this run)
+	sections: Sections | null;
+	routes: number[];
+}
+let raceTable: RaceTable | null = null;
+let routeShown: number | null = null;  // the route whose runs alone are shown
+// a run's player through this segment, from its timer's start to its finish
+function racePath(loc: Located, track: SegmentTrack, run: Run, own: RunPath | null): RunPath {
+	if (!own) {
+		const f = finishOf(track.seg, run);
+		return {track, start: f && f.ticks !== null ? f.tick - f.ticks : track.seg.firstTick, end: f?.tick ?? track.seg.lastTick};
+	}
+	const start = racerTick({...loc, tick: own.start}, track);
+	const f = finishOf(track.seg, run) ?? finishNear(track, own.track, finishOf(own.track.seg, pb!.run), run);
+	return {track, start: Math.max(track.seg.firstTick, Math.round(start)), end: f?.tick ?? track.seg.lastTick};
+}
+function showRaceTab(loc: Located) {
+	if (!pb || !racers.length || $('tab-race').hidden) return;
+	const racersKey = racers.map(r => r.players.map(p => p.pb.run.fileName).join('+')).join(',');
+	if (raceTable?.track !== loc.track || raceTable.racersKey !== racersKey) {
+		const own = racePath(loc, loc.track, pb.run, null);
+		const paths: RunPath[] = [own];
+		const runs: (Racer | null)[] = [null];
+		for (const r of racers) {
+			// (in co-op, the player who started nearest this one: the same job)
+			const at = viewAt(loc.track, own.start)?.origin;
+			let best: {path: RunPath; d: number} | null = null;
+			for (const p of r.players) {
+				const track = racerTrack(p, loc);
+				if (!track) continue;
+				const path = racePath(loc, track, p.pb.run, own);
+				const v = viewAt(track, path.start)?.origin;
+				const d = at && v ? Math.hypot(at[0] - v[0], at[1] - v[1], at[2] - v[2]) : 0;
+				if (!best || d < best.d) best = {path, d};
+			}
+			if (!best) continue;
+			paths.push(best.path);
+			runs.push(r);
+		}
+		raceTable = {track: loc.track, racersKey, runs, sections: sections(paths), routes: routes(paths)};
+		drawRaceTab();
+	}
+	// (the section this run is in, marked)
+	const gates = raceTable.sections?.gates ?? [];
+	const now = gates.findIndex(g => loc.tick < g.tick);
+	$('tab-race').querySelectorAll('th[data-g]').forEach((th, i) => th.classList.toggle('now', i === now));
+}
+function drawRaceTab() {
+	const table = raceTable!, el = $('tab-race');
+	const esc = (s: string) => s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'})[c]!);
+	const letter = (k: number) => String.fromCharCode(65 + k);
+	const counts = new Map<number, number>();
+	for (const k of table.routes) counts.set(k, (counts.get(k) ?? 0) + 1);
+	let html = '<h3>Routes</h3><div class="race-routes">';
+	html += `<button class="toggle ${routeShown === null ? 'on' : ''}" data-route="" title="Show every raced run">All</button>`;
+	for (const [k, n] of [...counts].sort((a, b) => a[0] - b[0])) {
+		html += `<button class="toggle ${routeShown === k ? 'on' : ''}" data-route="${k}" title="Show just the runs that took route ${letter(k)}">Route ${letter(k)} · ${n}</button>`;
+	}
+	html += '</div>';
+	const s = table.sections;
+	if (!s || s.gates.length < 2) {
+		el.innerHTML = html + '<p class="race-note">No sections: the runs share too little of their routes.</p>';
+	} else {
+		// (the best of each section, and their sum, among the runs on this run's route)
+		const {times, best, sumOfBest} = sectionTimes(s, i => table.routes[i] === table.routes[0]);
+		const cell = (t: number, b: number) => `<td class="${Number.isFinite(t) && Math.abs(t - b) < 1e-9 ? 'best' : ''}">${Number.isFinite(t) ? t.toFixed(2) : '—'}</td>`;
+		html += `<h3>Sections</h3><table class="race-table"><thead><tr><th></th>${s.gates.map((_, i) => `<th data-g="${i}" title="Go to where this run reaches the end of section ${i + 1}">${i + 1}</th>`).join('')}<th>Total</th></tr></thead><tbody>`;
+		table.runs.forEach((r, i) => {
+			const name = r ? racerName(r) : pb!.run.player || 'This run';
+			const total = s.arrivals[i][s.arrivals[i].length - 1];
+			html += `<tr class="${r && !r.shown ? 'off' : ''}"><td class="who" style="color: ${r ? r.color : 'var(--text)'}" title="${esc(name)} (route ${letter(table.routes[i])})">${esc(name)}</td>${times[i].map((t, j) => cell(t, best[j])).join('')}<td>${Number.isFinite(total) ? total.toFixed(2) : '—'}</td></tr>`;
+		});
+		html += `<tr class="sob"><td class="who" title="The best of each section among the runs on this run's route (route ${letter(table.routes[0])}), added up">Sum of best (${letter(table.routes[0])})</td>${best.map(b => `<td>${Number.isFinite(b) ? b.toFixed(2) : '—'}</td>`).join('')}<td>${sumOfBest.toFixed(2)}</td></tr></tbody></table>`;
+		html += `<p class="race-note">Each section ends where every run passes near the same spot; a run's time there is when it last came nearest before going on. Gold: the best of each section among the runs on this run's route.</p>`;
+		el.innerHTML = html;
+	}
+	el.onclick = e => {
+		const target = e.target as HTMLElement;
+		const th = target.closest<HTMLElement>('th[data-g]');
+		if (th && pb && s) return seekTo(pb.globalTick(currentSeg, s.gates[Number(th.dataset.g)].tick));
+		const route = target.closest<HTMLElement>('[data-route]');
+		if (!route) return;
+		routeShown = route.dataset.route === '' ? null : Number(route.dataset.route);
+		table.runs.forEach((r, i) => r && (r.shown = routeShown === null || table.routes[i] === routeShown));
+		changedRacers();
+		drawRaceTab();
+	};
+}
+// (drawn once the tab's shown, after the panels have shown it)
+$('race-tab').addEventListener('click', () => soon(() => !playing && render()));
 
 // ---- the leaderboard ----
 // a run picked from it opened (a co-op run's partner's demo with it), or

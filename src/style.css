@@ -116,6 +116,19 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .check.unknown b, .check.none b { color: var(--muted); }
 .empty { padding: 12px; color: var(--muted); }
 .split { margin: 4px 12px 10px; }
+/* the Race tab: routes to show, and the runs section by section */
+.race-routes { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px; }
+.race-routes button { font-size: 12px; padding: 2px 8px; }
+.race-table { border-collapse: collapse; margin: 0 8px 10px; font-family: var(--mono); font-size: 11.5px; }
+.race-table th, .race-table td { padding: 2px 5px; text-align: right; white-space: nowrap; }
+.race-table th { color: var(--muted); font-weight: 400; cursor: pointer; }
+.race-table th:hover { color: var(--text); }
+.race-table th.now { color: var(--accent); }
+.race-table td.who { text-align: left; font-family: inherit; max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.race-table td.best { color: #ffd84a; font-weight: 700; }
+.race-table tr.off { opacity: 0.4; }
+.race-table tr.sob td { border-top: 1px solid var(--line); color: #ffd84a; }
+.race-note { padding: 0 12px; color: var(--muted); font-size: 12px; }
 .split .name { font-weight: 600; display: flex; justify-content: space-between; }
 .split .seg { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; color: var(--muted); padding-left: 10px; }
 
