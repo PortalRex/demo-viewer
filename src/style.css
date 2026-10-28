@@ -141,6 +141,8 @@ code { font-family: var(--mono); font-size: 0.92em; }
 .graph { position: relative; }
 .graph-mode { position: absolute; top: 6px; right: 4px; }
 .graph-mode button { font-size: 11px; padding: 1px 7px; }
+/* (taller for the Inputs graph's rows of keys) */
+#speed.tall { height: 136px; }
 
 .error { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #3a1717; border: 1px solid var(--bad); color: #ffd7d7; padding: 10px 16px; border-radius: 8px; max-width: 90vw; }
 

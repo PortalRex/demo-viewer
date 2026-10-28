@@ -3,6 +3,8 @@
 import type {Playback, SegmentTrack} from '../player/playback.ts';
 import {tricks} from '../player/tricks.ts';
 import type {Trick} from '../player/tricks.ts';
+import type {UserCmd} from '../core/model.ts';
+import {Buttons} from '../core/usercmd.ts';
 import {speedColor} from './pathview.ts';
 
 function prepare(c: HTMLCanvasElement) {
@@ -92,20 +94,45 @@ export interface GapLine {
 	gaps: Float32Array;
 }
 
+// a run's inputs for the Inputs graph: its user command at a tick of this
+// run's segment (lined up as the race lines it up), in its colour
+export interface InputLane {
+	name: string;
+	color: string;
+	cmd: (tick: number) => UserCmd | null;
+}
+// the keys the Inputs graph shows, a row each
+const INPUT_KEYS: [string, (c: UserCmd) => boolean][] = [
+	['W', c => (c.buttons & Buttons.FORWARD) !== 0 || c.forwardMove > 0],
+	['A', c => (c.buttons & Buttons.MOVELEFT) !== 0 || c.sideMove < 0],
+	['S', c => (c.buttons & Buttons.BACK) !== 0 || c.forwardMove < 0],
+	['D', c => (c.buttons & Buttons.MOVERIGHT) !== 0 || c.sideMove > 0],
+	['Jump', c => (c.buttons & Buttons.JUMP) !== 0],
+	['Duck', c => (c.buttons & Buttons.DUCK) !== 0],
+	['Use', c => (c.buttons & Buttons.USE) !== 0],
+	['Blue', c => (c.buttons & Buttons.ATTACK) !== 0],
+	['Orange', c => (c.buttons & Buttons.ATTACK2) !== 0],
+];
+const INPUT_WINDOW = 1.5;  // seconds either side of now the Inputs graph shows
+const INPUT_LABELS = 46;   // pixels for the keys' names
+
 // The current segment's speed, or how far ahead or behind each raced run is
 // over it (Gap), with the segment's tricks marked along the top: clicking
-// near one goes to it
+// near one goes to it. Or (Inputs) the keys this run and another held, tick
+// by tick, over the few seconds around now
 export class SpeedGraph {
 	private track: SegmentTrack | null = null;
 	private max = 400;
 	private c: HTMLCanvasElement;
-	mode: 'speed' | 'gap' = 'speed';
+	private now = 0;  // the tick last drawn at
+	mode: 'speed' | 'gap' | 'inputs' = 'speed';
 	tricks: Trick[] = [];
 	gaps: GapLine[] = [];
+	lanes: InputLane[] = [];
 
 	constructor(c: HTMLCanvasElement, seek: (fraction: number) => void) {
 		this.c = c;
-		seekOnDrag(c, f => seek(this.snap(f) ?? f));
+		seekOnDrag(c, f => seek(this.mode === 'inputs' ? this.inputsFraction(f) : this.snap(f) ?? f));
 		c.addEventListener('pointermove', e => {
 			const r = c.getBoundingClientRect();
 			const near = this.trickNear((e.clientX - r.left) / r.width);
@@ -140,11 +167,23 @@ export class SpeedGraph {
 		return t && this.track ? (t.tick - this.track.seg.firstTick) / this.track.length : null;
 	}
 
+	// (Inputs: a point across the graph as a point across the segment)
+	private inputsFraction(f: number): number {
+		const tr = this.track;
+		if (!tr) return f;
+		const w = this.c.clientWidth, half = INPUT_WINDOW / tr.seg.intervalPerTick;
+		const at = (f * w - INPUT_LABELS) / (w - INPUT_LABELS);
+		const tick = this.now - half + Math.max(0, at) * 2 * half;
+		return Math.min(1, Math.max(0, (Math.round(tick) - tr.seg.firstTick) / tr.length));
+	}
+
 	draw(tick: number) {
 		const {g, w, h} = prepare(this.c);
 		g.clearRect(0, 0, w, h);
+		this.now = tick;
 		const tr = this.track;
 		if (!tr || !tr.seg.views.length) return;
+		if (this.mode === 'inputs') return this.drawInputs(g, w, h, tick);
 		const t0 = tr.seg.firstTick, len = tr.length;
 		const x = (t: number) => ((t - t0) / len) * w;
 		if (this.mode === 'gap' && this.gaps.length) this.drawGaps(g, w, h, x);
@@ -153,6 +192,49 @@ export class SpeedGraph {
 		for (const t of this.tricks) {
 			g.fillStyle = t.color;
 			g.fillRect(Math.round(x(t.tick)) - 1, 0, 2, t.kind === 'portal' ? 4 : 7);
+		}
+		g.fillStyle = '#5aa9ff';
+		g.fillRect(x(tick) - 1, 0, 2, h);
+	}
+
+	// each key a row, each run a lane in it, a bar for every tick it was held;
+	// now in the middle
+	private drawInputs(g: CanvasRenderingContext2D, w: number, h: number, tick: number) {
+		const half = INPUT_WINDOW / this.track!.seg.intervalPerTick;
+		const from = Math.floor(tick - half), to = Math.ceil(tick + half);
+		const x = (t: number) => INPUT_LABELS + ((t - (tick - half)) / (2 * half)) * (w - INPUT_LABELS);
+		const tickW = (w - INPUT_LABELS) / (2 * half);
+		// (the runs named along the top, clear of the graph's mode buttons)
+		const top = 28, rowH = (h - top - 2) / INPUT_KEYS.length, laneH = Math.max(1, (rowH - 2) / Math.max(1, this.lanes.length));
+		g.font = '10px ui-monospace, Consolas, monospace';
+		g.textBaseline = 'middle';
+		g.textAlign = 'left';
+		INPUT_KEYS.forEach(([name], k) => {
+			const y = top + k * rowH;
+			g.fillStyle = k % 2 ? '#141820' : '#181d26';
+			g.fillRect(INPUT_LABELS, y, w - INPUT_LABELS, rowH);
+			g.fillStyle = '#8a93a3';
+			g.fillText(name, 4, y + rowH / 2);
+		});
+		// (a line every 6 ticks, a tenth of a second)
+		g.fillStyle = '#232a35';
+		for (let t = Math.ceil(from / 6) * 6; t <= to; t += 6) g.fillRect(Math.round(x(t)), top, 1, h - top - 2);
+		this.lanes.forEach((lane, l) => {
+			g.fillStyle = lane.color;
+			for (let t = from; t <= to; t++) {
+				const c = lane.cmd(t);
+				if (!c) continue;
+				INPUT_KEYS.forEach(([, held], k) => {
+					if (held(c)) g.fillRect(x(t), top + k * rowH + 1 + l * laneH, Math.max(1, tickW - 0.5), laneH - (this.lanes.length > 1 ? 0.5 : 0));
+				});
+			}
+		});
+		let nameX = INPUT_LABELS;
+		for (const lane of this.lanes) {
+			g.fillStyle = lane.color;
+			g.fillRect(nameX, 10, 8, 8);
+			g.fillText(lane.name, nameX + 12, 14);
+			nameX += 12 + g.measureText(lane.name).width + 16;
 		}
 		g.fillStyle = '#5aa9ff';
 		g.fillRect(x(tick) - 1, 0, 2, h);

@@ -7,7 +7,7 @@ import type {RunPath, Sections} from './player/sections.ts';
 import type {Run, Segment} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
 import {Timeline, SpeedGraph} from './ui/charts.ts';
-import type {GapLine} from './ui/charts.ts';
+import type {GapLine, InputLane} from './ui/charts.ts';
 import {tricks} from './player/tricks.ts';
 import {BoardBrowser, boardDemo} from './ui/board.ts';
 import {linkHash, parseLink} from './core/links.ts';
@@ -1429,20 +1429,22 @@ $('heat-toggle').onclick = () => {
 // ---- the gap graph ----
 // how far ahead or behind each shown raced run is over the segment, worked
 // out once a segment (and again when the raced runs change)
-let graphMode: 'speed' | 'gap' = 'speed';
+let graphMode: 'speed' | 'gap' | 'inputs' = 'speed';
 let gapsFor: SegmentTrack | null = null;
 $('graph-mode').onclick = e => {
 	const b = (e.target as HTMLElement).closest('button');
 	if (!b) return;
-	graphMode = b.dataset.g as 'speed' | 'gap';
+	graphMode = b.dataset.g as typeof graphMode;
 	for (const x of $('graph-mode').querySelectorAll('button')) x.classList.toggle('on', x === b);
 	render();
 };
 const GAP_SAMPLES = 500;
 const GAP_NEAR = 96;  // units: a raced player this near where this one is was here
 function showGaps(loc: Located) {
-	$('graph-mode').hidden = !racers.length;
-	speedGraph.mode = racers.length ? graphMode : 'speed';
+	($('graph-mode').querySelector('[data-g="gap"]') as HTMLElement).hidden = !racers.length;
+	speedGraph.mode = graphMode === 'gap' && !racers.length ? 'speed' : graphMode;
+	$('speed').classList.toggle('tall', speedGraph.mode === 'inputs');
+	if (speedGraph.mode === 'inputs') speedGraph.lanes = inputLanes(loc);
 	if (speedGraph.mode !== 'gap' || gapsFor === loc.track) return;
 	gapsFor = loc.track;
 	const own = loc.track, seg = own.seg;
@@ -1478,6 +1480,26 @@ function showGaps(loc: Located) {
 		lines.push(line);
 	}
 	speedGraph.gaps = lines;
+}
+
+// the Inputs graph's runs: this one, and the one split screen shows (or the
+// first shown raced run), its commands lined up as the race lines it up
+function inputLanes(loc: Located): InputLane[] {
+	const own = loc.track;
+	const lanes: InputLane[] = [{name: pb?.run.player || 'This run', color: '#e6e9ef', cmd: t => cmdHeld(own, t)}];
+	const r = splitChoice && splitChoice !== 'partner' ? splitChoice : racers.find(x => x.shown);
+	const p = r?.players.find(p => racerTrack(p, loc));
+	const track = p && racerTrack(p, loc);
+	if (r && p && track) {
+		lanes.push({name: racerName(r), color: r.color, cmd: t => cmdHeld(track, Math.round(racerTick({...loc, tick: t}, track)))});
+	}
+	return lanes;
+}
+// (the command at a tick, or the one a tick or two before it, as some demos
+// have one every other tick: none past that, as where none were recorded)
+function cmdHeld(track: SegmentTrack, tick: number) {
+	const c = cmdAt(track, tick);
+	return c && tick - c.tick <= 2 ? c : null;
 }
 
 // ---- sections and routes ----
