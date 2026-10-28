@@ -135,8 +135,8 @@ function devGameFiles(): Plugin {
 
 // Dev only: the leaderboard (board.portal2.sr) at /__board/, as its demo
 // files aren't served for other sites to read. Just a chamber's scores and
-// a run's demo pass, and a chamber's world records (the demo's name in
-// X-File-Name, from where it redirects)
+// a run's demo pass, and a chamber's world records and a player's personal
+// bests (the demo's name in X-File-Name, from where it redirects)
 const BOARD = 'https://board.portal2.sr';
 function boardProxy(): Plugin {
 	return {
@@ -145,7 +145,7 @@ function boardProxy(): Plugin {
 		configureServer(server) {
 			server.middlewares.use('/__board', async (req, res) => {
 				const path = req.url ?? '';
-				if (!/^\/(chamber\/\d+\/json|changelog\/json\?chamber=\d+&wr=1|getDemo\?id=\d+)$/.test(path)) {
+				if (!/^\/(chamber\/\d+\/json|changelog\/json\?chamber=\d+&(wr=1|profileNumber=\d+)|getDemo\?id=\d+)$/.test(path)) {
 					res.statusCode = 404;
 					res.end();
 					return;

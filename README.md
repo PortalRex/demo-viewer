@@ -175,7 +175,8 @@ computer.
   [board.portal2.sr](https://board.portal2.sr), best first, and open one or
   race the top 5, 10 or 20 (or the ones ticked) against the run shown, or
   **Race WR history**: every world record the chamber has had (those with
-  demos), each named with when it was set. Their
+  demos), each named with when it was set, or a row's **PBs**: every personal
+  best that player has set on the chamber. Their
   demos downloaded straight into the page. A co-op run comes with both
   players' demos, the partner's found beside it where the board lists them
   at another run. Downloaded demos are kept in the browser (the latest 300),

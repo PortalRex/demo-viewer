@@ -29,6 +29,16 @@ export async function boardWrHistory(chamber: Chamber): Promise<BoardRun[]> {
 		note: r.date ? new Date(r.date).toLocaleDateString('en', {month: 'short', year: 'numeric', timeZone: 'UTC'}) : null,
 	}));
 }
+// A player's personal bests on a chamber, newest first, as runs to race:
+// each noted with when it was set
+export async function boardPbHistory(chamber: Chamber, steamId: string): Promise<BoardRun[]> {
+	const res = await fetch(`${BASE}/changelog/json?chamber=${chamber.id}&profileNumber=${steamId}`);
+	if (!res.ok) throw new Error(`the board answered ${res.status}`);
+	return wrHistoryOf(await res.json() as WrJson, false).filter(r => r.players.some(p => p.hasDemo)).map(r => ({
+		rank: 0, score: r.score, date: r.date, coop: chamber.coop, players: r.players,
+		note: r.date ? new Date(r.date).toLocaleDateString('en', {month: 'short', year: 'numeric', timeZone: 'UTC'}) : null,
+	}));
+}
 export interface DemoFile {
 	bytes: Uint8Array;
 	name: string;
@@ -156,6 +166,7 @@ export class BoardBrowser {
 			const run = this.runs[Number(row.dataset.i)];
 			if (target.closest('.board-open')) return void this.openRun(run);
 			if (target.closest('.board-race')) return void this.race([run]);
+			if (target.closest('.board-pbs')) return void this.racePbHistory(run);
 			if (!run.players.some(p => p.hasDemo)) return;
 			if (this.picked.has(run)) this.picked.delete(run);
 			else this.picked.add(run);
@@ -178,7 +189,9 @@ export class BoardBrowser {
 		const chamber = (map && chamberFor(map)) || this.chamber || CHAMBERS[0];
 		this.dialog.showModal();
 		this.showButtons();
+		// (the list drawn again: what can be raced depends on the run shown)
 		if (chamber !== this.chamber || !this.runs.length) this.show(chamber);
+		else this.showList();
 	}
 
 	private async show(chamber: Chamber) {
@@ -197,18 +210,22 @@ export class BoardBrowser {
 			if (this.chamber === chamber) list.innerHTML = `<div class="empty">Couldn't load the board: ${esc((e as Error).message)}</div>`;
 			return;
 		}
+		this.showList();
+	}
+
+	private showList() {
 		const race = this.canRace(this.chamber);
-		list.innerHTML = !this.runs.length ? '<div class="empty">No runs on this chamber.</div>' : `<table>${this.runs.map((r, i) => {
+		this.el('board-list').innerHTML = !this.runs.length ? '<div class="empty">No runs on this chamber.</div>' : `<table>${this.runs.map((r, i) => {
 			const demo = r.players.some(p => p.hasDemo);
 			return `<tr data-i="${i}" class="${demo ? '' : 'no-demo'}" title="${esc(r.note ?? '')}">
 				<td class="rank">${r.rank}</td>
 				<td class="who">${r.players.map(p => esc(p.name)).join(' &amp; ')}</td>
 				<td class="time">${fmtScore(r.score)}</td>
 				<td class="date">${esc((r.date ?? '').slice(0, 10))}</td>
-				<td class="acts">${demo ? `<button class="board-open" title="Open this run">Open</button>${race ? '<button class="board-race" title="Race this run against the one shown">Race</button>' : ''}` : '<span class="muted">no demo</span>'}</td>
+				<td class="acts">${demo ? `<button class="board-open" title="Open this run">Open</button>${race ? '<button class="board-race" title="Race this run against the one shown">Race</button><button class="board-pbs" title="Race every personal best this player has set here (with demos) against the run shown, each named with when it was set">PBs</button>' : ''}` : '<span class="muted">no demo</span>'}</td>
 			</tr>`;
 		}).join('')}</table>`;
-		this.showButtons();
+		this.showPicked();
 	}
 
 	private showPicked() {
@@ -294,6 +311,20 @@ export class BoardBrowser {
 		} finally {
 			this.busy = false;
 			this.showButtons();
+		}
+	}
+
+	// every personal best a run's (first) player set on the chamber
+	private async racePbHistory(run: BoardRun) {
+		if (this.busy || !this.chamber || !this.canRace(this.chamber)) return;
+		const player = run.players[0];
+		this.note(`Looking up ${player.name}'s personal bests…`);
+		try {
+			const runs = await boardPbHistory(this.chamber, player.steamId);
+			if (!runs.length) return this.note(`None of ${player.name}'s personal bests here has a demo.`);
+			await this.race(runs, true);
+		} catch (e) {
+			this.note(`Couldn't look them up: ${(e as Error).message}`);
 		}
 	}
 
