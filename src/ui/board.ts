@@ -12,6 +12,7 @@ const BOARD = 'https://board.portal2.sr';
 // deploy/board-proxy), else the board itself, whose demos it then can't read)
 const BASE: string = import.meta.env.DEV ? '/__board' : (import.meta.env.VITE_BOARD_PROXY || BOARD).replace(/\/$/, '');
 const SHOWN_RUNS = 200;
+const SWARM_RUNS = 100;
 
 export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {
 	const res = await fetch(`${BASE}/chamber/${chamber.id}/json`);
@@ -76,7 +77,8 @@ export function boardDemo(changelogId: number, store = true): Promise<DemoFile> 
 			return demo;
 		})();
 		demos.set(changelogId, p);
-		p.catch(() => demos.delete(changelogId));
+		// (held only while it's on its way: once here, the cache storage has it)
+		p.finally(() => demos.get(changelogId) === p && demos.delete(changelogId)).catch(() => {});
 	}
 	return p;
 }
@@ -134,6 +136,7 @@ export class BoardBrowser {
 	onOpen: (files: DemoFile[]) => Promise<void> = async () => {};
 	onRace: (runs: DemoFile[][]) => Promise<void> = async () => {};
 	canRace: (chamber: Chamber | null) => boolean = () => false;
+	onSwarm: (runs: {file: DemoFile; rank: number}[]) => Promise<void> = async () => {};
 
 	constructor(dialog: HTMLDialogElement) {
 		this.dialog = dialog;
@@ -163,6 +166,7 @@ export class BoardBrowser {
 		}
 		this.el('board-race-picked').onclick = () => this.race(this.runs.filter(r => this.picked.has(r)));
 		this.el('board-wr').onclick = () => this.raceWrHistory();
+		this.el('board-swarm').onclick = () => this.swarm(SWARM_RUNS);
 	}
 
 	private el<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -219,6 +223,7 @@ export class BoardBrowser {
 		for (const b of this.dialog.querySelectorAll<HTMLButtonElement>('.board-top')) b.disabled = !race || !this.runs.length;
 		this.el<HTMLButtonElement>('board-race-picked').disabled = !race || !this.picked.size;
 		this.el<HTMLButtonElement>('board-wr').disabled = !race;
+		this.el<HTMLButtonElement>('board-swarm').disabled = !race || !this.runs.length;
 		this.el('board-race-note').hidden = this.canRace(this.chamber);
 	}
 
@@ -257,6 +262,38 @@ export class BoardBrowser {
 			await this.race(runs, true);
 		} catch (e) {
 			this.note(`Couldn't look them up: ${(e as Error).message}`);
+		}
+	}
+
+	// the top runs (one player's demo each) as the swarm
+	private async swarm(count: number) {
+		if (this.busy || !this.canRace(this.chamber)) return;
+		const runs = this.runs.filter(r => r.players.some(p => p.hasDemo)).slice(0, count);
+		this.busy = true;
+		this.showButtons();
+		let done = 0;
+		const got: {file: DemoFile; rank: number}[] = [];
+		try {
+			let next = 0;
+			const worker = async () => {
+				while (next < runs.length) {
+					const r = runs[next++];
+					try {
+						got.push({file: await boardDemo(r.players.find(p => p.hasDemo)!.changelogId), rank: r.rank});
+					} catch {}
+					this.note(`Downloading ${++done} of ${runs.length}…`);
+				}
+			};
+			await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+			this.note('Reading them…');
+			await this.onSwarm(got.sort((a, b) => a.rank - b.rank));
+			this.dialog.close();
+			this.note(null);
+		} catch (e) {
+			this.note(`Couldn't make the swarm: ${(e as Error).message}`);
+		} finally {
+			this.busy = false;
+			this.showButtons();
 		}
 	}
 

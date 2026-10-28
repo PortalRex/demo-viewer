@@ -198,6 +198,37 @@ export interface NameTag {
 	hidden: boolean;
 }
 
+// The swarm's dots: soft round glows, about SWARM_SIZE units across, in
+// each run's rank colour; added to what's behind them (drawn into the HDR
+// frame, so divided by the exposure)
+const SWARM_SIZE = 14;
+function swarmMaterial(): THREE.ShaderMaterial {
+	return new THREE.ShaderMaterial({
+		uniforms: {exposure: {value: 1}, pxPerUnit: {value: 600}},
+		vertexShader: `
+			attribute vec3 tint;
+			uniform float pxPerUnit;
+			varying vec3 vTint;
+			void main() {
+				vTint = tint;
+				vec4 p = modelViewMatrix * vec4(position, 1.0);
+				gl_Position = projectionMatrix * p;
+				gl_PointSize = clamp(${SWARM_SIZE.toFixed(1)} * pxPerUnit / max(-p.z, 1.0), 2.5, 48.0);
+			}`,
+		fragmentShader: `
+			uniform float exposure;
+			varying vec3 vTint;
+			void main() {
+				float d = length(gl_PointCoord - 0.5) * 2.0;
+				float a = pow(max(0.0, 1.0 - d), 2.0);
+				gl_FragColor = vec4(vTint * a * 0.9 / max(exposure, 0.05), 1.0);
+			}`,
+		transparent: true,
+		depthWrite: false,
+		blending: THREE.AdditiveBlending,
+	});
+}
+
 // A raced run's player: a glowing see-through body (brightest at its
 // edges) with a pointer where it looks
 // (its glow, on a capsule or posed on the player's own skinned model)
@@ -989,6 +1020,10 @@ export class View3D {
 	private shots: THREE.Mesh[] = [];
 	private shotsNow: {from: THREE.Vector3; to: THREE.Vector3; color: number[]; age: number}[] = [];
 	private shotGeometry = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true).rotateX(Math.PI / 2).translate(0, 0, 0.5);
+	// The swarm (see player/swarm.ts): a glowing dot at chest height where
+	// each of its runs' players is, all of them one draw
+	swarm: {pos: Vec3; color: [number, number, number]}[] = [];
+	private swarmPoints: THREE.Points | null = null;
 	private ghostRobot(track: EntityTrack): THREE.Group | null {
 		let robot = this.ghostRobots.get(track);
 		if (robot) return robot;
@@ -5338,6 +5373,7 @@ export class View3D {
 		this.placeGhosts();
 		this.placeShots();
 		this.shotsNow = [];
+		this.placeSwarm();
 
 		// player: the decoded entity where there is one, else the recorded view
 		// the followed player: the recording one (its recorded view), or the
@@ -5495,6 +5531,41 @@ export class View3D {
 			(beam.material as THREE.MeshBasicMaterial).color.setRGB(...s.color.map(c => (c / 255) * fade * 1.5 / Math.max(this.exposure, 0.05)) as [number, number, number]);
 			beam.updateMatrixWorld(true);
 		});
+	}
+
+	private placeSwarm() {
+		const n = this.swarm.length;
+		if (!n && !this.swarmPoints) return;
+		let pts = this.swarmPoints;
+		const capacity = pts ? (pts.geometry.getAttribute('position') as THREE.BufferAttribute).count : 0;
+		if (!pts || capacity < n) {
+			if (pts) {
+				this.ghostGroup.remove(pts);
+				pts.geometry.dispose();
+				(pts.material as THREE.Material).dispose();
+			}
+			const size = Math.max(n, 16);
+			const geometry = new THREE.BufferGeometry();
+			geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(size * 3), 3).setUsage(THREE.DynamicDrawUsage));
+			geometry.setAttribute('tint', new THREE.BufferAttribute(new Float32Array(size * 3), 3).setUsage(THREE.DynamicDrawUsage));
+			pts = this.swarmPoints = new THREE.Points(geometry, swarmMaterial());
+			pts.name = 'swarm';
+			pts.frustumCulled = false;
+			this.ghostGroup.add(pts);
+		}
+		const pos = pts.geometry.getAttribute('position') as THREE.BufferAttribute, tint = pts.geometry.getAttribute('tint') as THREE.BufferAttribute;
+		this.swarm.forEach((d, i) => {
+			pos.setXYZ(i, d.pos[0], d.pos[1], d.pos[2] + 40);
+			tint.setXYZ(i, ...d.color);
+		});
+		pos.needsUpdate = tint.needsUpdate = true;
+		pts.geometry.setDrawRange(0, n);
+		pts.visible = n > 0;
+		const u = (pts.material as THREE.ShaderMaterial).uniforms;
+		u.exposure.value = this.exposure;
+		// (pixels a unit is across, a unit away: the dots sized in the world)
+		const height = this.renderer?.getDrawingBufferSize(new THREE.Vector2()).y ?? 720;
+		u.pxPerUnit.value = height / (2 * Math.tan(this.camera.fov * Math.PI / 360));
 	}
 
 	// (the followed player's, or where the recording's view puts them)

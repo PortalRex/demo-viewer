@@ -45,6 +45,8 @@ export class PathView {
 	// portal shots (a line from them to each portal just placed, fading)
 	trailShown = false;
 	shotsShown = false;
+	// the swarm's dots (see player/swarm.ts), colours as CSS
+	swarm: {pos: Vec3; color: string}[] = [];
 	private scale = 0.1;  // pixels per unit
 	private cx = 0;       // world (projected) coordinates at the canvas center
 	private cy = 0;
@@ -202,6 +204,7 @@ export class PathView {
 		g.globalAlpha = 1;
 
 		this.drawPortals(g, events, tick);
+		this.drawSwarm(g);
 		if (this.trailShown) this.drawTrail(g, track, tick);
 		if (this.shotsShown) this.drawShots(g, track, events, tick);
 		for (const r of this.racers) if (r.view) this.drawRacer(g, r.view, r.color);
@@ -291,6 +294,22 @@ export class PathView {
 		}
 		g.putImageData(pixels, 0, 0);
 		return {key, image, x0, y0, cell, runs: tracks.length};
+	}
+
+	// (glowing: each dot added to what's under it)
+	private drawSwarm(g: CanvasRenderingContext2D) {
+		if (!this.swarm.length) return;
+		g.globalCompositeOperation = 'lighter';
+		g.globalAlpha = 0.75;
+		for (const d of this.swarm) {
+			const [x, y] = this.toScreen(...this.project(d.pos));
+			g.fillStyle = d.color;
+			g.beginPath();
+			g.arc(x, y, 3, 0, Math.PI * 2);
+			g.fill();
+		}
+		g.globalAlpha = 1;
+		g.globalCompositeOperation = 'source-over';
 	}
 
 	private drawTrail(g: CanvasRenderingContext2D, track: SegmentTrack, tick: number) {

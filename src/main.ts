@@ -3,6 +3,8 @@ import {Playback, viewAt, cmdAt} from './player/playback.ts';
 import type {SegmentTrack, Located} from './player/playback.ts';
 import {alignedTick, boardRun, finishNear, finishOf, gapAt, sameBoardRun, trackOnSameMap} from './player/race.ts';
 import {routes, sections, sectionTimes} from './player/sections.ts';
+import {rankColor, swarmAt, swarmRun} from './player/swarm.ts';
+import type {SwarmRun} from './player/swarm.ts';
 import type {RunPath, Sections} from './player/sections.ts';
 import type {Run, Segment} from './core/model.ts';
 import {PathView} from './ui/pathview.ts';
@@ -528,6 +530,7 @@ function closeRun() {
 	shownPartners = [];
 	view3d.ghosts = [];
 	splitChoice = null;
+	swarm = [];
 	view3d.split = false;
 	view3d.halfWidth = false;
 	sideView?.setMap(null);
@@ -1239,6 +1242,7 @@ function showRacers(loc: Located, view: {origin: number[]} | null) {
 	}
 	view3d.ghosts = marks;
 	pathView.racers = marks;
+	showSwarm(loc);
 	if (pathView.heatShown) {
 		const tracks = [loc.track, ...racers.filter(r => r.shown).flatMap(r => r.players.map(p => racerTrack(p, loc)).filter((x): x is SegmentTrack => !!x))];
 		// (the same list kept while it's the same, so the map isn't redone)
@@ -1414,6 +1418,24 @@ $<HTMLInputElement>('ghost-input').onchange = async e => {
 	}
 	$('ghost').classList.toggle('on', racers.length > 0);
 	changedRacers();
+};
+
+// ---- the swarm ----
+// the board's top runs as dots (loaded from the leaderboard dialog), shown
+// while Swarm is on
+let swarm: SwarmRun[] = [];
+let swarmShown = true;
+function showSwarm(loc: Located) {
+	$('swarm-toggle').hidden = !swarm.length;
+	$('swarm-toggle').classList.toggle('on', swarmShown);
+	const at = swarmShown && pb && swarm.length ? swarmAt(swarm, pb, loc) : [];
+	const dots = at.flatMap((pos, i) => (pos ? [{pos, color: rankColor(swarm[i].rank, swarm.length)}] : []));
+	view3d.swarm = dots;
+	pathView.swarm = dots.map(d => ({pos: d.pos, color: `rgb(${d.color.map(c => Math.round(c * 255)).join(',')})`}));
+}
+$('swarm-toggle').onclick = () => {
+	swarmShown = !swarmShown;
+	render();
 };
 
 // ---- trail and portal shots ----
@@ -1677,6 +1699,19 @@ board.onRace = async (runs: DemoFile[][]) => {
 	if (failed.length) showError(`Couldn't race ${failed.length === 1 ? failed[0] : `${failed.length} of them (${failed.join(', ')})`}: too old to read, or not of this run's maps.`);
 	$('ghost').classList.toggle('on', racers.length > 0);
 	changedRacers();
+};
+board.onSwarm = async runs => {
+	const loaded: SwarmRun[] = [];
+	for (const {file, rank} of runs) {
+		try {
+			loaded.push(swarmRun(await loadRuns([file]), rank));
+		} catch {}
+		// (a breath between, so the page keeps drawing)
+		await new Promise(r => setTimeout(r, 0));
+	}
+	swarm = loaded;
+	swarmShown = true;
+	render();
 };
 $('board-btn').onclick = () => board.openFor(pb?.locate(t).track.seg.map ?? null);
 $('drop-board').onclick = () => board.openFor(null);
