@@ -160,6 +160,21 @@ code { font-family: var(--mono); font-size: 0.92em; }
 }
 .drop-file { color: var(--accent); }
 .drop-file:empty { display: none; }
+/* Guess the time: its panel over the view, and everything that would tell
+   the run's time, or whose it is, hidden while it's played */
+.quiz { position: fixed; z-index: 20; left: 50%; top: 60px; transform: translateX(-50%); width: min(560px, calc(100% - 24px)); background: rgba(16, 19, 25, 0.94); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
+.quiz-head { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
+.quiz-head b { color: var(--text); font-size: 15px; }
+.quiz-head button { margin-left: auto; }
+.quiz-body p { margin: 8px 0; line-height: 1.45; }
+.quiz-body input { width: 220px; padding: 5px 8px; font-size: 14px; }
+.quiz-body button.primary { background: var(--accent); color: #06121f; font-weight: 600; border: 0; padding: 6px 12px; }
+.quiz-results { margin: 6px 0 10px; padding-left: 20px; color: var(--muted); }
+body.quiz #run-title, body.quiz #badges, body.quiz #total-time, body.quiz .segments .dur, body.quiz #clock, body.quiz #share,
+body.quiz #cm-hud, body.quiz #cm-hud-side, body.quiz #cm-toggle, body.quiz #names-toggle, body.quiz #ghost, body.quiz #ghost-hud,
+body.quiz #board-btn, body.quiz #close-run, body.quiz #quiz-btn, body.quiz #readout, body.quiz #routemap-btn, body.quiz #export { display: none !important; }
+body.quiz .side { visibility: hidden; }
+
 /* the leaderboard: a chamber's runs, best first */
 .board-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; width: min(720px, calc(100vw - 32px)); }
 .board-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }

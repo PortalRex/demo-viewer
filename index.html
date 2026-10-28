@@ -12,6 +12,7 @@
 			<div class="brand">SAR Run Viewer</div>
 			<div id="run-title" class="run-title"></div>
 			<div id="badges" class="badges"></div>
+			<button id="quiz-btn" class="close-btn" title="Guess the time: a random leaderboard run's first seconds, then guess how long the whole run is (five rounds)">Guess the time</button>
 			<button id="board-btn" class="close-btn" title="Open or race runs from the leaderboard (board.portal2.sr): their demos downloaded straight into the page">Leaderboard</button>
 			<button id="close-run" class="close-btn" hidden title="Close this run (and the runs raced against it), freeing what was loaded for it">Close</button>
 			<label class="open-btn">
@@ -20,12 +21,14 @@
 			</label>
 		</header>
 
+		<div id="quiz" class="quiz" hidden></div>
+
 		<section id="drop" class="drop">
 			<div class="drop-inner">
 				<h1>Watch a Portal 2 run in your browser</h1>
 				<p>Drop a SAR proof (<code>.sarp</code>) or demos (<code>.dem</code>, all of a run's files at once) here, or use <b>Open file</b>.</p>
 				<p class="muted">The file is read in this page and never uploaded anywhere.</p>
-				<p><button id="drop-board" class="primary">Pick a run from the leaderboard</button></p>
+				<p><button id="drop-board" class="primary">Pick a run from the leaderboard</button> <button id="drop-quiz">Play Guess the time</button></p>
 				<p id="drop-file" class="drop-file"></p>
 			</div>
 		</section>

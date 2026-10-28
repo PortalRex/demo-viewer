@@ -183,6 +183,11 @@ computer.
   the raced runs and the split screen by their board ids. The dev server
   passes the board's demos through, as the board doesn't serve them to other
   sites.
+- **Guess the time:** a game. A random top-50 run of a random chamber opens
+  with everything that would tell its time or whose it is hidden (the clock,
+  the challenge mode timer, names, the file and the panels); watch it as you
+  like, then guess its whole time. Five rounds, up to 1000 points each (none
+  at 20% off), your best game remembered.
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the

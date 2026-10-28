@@ -1,7 +1,7 @@
 // The leaderboard's rows made into runs, its chambers, and links to them
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {boardRunsOf, fmtScore, wrHistoryOf} from '../src/core/leaderboard.ts';
+import {boardRunsOf, fmtScore, parseTime, wrHistoryOf} from '../src/core/leaderboard.ts';
 import type {BoardJson} from '../src/core/leaderboard.ts';
 import {CHAMBERS, chamberFor} from '../src/core/chambers.ts';
 import {linkHash, parseLink} from '../src/core/links.ts';
@@ -69,4 +69,13 @@ test("a chamber's world records, a co-op record's two players as one, banned one
 	const coop = wrHistoryOf(json, true);
 	assert.deepEqual(coop.map(r => [r.score, r.players.map(p => p.name)]), [[1756, ['A', 'B']], [1895, ['E', 'F']]]);
 	assert.equal(wrHistoryOf(json, false).length, 4);
+});
+
+test('times typed as guesses', () => {
+	assert.equal(parseTime('12.34'), 12.34);
+	assert.equal(parseTime(' 1:02.30 '), 62.3);
+	assert.equal(parseTime('62.3s'), 62.3);
+	assert.equal(parseTime('1:75'), null);
+	assert.equal(parseTime('abc'), null);
+	assert.equal(parseTime('0'), null);
 });

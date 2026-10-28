@@ -14,6 +14,7 @@ import {Timeline, SpeedGraph} from './ui/charts.ts';
 import type {GapLine, InputLane} from './ui/charts.ts';
 import {tricks} from './player/tricks.ts';
 import {BoardBrowser, boardDemo} from './ui/board.ts';
+import {Quiz} from './ui/quiz.ts';
 import {linkHash, parseLink} from './core/links.ts';
 import type {BoardLink, Moment, ViewMode} from './core/links.ts';
 import type {DemoFile} from './ui/board.ts';
@@ -514,7 +515,7 @@ function showRun(playback: Playback) {
 	segIn3d = segLoading = -1;
 	t = 0;
 	setPlaying(false);
-	document.title = `${run.fileName} · SAR Run Viewer`;
+	document.title = quiz.active ? 'Guess the time · SAR Run Viewer' : `${run.fileName} · SAR Run Viewer`;
 	requestAnimationFrame(() => render());
 }
 
@@ -799,8 +800,8 @@ function showNameTags() {
 	const g = c.getContext('2d')!;
 	g.setTransform(dpr, 0, 0, dpr, 0, 0);
 	g.clearRect(0, 0, w, h);
-	if (is3d && namesShown) drawNameTags(g, allNameTags(), w, h, 1);
-	const labels = is3d ? splitLabels() : null;
+	if (is3d && namesShown && !quizHidden()) drawNameTags(g, allNameTags(), w, h, 1);
+	const labels = is3d && !quizHidden() ? splitLabels() : null;
 	if (labels) drawSplitLabels(g, labels, w, h, 1);
 }
 // (the second demo's player named as its demo names them)
@@ -1709,6 +1710,29 @@ function drawRaceTab() {
 }
 // (drawn once the tab's shown, after the panels have shown it)
 $('race-tab').addEventListener('click', () => soon(() => !playing && render()));
+
+// ---- Guess the time ----
+// (ui/quiz.ts: it picks the runs; here they're opened and played. Until a
+// round's answer is out, what would tell the run's time or whose it is stays
+// hidden: the clock, the challenge mode timer, the names over players' heads
+// and the split screen's, the file and the panels (the page's quiz style))
+const quizHidden = () => quiz.active && !quiz.revealed;
+const quiz = new Quiz($('quiz'), {
+	async open(file) {
+		if (pb) closeRun();
+		await open([file]);
+		if (!pb || pb.run.fileName !== file.name) return false;
+		setPlaying(true);
+		return true;
+	},
+	end() {
+		if (pb) document.title = `${pb.run.fileName} · SAR Run Viewer`;
+		render();
+	},
+});
+quiz.onReveal = () => render();
+$('quiz-btn').onclick = () => quiz.start();
+$('drop-quiz').onclick = () => quiz.start();
 
 // ---- the leaderboard ----
 // a run picked from it opened (a co-op run's partner's demo with it), or

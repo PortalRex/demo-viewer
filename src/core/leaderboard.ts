@@ -68,6 +68,14 @@ export function wrHistoryOf(json: WrJson, coop: boolean): WrRun[] {
 	return out;
 }
 
+// "12.34", "1:02.30" or "62.3" as seconds (null: not a time)
+export function parseTime(text: string): number | null {
+	const m = /^\s*(?:(\d+):)?(\d+(?:\.\d*)?)\s*s?\s*$/.exec(text);
+	if (!m) return null;
+	const seconds = (m[1] ? Number(m[1]) * 60 : 0) + Number(m[2]);
+	return seconds > 0 && (!m[1] || Number(m[2]) < 60) ? seconds : null;
+}
+
 // a time in hundredths as the board shows it (17.56, 1:02.30)
 export const fmtScore = (cs: number) => {
 	const m = Math.floor(cs / 6000), s = Math.floor(cs / 100) % 60, c = cs % 100;
