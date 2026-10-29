@@ -153,14 +153,69 @@ export class HttpFS implements GameFS {
 	}
 }
 
+// A folder's files as a browser without folder access gives them (Brave,
+// Firefox: a folder picked in a file input): every file listed at once, by
+// its path in the folder. Looked up regardless of case, as Windows does
+export class FileListFS implements GameFS {
+	label: string;
+	private files = new Map<string, File>();
+
+	constructor(files: Iterable<File>) {
+		let label = '';
+		for (const f of files) {
+			// ("Portal 2/portal2/pak01_dir.vpk": the folder's own name first)
+			const [top, ...rest] = (f.webkitRelativePath || f.name).split('/');
+			label ||= top;
+			this.files.set(rest.join('/').toLowerCase(), f);
+		}
+		this.label = label;
+	}
+
+	async read(path: string, offset = 0, length?: number) {
+		const f = this.files.get(path.toLowerCase());
+		if (!f) return null;
+		return new Uint8Array(await f.slice(offset, length === undefined ? undefined : offset + length).arrayBuffer());
+	}
+
+	async size(path: string) {
+		return this.files.get(path.toLowerCase())?.size ?? null;
+	}
+
+	async list(dir: string) {
+		const base = `${dir.toLowerCase()}/`;
+		const out = new Set<string>();
+		for (const p of this.files.keys()) {
+			if (p.startsWith(base) && LOOSE_DIRS.some(d => p.startsWith(`${base}${d}/`))) out.add(p.slice(base.length));
+		}
+		return out;
+	}
+}
+
 // The folder to pick is "Portal 2" (the one with portal2.exe); accept the
-// game folder inside it too.
+// game folder inside it too. Where the browser can't open folders (Brave
+// turns folder access off), its files are picked as a folder upload
+// instead: read in the page all the same, but picked again on each visit
 export async function pickGameFolder(): Promise<GameFS | null> {
 	const picker = (window as unknown as {showDirectoryPicker?: (o?: object) => Promise<FileSystemDirectoryHandle>}).showDirectoryPicker;
-	if (!picker) throw new Error('This browser can\'t open folders. Use Chrome or Edge for the 3D view.');
+	if (!picker) {
+		const files = await pickFolderFiles();
+		return files?.length ? new FileListFS(files) : null;
+	}
 	const dir = await picker({id: 'portal2', mode: 'read'});
 	rememberFolder(dir);
 	return new DirectoryFS(dir);
+}
+
+// (opened at once, from the click that asked: a file input needs it)
+function pickFolderFiles(): Promise<File[] | null> {
+	return new Promise(done => {
+		const input = document.createElement('input');
+		input.type = 'file';
+		input.webkitdirectory = true;
+		input.onchange = () => done(input.files ? [...input.files] : null);
+		input.addEventListener('cancel', () => done(null));
+		input.click();
+	});
 }
 
 // The picked folder remembered (the browser keeps its handle in IndexedDB),

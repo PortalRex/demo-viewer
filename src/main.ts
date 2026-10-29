@@ -43,6 +43,11 @@ import {Zip} from './game/zip.ts';
 import type {GameFS} from './game/gamefs.ts';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+// Embedded in a page of the boards site (?embed=full: its replay page; compact: a run's
+// details): the site names the run and offers what to race, so the page's own header, links and
+// games are left out (compact: the side panels too)
+const embed = new URLSearchParams(location.search).get('embed');
+if (embed === 'full' || embed === 'compact') document.body.classList.add('embed', `embed-${embed}`);
 const esc = (s: string) => s.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'})[c]!);
 
 const pathView = new PathView($<HTMLCanvasElement>('path'));
@@ -433,6 +438,7 @@ async function load3dMap() {
 		message3d(`<h2>The 3D view uses your own copy of the game</h2>
 			Pick your <b>Portal 2</b> folder (the one with portal2.exe, usually in steamapps/common).
 			The map is read from it in this page; nothing is uploaded.
+			${'showDirectoryPicker' in window ? '' : '<br>This browser (Brave, Firefox) asks to "upload" the folder\'s files: they stay in this page all the same, and it asks again on each visit.'}
 			${again}<button class="${remembered ? '' : 'primary'}" id="connect-game">Choose ${remembered ? 'another' : 'Portal 2'} folder</button>`);
 		$('connect-game').onclick = () => connectGame();
 		if (remembered) $('reuse-game').onclick = () => connectGame(remembered.dir);
@@ -540,6 +546,7 @@ function closeRun() {
 	view3d.ghosts = [];
 	splitChoice = null;
 	swarm = [];
+	swarmIds = [];
 	view3d.split = false;
 	view3d.halfWidth = false;
 	sideView?.setMap(null);
@@ -2062,16 +2069,21 @@ board.onRace = async (runs: DemoFile[][]) => {
 	$('ghost').classList.toggle('on', racers.length > 0);
 	changedRacers();
 };
+// the swarm's runs by their board ids (for links to it)
+let swarmIds: number[] = [];
 board.onSwarm = async runs => {
 	const loaded: SwarmRun[] = [];
+	const ids: number[] = [];
 	for (const {file, rank} of runs) {
 		try {
 			loaded.push(swarmRun(await loadRuns([file]), rank));
+			ids.push(file.id);
 		} catch {}
 		// (a breath between, so the page keeps drawing)
 		await new Promise(r => setTimeout(r, 0));
 	}
 	swarm = loaded;
+	swarmIds = ids;
 	swarmShown = true;
 	showHeatToggle();
 	render();
@@ -2282,6 +2294,7 @@ function momentLink(): string {
 			id: fromBoard,
 			partners: ids(shownPartners),
 			raced: racers.flatMap(r => ids(r.players)),
+			swarm: swarm.length ? swarmIds : [],
 			split: splitChoice === 'partner' ? 'partner' : splitChoice ? String(racers.indexOf(splitChoice)) : null,
 		} : null,
 		load: fromBoard ? null : openedFrom,
@@ -2326,10 +2339,21 @@ $('share').onclick = async () => {
 async function openBoardLink(link: BoardLink, moment: Moment | null) {
 	$('drop-file').textContent = 'Downloading the runs from the leaderboard…';
 	try {
-		const [first, ...rest] = await Promise.all([link.id, ...link.partners, ...link.raced].map(id => boardDemo(id)));
-		await openFromBoard(first, rest.slice(0, link.partners.length));
+		const [first, ...partners] = await Promise.all([link.id, ...link.partners].map(id => boardDemo(id)));
+		// (the raced ones each on their own: one that can't be had is left out)
+		const raced = Promise.allSettled(link.raced.map(id => boardDemo(id)));
+		await openFromBoard(first, partners);
 		if (!pb) return;
-		for (const f of rest.slice(link.partners.length)) await raceFromBoard(f);
+		const failed: string[] = [];
+		for (const [i, r] of (await raced).entries()) {
+			if (r.status === 'rejected' || !await raceFromBoard(r.value, true)) failed.push(r.status === 'fulfilled' ? r.value.name : `#${link.raced[i]}`);
+		}
+		if (failed.length) showError(`Couldn't race ${failed.length === 1 ? failed[0] : `${failed.length} of the runs`}: their demos are missing or too old to read.`);
+		if (link.swarm.length) {
+			$('drop-file').textContent = 'Downloading the swarm…';
+			await board.onSwarm((await Promise.allSettled(link.swarm.map(id => boardDemo(id))))
+				.flatMap((r, i) => (r.status === 'fulfilled' ? [{file: r.value, rank: i + 1}] : [])));
+		}
 		$('ghost').classList.toggle('on', racers.length > 0);
 		if (link.split) splitWith(link.split === 'partner' ? 'partner' : racers[Number(link.split)] ?? null);
 		changedRacers();

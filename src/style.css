@@ -246,3 +246,9 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .loss-by { color: #ff6b6b; font-family: var(--mono); font-weight: 700; }
 .loss-head .muted { font-family: var(--mono); font-size: 11px; }
 .loss-notes { margin-top: 4px; font-size: 12px; color: var(--text); line-height: 1.4; }
+
+/* embedded in the boards site (see main.ts) */
+body.embed header.bar, body.embed #share, body.embed #quiz, body.embed .drop-inner > :not(#drop-file) { display: none !important; }
+body.embed .drop-file { font-size: 15px; }
+body.embed-compact .viewer { grid-template-columns: minmax(0, 1fr); }
+body.embed-compact .segments, body.embed-compact .side { display: none; }

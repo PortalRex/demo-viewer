@@ -7,6 +7,7 @@
 // co-op partner's demo, the runs raced against it (theirs too) and which
 // the split screen shows, all downloaded again by whoever opens it:
 //   #board=<id>&with=<id>&race=<id>,<id>,...&split=<racer index|partner>&t=...
+// (and swarm=<id>,<id>,...: runs shown as the swarm, best first)
 import type {CameraState} from '../ui/view3d.ts';
 
 export type ViewMode = 'top' | 'side' | '3d';
@@ -20,6 +21,7 @@ export interface BoardLink {
 	id: number;
 	partners: number[];
 	raced: number[];
+	swarm: number[];
 	split: string | null;
 }
 export interface Link {
@@ -35,6 +37,7 @@ export function linkHash(link: Link): string {
 		q.set('board', String(board.id));
 		if (board.partners.length) q.set('with', board.partners.join(','));
 		if (board.raced.length) q.set('race', board.raced.join(','));
+		if (board.swarm.length) q.set('swarm', board.swarm.join(','));
 		if (board.split) q.set('split', board.split);
 	} else if (link.load) q.set('load', link.load);
 	else if (m?.file) q.set('file', m.file);
@@ -57,7 +60,7 @@ export function parseLink(hash: string): Link {
 	const nums = (k: string) => q.get(k)?.split(',').filter(x => x !== '').map(Number).filter(Number.isFinite);
 	const load = q.get('load');
 	const id = Number(q.get('board'));
-	const board = id > 0 ? {id, partners: nums('with') ?? [], raced: nums('race') ?? [], split: q.get('split')} : null;
+	const board = id > 0 ? {id, partners: nums('with') ?? [], raced: nums('race') ?? [], swarm: nums('swarm') ?? [], split: q.get('split')} : null;
 	if (!q.has('t')) return {load, board, moment: null};
 	const view = q.get('view');
 	const cam = q.get('cam');

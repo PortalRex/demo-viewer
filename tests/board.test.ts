@@ -42,11 +42,11 @@ test('every chamber once, each with its map', () => {
 test('a leaderboard link carries its runs, split screen and moment', () => {
 	const link = {
 		load: null,
-		board: {id: 286767, partners: [286768], raced: [304459, 304460, 347573], split: '1'},
+		board: {id: 286767, partners: [286768], raced: [304459, 304460, 347573], swarm: [1, 2], split: '1'},
 		moment: {tick: 700, view: '3d' as const, camera: {mode: 'free' as const, pos: [1, 2.5, -3], ang: [10, 90]}},
 	};
 	const hash = linkHash(link);
-	assert.equal(hash, '#board=286767&with=286768&race=304459,304460,347573&split=1&t=700&view=3d&cam=free&pos=1,2.5,-3&ang=10,90');
+	assert.equal(hash, '#board=286767&with=286768&race=304459,304460,347573&swarm=1,2&split=1&t=700&view=3d&cam=free&pos=1,2.5,-3&ang=10,90');
 	const back = parseLink(hash);
 	assert.deepEqual(back.board, link.board);
 	assert.deepEqual(back.moment, {...link.moment, camera: {...link.moment.camera, offset: undefined}, file: undefined});
