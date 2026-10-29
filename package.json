@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:boards": "tsc --noEmit && node tools/build-boards.mjs",
     "check": "tsc --noEmit",
     "test": "node --test --experimental-strip-types --no-warnings=ExperimentalWarning \"tests/*.test.ts\"",
     "probe": "node --experimental-strip-types tools/probe.ts"

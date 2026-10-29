@@ -5,16 +5,28 @@ import {CHAMBERS, chamberFor} from '../core/chambers.ts';
 import type {Chamber} from '../core/chambers.ts';
 import {boardRunsOf, fmtScore, wrHistoryOf} from '../core/leaderboard.ts';
 import type {BoardJson, BoardRun, WrJson} from '../core/leaderboard.ts';
+import {changelogRunsOf, coopRunsOf, dispositionName, spRunsOf} from '../core/boardsv2.ts';
+import type {ChangelogRow, CoopRow, SpRow} from '../core/boardsv2.ts';
 
 const BOARD = 'https://board.portal2.sr';
 // (the dev server passes the board through, as its demos can't be read by
 // another site; a built page asks its proxy (VITE_BOARD_PROXY: see
 // deploy/board-proxy), else the board itself, whose demos it then can't read)
 const BASE: string = import.meta.env.DEV ? '/__board' : (import.meta.env.VITE_BOARD_PROXY || BOARD).replace(/\/$/, '');
+// Served by the boards v2 site (core/boardsv2.ts): its own API, on the same
+// site, instead of board.portal2.sr
+const V2: string | null = import.meta.env.VITE_BOARDS_API ? import.meta.env.VITE_BOARDS_API.replace(/\/$/, '') : null;
 const SHOWN_RUNS = 200;
 const SWARM_RUNS = 100;
 
+async function v2Json<T>(path: string): Promise<T> {
+	const res = await fetch(`${V2}${path}`);
+	if (!res.ok) throw new Error(`the board answered ${res.status}`);
+	return await res.json() as T;
+}
+
 export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {
+	if (V2) return chamber.coop ? coopRunsOf(await v2Json<CoopRow[]>(`/map/coop/${chamber.id}`)) : spRunsOf(await v2Json<SpRow[]>(`/map/sp/${chamber.id}`));
 	const res = await fetch(`${BASE}/chamber/${chamber.id}/json`);
 	if (!res.ok) throw new Error(`the board answered ${res.status}`);
 	return boardRunsOf(await res.json() as BoardJson, chamber.coop);
@@ -22,6 +34,7 @@ export async function boardRuns(chamber: Chamber): Promise<BoardRun[]> {
 // A chamber's world records with demos, newest first, as runs to race: each
 // noted with when it was set
 export async function boardWrHistory(chamber: Chamber): Promise<BoardRun[]> {
+	if (V2) return changelogRunsOf(await v2Json<ChangelogRow[]>(`/changelog?chamber=${chamber.id}&wr_gain=true&has_demo=true&limit=1000`), chamber.coop, 1);
 	const res = await fetch(`${BASE}/changelog/json?chamber=${chamber.id}&wr=1`);
 	if (!res.ok) throw new Error(`the board answered ${res.status}`);
 	return wrHistoryOf(await res.json() as WrJson, chamber.coop).filter(r => r.players.some(p => p.hasDemo)).map(r => ({
@@ -32,6 +45,7 @@ export async function boardWrHistory(chamber: Chamber): Promise<BoardRun[]> {
 // A player's personal bests on a chamber, newest first, as runs to race:
 // each noted with when it was set
 export async function boardPbHistory(chamber: Chamber, steamId: string): Promise<BoardRun[]> {
+	if (V2) return changelogRunsOf(await v2Json<ChangelogRow[]>(`/changelog?chamber=${chamber.id}&profile_number=${steamId}&has_demo=true&limit=1000`), chamber.coop, 0);
 	const res = await fetch(`${BASE}/changelog/json?chamber=${chamber.id}&profileNumber=${steamId}`);
 	if (!res.ok) throw new Error(`the board answered ${res.status}`);
 	return wrHistoryOf(await res.json() as WrJson, false).filter(r => r.players.some(p => p.hasDemo)).map(r => ({
@@ -53,7 +67,7 @@ export interface DemoFile {
 const demos = new Map<number, Promise<DemoFile>>();
 const CACHE = 'board-demos';
 const CACHED_DEMOS = 300;
-const cacheKey = (id: number) => `/board-demo/${id}`;
+const cacheKey = (id: number) => (V2 ? `/board-demo/v2/${id}` : `/board-demo/${id}`);
 async function cached(id: number): Promise<DemoFile | null> {
 	try {
 		const res = await (await caches.open(CACHE)).match(cacheKey(id));
@@ -79,9 +93,9 @@ export function boardDemo(changelogId: number, store = true): Promise<DemoFile> 
 		p = (async () => {
 			const kept = await cached(changelogId);
 			if (kept) return kept;
-			const res = await fetch(`${BASE}/getDemo?id=${changelogId}`);
+			const res = await fetch(V2 ? `${V2}/demos/${changelogId}/file` : `${BASE}/getDemo?id=${changelogId}`);
 			if (!res.ok) throw new Error(`the board answered ${res.status}`);
-			const name = res.headers.get('X-File-Name') || decodeURIComponent(new URL(res.url).pathname.split('/').pop() ?? '') || `${changelogId}.dem`;
+			const name = res.headers.get('X-File-Name') || dispositionName(res.headers.get('Content-Disposition')) || decodeURIComponent(new URL(res.url).pathname.split('/').pop() ?? '') || `${changelogId}.dem`;
 			const demo = {bytes: new Uint8Array(await res.arrayBuffer()), name, id: changelogId};
 			if (store) keep(demo);
 			return demo;
@@ -97,6 +111,8 @@ export function boardDemo(changelogId: number, store = true): Promise<DemoFile> 
 // demo was submitted with it, next to it, as the board names its demos
 // (map_time_steamid_id). Null where neither neighbour is it
 async function partnerDemo(own: DemoFile, changelogId: number): Promise<DemoFile | null> {
+	// (boards v2 lists both players' demos with the run)
+	if (V2) return null;
 	const run = /^(.+?_\d+)_(\d{17})_\d+\.dem$/i.exec(own.name);
 	if (!run) return null;
 	for (const id of [changelogId + 1, changelogId - 1]) {
