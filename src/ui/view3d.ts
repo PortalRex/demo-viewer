@@ -3914,7 +3914,7 @@ export class View3D {
 			if (r.inst.finished) return;
 			// glows drawn over everything still go when the world hides their
 			// origin from the camera (the game tests their visibility)
-			if (this.particleRenderer?.ignoresDepth(def.material) && this.collision) {
+			if (!opts.fp && this.particleRenderer?.ignoresDepth(def.material) && this.collision) {
 				const at = new THREE.Vector3().setFromMatrixPosition(r.inst.cps.get(0) ?? new THREE.Matrix4());
 				const to = at.clone().sub(this.camera.position);
 				const dist = to.length();
@@ -4108,9 +4108,10 @@ export class View3D {
 				if (pts.some(m => !m)) return null;
 				const cps: ControlPoints = new Map(pts.map((m, n) => [n, m!]));
 				const pk = this.entityPose(p, tick);
-				cps.set(4, new THREE.Matrix4().setPosition(pk.origin));
+				const world = (m: THREE.Matrix4) => (fp ? this.cameraLocal(m) : m);
+				cps.set(4, world(new THREE.Matrix4().setPosition(pk.origin)));
 				// (on this side of a portal it's held through)
-				if (held) cps.set(5, new THREE.Matrix4().setPosition(held.userData.heldApparent ?? new THREE.Vector3().setFromMatrixPosition(held.matrixWorld)));
+				if (held) cps.set(5, world(new THREE.Matrix4().setPosition(held.userData.heldApparent ?? new THREE.Vector3().setFromMatrixPosition(held.matrixWorld))));
 				return cps;
 			}, {fp, live: true});
 		}
@@ -4220,17 +4221,20 @@ export class View3D {
 	// an entity's model attachment (1-based) in the world: the held gun's
 	// muzzle, or the view model's
 	// a view model attachment where the world's view shows it as the view
-	// model's narrower one does (see VM_ATTACHMENT_SPREAD), turned as it is
+	// model's narrower one does (see VM_ATTACHMENT_SPREAD), turned as it is,
+	// in the camera's space: first-person effects run there, so they stay on
+	// the gun however the view turns between their steps
 	private formatViewModelAttachment(m: THREE.Matrix4): THREE.Matrix4 {
+		const local = this.cameraLocal(m);
+		const at = new THREE.Vector3().setFromMatrixPosition(local);
+		at.x *= VM_ATTACHMENT_SPREAD;
+		at.y *= VM_ATTACHMENT_SPREAD;
+		return local.setPosition(at);
+	}
+	// a point in the world in the camera's space (first-person effects')
+	private cameraLocal(m: THREE.Matrix4): THREE.Matrix4 {
 		this.camera.updateMatrixWorld();
-		const cam = this.camera.matrixWorld, eye = new THREE.Vector3().setFromMatrixPosition(cam);
-		const right = new THREE.Vector3().setFromMatrixColumn(cam, 0), up = new THREE.Vector3().setFromMatrixColumn(cam, 1), back = new THREE.Vector3().setFromMatrixColumn(cam, 2);
-		const rel = new THREE.Vector3().setFromMatrixPosition(m).sub(eye);
-		const at = eye.clone()
-			.addScaledVector(right, rel.dot(right) * VM_ATTACHMENT_SPREAD)
-			.addScaledVector(up, rel.dot(up) * VM_ATTACHMENT_SPREAD)
-			.addScaledVector(back, rel.dot(back));
-		return m.clone().setPosition(at);
+		return this.camera.matrixWorld.clone().invert().multiply(m);
 	}
 
 	private attachmentAt(index: number, attachment: number, tick: number, viewModel: boolean): THREE.Matrix4 | null {
@@ -6391,7 +6395,16 @@ ft: EntityTrack | undefined, view: ViewState | null, tick: number) {
 		if (!this.pip) this.renderMonitorCamera(r);
 		this.updateSprites(this.meterTick);
 		this.particleRenderer?.draw(this.particlesShown, this.camera);
-		this.fpParticleRenderer?.draw(this.fpParticlesShown, this.camera, true, false);
+		// (first-person effects are in the camera's space: seen from its origin)
+		const fpCam = this.fpCam;
+		fpCam.copy(this.camera);
+		fpCam.position.set(0, 0, 0);
+		fpCam.quaternion.identity();
+		fpCam.near = this.vmCam.near;
+		fpCam.far = this.vmCam.far;
+		fpCam.updateProjectionMatrix();
+		fpCam.updateMatrixWorld();
+		this.fpParticleRenderer?.draw(this.fpParticlesShown, fpCam, true, false);
 		this.updateParticleBlobs();
 		// Everything is drawn linear and unexposed into one HDR frame (as the
 		// portal views and the meter are, so each material compiles once),
@@ -6415,14 +6428,7 @@ ft: EntityTrack | undefined, view: ViewState | null, tick: number) {
 			// gun's nose stays hidden. Formatting their points kept their
 			// distance along the view, so with the view model camera's near
 			// and far their depths match the gun's
-			if (this.fpParticlesShown.length) {
-				const cam = this.fpCam;
-				cam.copy(this.camera);
-				cam.near = this.vmCam.near;
-				cam.far = this.vmCam.far;
-				cam.updateProjectionMatrix();
-				r.render(this.fpScene, cam);
-			}
+			if (this.fpParticlesShown.length) r.render(this.fpScene, this.fpCam);
 			r.autoClear = auto;
 		}
 		for (const o of waiting) o.visible = true;

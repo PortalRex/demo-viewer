@@ -521,7 +521,7 @@ function showRun(playback: Playback) {
 	segIn3d = segLoading = -1;
 	t = 0;
 	setPlaying(false);
-	document.title = quiz.active ? 'Guess the time · SAR Run Viewer' : `${run.fileName} · SAR Run Viewer`;
+	document.title = quiz.active ? `${quiz.mode === 'runner' ? 'Guess the runner' : 'Guess the time'} · SAR Run Viewer` : `${run.fileName} · SAR Run Viewer`;
 	requestAnimationFrame(() => render());
 }
 
@@ -1983,6 +1983,9 @@ const quiz = new Quiz($('quiz'), {
 		if (pb) closeRun();
 		await open([file]);
 		if (!pb || pb.run.fileName !== file.name) return false;
+		// (played once all of it's here: in 3D, the map and what's in it)
+		await loadSettled();
+		if (!quiz.active || pb?.run.fileName !== file.name) return false;
 		setPlaying(true);
 		return true;
 	},
@@ -1992,8 +1995,30 @@ const quiz = new Quiz($('quiz'), {
 	},
 });
 quiz.onReveal = () => render();
-$('quiz-btn').onclick = () => quiz.start();
-$('drop-quiz').onclick = () => quiz.start();
+$('quiz-btn').onclick = () => quiz.start('time');
+$('drop-quiz').onclick = () => quiz.start('time');
+$('quiz-runner-btn').onclick = () => quiz.start('runner');
+$('drop-quiz-runner').onclick = () => quiz.start('runner');
+// until the 3D view (if it's shown) has the run's map and has gone a moment
+// without anything more arriving
+async function loadSettled(limit = 30000) {
+	if (viewMode !== '3d') return;
+	let quiet = performance.now();
+	const orig = view3d.onLoaded;
+	view3d.onLoaded = () => {
+		quiet = performance.now();
+		orig();
+	};
+	const start = performance.now();
+	try {
+		while (performance.now() - start < limit) {
+			await new Promise(r => setTimeout(r, 100));
+			if (segIn3d === currentSeg && !sideLoading && performance.now() - quiet > 1500) break;
+		}
+	} finally {
+		view3d.onLoaded = orig;
+	}
+}
 
 // ---- the leaderboard ----
 // a run picked from it opened (a co-op run's partner's demo with it), or

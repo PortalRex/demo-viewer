@@ -214,7 +214,6 @@ export class BoardBrowser {
 	}
 
 	private showList() {
-		const race = this.canRace(this.chamber);
 		this.el('board-list').innerHTML = !this.runs.length ? '<div class="empty">No runs on this chamber.</div>' : `<table>${this.runs.map((r, i) => {
 			const demo = r.players.some(p => p.hasDemo);
 			return `<tr data-i="${i}" class="${demo ? '' : 'no-demo'}" title="${esc(r.note ?? '')}">
@@ -222,7 +221,7 @@ export class BoardBrowser {
 				<td class="who">${r.players.map(p => esc(p.name)).join(' &amp; ')}</td>
 				<td class="time">${fmtScore(r.score)}</td>
 				<td class="date">${esc((r.date ?? '').slice(0, 10))}</td>
-				<td class="acts">${demo ? `<button class="board-open" title="Open this run">Open</button>${race ? '<button class="board-race" title="Race this run against the one shown">Race</button><button class="board-pbs" title="Race every personal best this player has set here (with demos) against the run shown, each named with when it was set">PBs</button>' : ''}` : '<span class="muted">no demo</span>'}</td>
+				<td class="acts">${demo ? `<button class="board-open" title="Open this run">Open</button><button class="board-race" title="Race this run against the one shown (or this chamber's best, opened first)">Race</button><button class="board-pbs" title="Race every personal best this player has set here (with demos) against the run shown, each named with when it was set">PBs</button>` : '<span class="muted">no demo</span>'}</td>
 			</tr>`;
 		}).join('')}</table>`;
 		this.showPicked();
@@ -235,13 +234,28 @@ export class BoardBrowser {
 		this.showButtons();
 	}
 
+	// (with no run of the chamber shown, its best is opened first to race
+	// against: the buttons work either way)
 	private showButtons() {
-		const race = this.canRace(this.chamber) && !this.busy;
-		for (const b of this.dialog.querySelectorAll<HTMLButtonElement>('.board-top')) b.disabled = !race || !this.runs.length;
-		this.el<HTMLButtonElement>('board-race-picked').disabled = !race || !this.picked.size;
-		this.el<HTMLButtonElement>('board-wr').disabled = !race;
-		this.el<HTMLButtonElement>('board-swarm').disabled = !race || !this.runs.length;
+		const idle = !this.busy && !!this.runs.length;
+		for (const b of this.dialog.querySelectorAll<HTMLButtonElement>('.board-top')) b.disabled = !idle;
+		this.el<HTMLButtonElement>('board-race-picked').disabled = !idle || !this.picked.size;
+		this.el<HTMLButtonElement>('board-wr').disabled = !idle;
+		this.el<HTMLButtonElement>('board-swarm').disabled = !idle;
 		this.el('board-race-note').hidden = this.canRace(this.chamber);
+	}
+
+	// the chamber's best run (with a demo) opened, where no run of it is shown
+	// to race against; the run opened (null: one already was), or false where
+	// it couldn't be
+	private async ensureShown(): Promise<BoardRun | null | false> {
+		if (this.canRace(this.chamber)) return null;
+		const best = this.runs.find(r => r.players.some(p => p.hasDemo));
+		if (!best) return false;
+		this.note('Opening the best run to race against…');
+		const [files] = await runDemos([best], () => {});
+		await this.onOpen(files);
+		return this.canRace(this.chamber) ? best : false;
 	}
 
 	private note(text: string | null) {
@@ -271,11 +285,21 @@ export class BoardBrowser {
 	// every world record the chamber has had (with a demo) raced against the
 	// shown run, each noted with when it was set
 	private async raceWrHistory() {
-		if (this.busy || !this.chamber || !this.canRace(this.chamber)) return;
+		if (this.busy || !this.chamber) return;
 		this.note('Looking up the world records…');
 		try {
-			const runs = await boardWrHistory(this.chamber);
+			let runs = await boardWrHistory(this.chamber);
 			if (!runs.length) return this.note('No world record on this chamber has a demo.');
+			// (with nothing shown, the newest opened and the older ones raced)
+			if (!this.canRace(this.chamber)) {
+				const [newest, ...older] = runs;
+				this.note('Opening the world record to race against…');
+				const [files] = await runDemos([newest], () => {});
+				await this.onOpen(files);
+				if (!this.canRace(this.chamber)) return this.note("Couldn't open the world record (too old to read?).");
+				runs = older;
+				if (!runs.length) return this.dialog.close();
+			}
 			await this.race(runs, true);
 		} catch (e) {
 			this.note(`Couldn't look them up: ${(e as Error).message}`);
@@ -284,13 +308,14 @@ export class BoardBrowser {
 
 	// the top runs (one player's demo each) as the swarm
 	private async swarm(count: number) {
-		if (this.busy || !this.canRace(this.chamber)) return;
+		if (this.busy) return;
 		const runs = this.runs.filter(r => r.players.some(p => p.hasDemo)).slice(0, count);
 		this.busy = true;
 		this.showButtons();
 		let done = 0;
 		const got: {file: DemoFile; rank: number}[] = [];
 		try {
+			if (await this.ensureShown() === false) return this.note("Couldn't open a run of this chamber to swarm around.");
 			let next = 0;
 			const worker = async () => {
 				while (next < runs.length) {
@@ -316,7 +341,7 @@ export class BoardBrowser {
 
 	// every personal best a run's (first) player set on the chamber
 	private async racePbHistory(run: BoardRun) {
-		if (this.busy || !this.chamber || !this.canRace(this.chamber)) return;
+		if (this.busy || !this.chamber) return;
 		const player = run.players[0];
 		this.note(`Looking up ${player.name}'s personal bests…`);
 		try {
@@ -329,11 +354,16 @@ export class BoardBrowser {
 	}
 
 	private async race(runs: BoardRun[], noted = false) {
-		if (this.busy || !runs.length || !this.canRace(this.chamber)) return;
+		if (this.busy || !runs.length) return;
 		this.busy = true;
 		this.showButtons();
-		this.note(`Downloading 0 of ${runs.length}…`);
 		try {
+			const opened = await this.ensureShown();
+			if (opened === false) return this.note("Couldn't open a run of this chamber to race against.");
+			// (the run just opened not raced against itself)
+			runs = runs.filter(r => r !== opened);
+			if (!runs.length) return this.dialog.close();
+			this.note(`Downloading 0 of ${runs.length}…`);
 			let files = await runDemos(runs, done => this.note(`Downloading ${done} of ${runs.length}…`));
 			if (noted) files = files.map((f, i) => f.map(d => ({...d, note: runs[i].note ?? undefined})));
 			await this.onRace(files.filter(f => f.length));

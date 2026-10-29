@@ -222,7 +222,9 @@ export interface LightStyleChange {
 interface ClassFields {
 	cls: ServerClass;
 	origin: number;
-	origins: {origin: number; z: number}[];  // every origin copy the class has         // m_vecOrigin (vec3, or vec2 with originZ)
+	// every origin copy the class has, each cell-relative or not (old co-op
+	// demos send the partner's copy relative to its cell, the owner's not)
+	origins: {origin: number; z: number; cell: boolean}[];
 	originZ: number;        // m_vecOrigin[2]
 	cell: [number, number, number, number];  // m_cellbits, m_cellX/Y/Z
 	cellOrigin: boolean;    // m_vecOrigin is cell-relative
@@ -264,7 +266,8 @@ function fieldsFor(cls: ServerClass): ClassFields {
 	const src = ORIGIN_SOURCES.find(n => cls.index.has(n));
 	const origin = src ? cls.index.get(src)! : -1;
 	// players have two copies: the owner's (local) and everyone else's
-	const origins = ORIGIN_SOURCES.filter(n => cls.index.has(n)).map(n => ({origin: cls.index.get(n)!, z: find(cls, `${n}[2]`)}));
+	const cellRelative = (i: number) => i >= 0 && (cls.flat[i].prop.flags & (F.CELLCOORD | F.CELLCOORDLP | F.CELLCOORDINT)) !== 0;
+	const origins = ORIGIN_SOURCES.filter(n => cls.index.has(n)).map(n => ({origin: cls.index.get(n)!, z: find(cls, `${n}[2]`), cell: cellRelative(cls.index.get(n)!)}));
 	return {
 		cls,
 		origin,
@@ -282,7 +285,7 @@ function fieldsFor(cls: ServerClass): ClassFields {
 		// (and every model's body groups: a Frankenturret's head, ...)
 		extra: [...new Set([...(EXTRA_PROPS[cls.name] ?? []), 'm_nBody', 'm_nRenderMode', 'm_clrRender'])].map(n => [n, cls.index.get(n) ?? -1] as [string, number]).filter(([, i]) => i >= 0),
 		cell: [find(cls, 'm_cellbits'), find(cls, 'm_cellX'), find(cls, 'm_cellY'), find(cls, 'm_cellZ')],
-		cellOrigin: origin >= 0 && (cls.flat[origin].prop.flags & (F.CELLCOORD | F.CELLCOORDLP | F.CELLCOORDINT)) !== 0,
+		cellOrigin: cellRelative(origin),
 		angles: find(cls, 'm_angRotation', 'm_angAbsRotation'),
 		// (a rope's material is in the model table too)
 		model: cls.name === 'CRopeKeyframe' ? find(cls, 'm_iRopeMaterialModelIndex') : find(cls, 'm_nModelIndex'),
@@ -386,12 +389,13 @@ export function* decodeEntitySteps(seg: Segment, dataTablesBlob: Uint8Array): Ge
 		let origin: Vec3;
 		const copy = f.origins[e.originCopy ?? 0];
 		const o = vec(s[copy ? copy.origin : f.origin]);
-		if (f.cellOrigin && f.cell[1] >= 0) {
+		const z = o && o.length > 2 ? o[2] : num(s[copy ? copy.z : f.originZ]);
+		if ((copy ? copy.cell : f.cellOrigin) && f.cell[1] >= 0) {
 			const width = 2 ** num(s[f.cell[0]], 5);
-			const c = (i: number) => num(s[f.cell[i + 1]]) * width - MAX_COORD;
-			origin = [c(0) + (o?.[0] ?? 0), c(1) + (o?.[1] ?? 0), c(2) + (o?.[2] ?? 0)];
+			const c = (i: number) => num(s[f.cell[i + 1]], 512) * width - MAX_COORD;
+			origin = [c(0) + (o?.[0] ?? 0), c(1) + (o?.[1] ?? 0), c(2) + z];
 		} else {
-			origin = [o?.[0] ?? 0, o?.[1] ?? 0, o && o.length > 2 ? o[2] : num(s[copy ? copy.z : f.originZ])];
+			origin = [o?.[0] ?? 0, o?.[1] ?? 0, z];
 		}
 		const a = vec(s[f.angles]);
 		const angles: Vec3 = f.eyeYaw >= 0 ? [num(s[f.eyePitch]), num(s[f.eyeYaw]), 0] : [a?.[0] ?? 0, a?.[1] ?? 0, a?.[2] ?? 0];

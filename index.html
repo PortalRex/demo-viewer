@@ -13,6 +13,7 @@
 			<div id="run-title" class="run-title"></div>
 			<div id="badges" class="badges"></div>
 			<button id="quiz-btn" class="close-btn" title="Guess the time: a random leaderboard run's first seconds, then guess how long the whole run is (five rounds)">Guess the time</button>
+			<button id="quiz-runner-btn" class="close-btn" title="Guess the runner: a random leaderboard run with its time and names hidden; pick whose it is of four runners (five rounds)">Guess the runner</button>
 			<button id="board-btn" class="close-btn" title="Open or race runs from the leaderboard (board.portal2.sr): their demos downloaded straight into the page">Leaderboard</button>
 			<button id="close-run" class="close-btn" hidden title="Close this run (and the runs raced against it), freeing what was loaded for it">Close</button>
 			<label class="close-btn folder-btn" title="Open a whole folder of demos as one run (a full-game run's, played back to back)">
@@ -33,7 +34,7 @@
 				<p>Drop a SAR proof (<code>.sarp</code>) or demos (<code>.dem</code>, all of a run's files at once, or a full-game run's folder) here, or use <b>Open file</b> or <b>Open folder</b>.</p>
 
 				<p class="muted">The file is read in this page and never uploaded anywhere.</p>
-				<p><button id="drop-board" class="primary">Pick a run from the leaderboard</button> <button id="drop-quiz">Play Guess the time</button></p>
+				<p><button id="drop-board" class="primary">Pick a run from the leaderboard</button> <button id="drop-quiz">Play Guess the time</button> <button id="drop-quiz-runner">Play Guess the runner</button></p>
 				<p id="drop-file" class="drop-file"></p>
 			</div>
 		</section>
@@ -176,7 +177,7 @@
 			<div id="board-list" class="board-list"></div>
 			<p id="board-note" class="board-note" hidden></p>
 			<div class="board-buttons">
-				<span id="board-race-note" class="muted">Open a run of this chamber to race others against it.</span>
+				<span id="board-race-note" class="muted">No run of this chamber is open: racing opens its best run first.</span>
 				<button type="button" class="board-top" data-n="5">Race top 5</button>
 				<button type="button" class="board-top" data-n="10">Top 10</button>
 				<button type="button" class="board-top" data-n="20">Top 20</button>

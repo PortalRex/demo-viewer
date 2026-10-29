@@ -202,8 +202,9 @@ computer.
   race the top 5, 10 or 20 (or the ones ticked) against the run shown, or
   **Race WR history**: every world record the chamber has had (those with
   demos), each named with when it was set, or a row's **PBs**: every personal
-  best that player has set on the chamber. Their
-  demos downloaded straight into the page. A co-op run comes with both
+  best that player has set on the chamber. With no run of the chamber open,
+  these open its best run (or current world record) first and race against
+  that. Their demos downloaded straight into the page. A co-op run comes with both
   players' demos, the partner's found beside it where the board lists them
   at another run. Downloaded demos are kept in the browser (the latest 300),
   so racing them again is instant, and **Link** links the run, its partner,
@@ -214,7 +215,10 @@ computer.
   with everything that would tell its time or whose it is hidden (the clock,
   the challenge mode timer, names, the file and the panels); watch it as you
   like, then guess its whole time. Five rounds, up to 1000 points each (none
-  at 20% off), your best game remembered.
+  at 20% off), your best game remembered. Each run starts playing once it
+  has loaded (in 3D, its map and models).
+- **Guess the runner:** the same, but pick whose run it is out of four
+  runners from that chamber's board (1000 points for the right one).
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to
   1440p, 30 or 60 fps). Frames are drawn one by one, so nothing is dropped, and
   the challenge-mode HUD and chapter titles are included. Encoding uses the
