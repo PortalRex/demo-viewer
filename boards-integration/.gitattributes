@@ -1,0 +1,2 @@
+# patches applied with git am: kept byte for byte (no line ending changes)
+*.patch -text
