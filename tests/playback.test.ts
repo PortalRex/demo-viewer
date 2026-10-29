@@ -37,11 +37,29 @@ test("sparse, unevenly timed views move more evenly than straight between them",
 	assert.ok(unevenness(t => viewAt(track, t)!.origin[0]) < unevenness(straight) * 0.75);
 });
 
+test("a client's frames stamped with shared and skipped ticks still move evenly", () => {
+	// steady movement, a frame every tick, but stamped as a client with ping
+	// stamps them (two frames on one tick, then one skipped): 670, 670, 671,
+	// 673, 673, 675, ... as a board demo has them
+	const stamps: number[] = [];
+	for (let i = 0; i < 300; i++) stamps.push(i - (i % 3 === 1 ? 1 : 0));
+	const v = stamps.map((tick, i) => ({tick, origin: [i * 5, 0, 0] as [number, number, number], angles: [0, 0, 0] as [number, number, number]}));
+	const track = new Playback(run([segment(v)])).tracks[0];
+	let worst = 0;
+	for (let t = 20; t < 280; t++) {
+		const step = viewAt(track, t + 1)!.origin[0] - viewAt(track, t)!.origin[0];
+		worst = Math.max(worst, Math.abs(step - 5));
+	}
+	// (by the stamps alone the player would lurch between 0 and 10 a tick)
+	assert.ok(worst < 0.5, `worst step off by ${worst}`);
+});
+
 test('no curve across a teleport', () => {
 	const at = (t: number): [number, number, number] => (t < 60 ? [t * 3, 0, 0] : [9000 + t * 3, 0, 0]);
 	const track = new Playback(run([segment(views(0, 120, 3, at))])).tracks[0];
-	// (up to the teleport, where it was; after, from where it came out)
-	assert.ok(near(viewAt(track, 58)!.origin, [57 * 3, 0, 0]));
+	// (up to the teleport, along the way it was going: a co-op client's
+	// path, fitted, carries on to it; after, from where it came out)
+	assert.ok(near(viewAt(track, 58)!.origin, [58 * 3, 0, 0], 1));
 	assert.ok(near(viewAt(track, 61)!.origin, [9000 + 61 * 3, 0, 0], 1));
 });
 

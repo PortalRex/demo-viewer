@@ -9,6 +9,9 @@ export interface SegmentTrack {
 	length: number;  // ticks
 	speeds: Float32Array;     // horizontal speed (units/s) at each view
 	teleports: Uint8Array;    // 1 where the view jumped (portal, teleport, load)
+	// a co-op client's recording: when each view really was (see retime);
+	// null for a host's, whose views are a tick apart as stamped
+	times: Float64Array | null;
 }
 
 const MAX_SPEED = 3500;  // faster than this between two views is a teleport
@@ -30,7 +33,9 @@ export class Playback {
 		for (const seg of run.segments) {
 			const length = Math.max(1, seg.lastTick - seg.firstTick);
 			const {speeds, teleports} = computeSpeeds(seg);
-			this.tracks.push({seg, start, length, speeds, teleports});
+			const times = retime(seg, teleports);
+			if (times) smoothSpeeds(seg, teleports, times, speeds);
+			this.tracks.push({seg, start, length, speeds, teleports, times});
 			start += length;
 		}
 		this.total = start;
@@ -75,6 +80,55 @@ function computeSpeeds(seg: Segment) {
 	return {speeds, teleports};
 }
 
+// A co-op client's recording writes a view each frame of its own game, stamped
+// with the tick of the last snapshot it had: with ping, several frames share a
+// tick and the next skips one, or frames stamped 3 ticks apart moved 12, 6,
+// 12, 6 units. Played by the stamps, the player lurches between fast and slow.
+// So a client's views get times of their own: the stamps evened out over the
+// few views either side (frames come evenly, their stamps don't), never
+// across a teleport; and their path is fitted through them rather than drawn
+// through each (see clientViewAt). A host's views (a tick apart, as stamped)
+// are left as they are
+const RETIME_SPAN = 3;   // views either side
+const CLIENT_GAPS = 0.03; // views other than a tick apart, at least this share of them: a client's (a host's are 0-2%)
+function retime(seg: Segment, teleports: Uint8Array): Float64Array | null {
+	const v = seg.views;
+	if (v.length < 2 * RETIME_SPAN + 2) return null;
+	let uneven = 0;
+	for (let i = 1; i < v.length; i++) if (v[i].tick - v[i - 1].tick !== 1) uneven++;
+	if (uneven < (v.length - 1) * CLIENT_GAPS) return null;
+	const times = new Float64Array(v.length);
+	// (a stretch between teleports at a time)
+	for (let s = 0; s < v.length;) {
+		let e = s;
+		while (e + 1 < v.length && !teleports[e + 1]) e++;
+		for (let i = s; i <= e; i++) {
+			// (the same span either side, short of the stretch's ends: the
+			// stamps' mean then stays the view's own time on steady footing)
+			const k = Math.min(RETIME_SPAN, i - s, e - i);
+			let sum = 0;
+			for (let j = i - k; j <= i + k; j++) sum += v[j].tick;
+			times[i] = sum / (2 * k + 1);
+		}
+		// (in order, and never two at once)
+		for (let i = s + 1; i <= e; i++) times[i] = Math.max(times[i], times[i - 1] + 1e-3);
+		s = e + 1;
+	}
+	return times;
+}
+
+// a client's speeds from its views' worked-out times, across the views
+// either side (a view's own step is too short a time to tell)
+function smoothSpeeds(seg: Segment, teleports: Uint8Array, times: Float64Array, speeds: Float32Array) {
+	const v = seg.views;
+	for (let i = 1; i < v.length - 1; i++) {
+		if (teleports[i] || teleports[i + 1]) continue;
+		const a = v[i - 1].origin, b = v[i + 1].origin;
+		const dt = (times[i + 1] - times[i - 1]) * seg.intervalPerTick;
+		if (dt > 0) speeds[i] = Math.hypot(b[0] - a[0], b[1] - a[1]) / dt;
+	}
+}
+
 // last index whose tick is <= t (or -1)
 export function lastAtOrBefore<T extends {tick: number}>(arr: T[], t: number): number {
 	let lo = 0, hi = arr.length - 1, ans = -1;
@@ -106,6 +160,7 @@ export interface ViewState {
 export function viewAt(track: SegmentTrack, tick: number): ViewState | null {
 	const views = track.seg.views;
 	if (!views.length) return null;
+	if (track.times) return clientViewAt(track, track.times, tick);
 	const i = lastAtOrBefore(views, tick);
 	if (i < 0) return {origin: views[0].origin, angles: views[0].angles, speed: track.speeds[0], viewIndex: 0};
 	const a: ViewFrame = views[i];
@@ -128,6 +183,71 @@ export function viewAt(track: SegmentTrack, tick: number): ViewState | null {
 		angles,
 		speed: lerp(track.speeds[i], track.speeds[i + 1], f),
 		viewIndex: i,
+	};
+}
+
+// A client's view at a tick: where its path is there, fitted to the views
+// around it by their worked-out times (see retime) as a straight line,
+// weighted by how near in time each is (Gaussian, about a view's spacing
+// wide), so the samples' unevenness averages out while steady motion keeps
+// its speed with no lag; never across a teleport. Aimed as that tick's user
+// command aims, which a client records every tick, exactly (the views' own
+// aim where there's none)
+const FIT_WIDTH = 1.2;   // the weights' width, in mean view spacings
+function clientViewAt(track: SegmentTrack, times: Float64Array, tick: number): ViewState {
+	const views = track.seg.views;
+	let lo = 0, hi = views.length - 1, i = -1;
+	while (lo <= hi) {
+		const mid = (lo + hi) >> 1;
+		if (times[mid] <= tick) {
+			i = mid;
+			lo = mid + 1;
+		} else hi = mid - 1;
+	}
+	const at = Math.max(0, i);
+	// (the stretch it's in: the views between teleports around it; a tick
+	// past a teleport's view belongs to the stretch it starts)
+	let s = at, e = at;
+	while (s > 0 && !track.teleports[s]) s--;
+	while (e + 1 < views.length && !track.teleports[e + 1]) e++;
+	const n = e - s + 1;
+	const spacing = n > 1 ? (times[e] - times[s]) / (n - 1) : 1;
+	const width = Math.max(1, spacing * FIT_WIDTH);
+	let sw = 0, st = 0;
+	const sp = [0, 0, 0];
+	for (let j = at; j >= s && tick - times[j] < 3 * width; j--) visit(j);
+	for (let j = at + 1; j <= e && times[j] - tick < 3 * width; j++) visit(j);
+	function visit(j: number) {
+		const d = (times[j] - tick) / width, w = Math.exp(-0.5 * d * d);
+		sw += w;
+		st += w * times[j];
+		for (let k = 0; k < 3; k++) sp[k] += w * views[j].origin[k];
+	}
+	let origin: Vec3 = views[at].origin;
+	if (sw > 0) {
+		const tm = st / sw;
+		const pm = sp.map(x => x / sw);
+		// (the slope from the same views; flat where there's only the one)
+		let stt = 0;
+		const stp = [0, 0, 0];
+		for (let j = s; j <= e; j++) {
+			const d = (times[j] - tick) / width;
+			if (Math.abs(d) >= 3) continue;
+			const w = Math.exp(-0.5 * d * d), dt = times[j] - tm;
+			stt += w * dt * dt;
+			for (let k = 0; k < 3; k++) stp[k] += w * dt * (views[j].origin[k] - pm[k]);
+		}
+		origin = [0, 1, 2].map(k => pm[k] + (stt > 1e-9 ? stp[k] / stt : 0) * (tick - tm)) as Vec3;
+	}
+	const a = views[at], b = views[at + 1];
+	const f = b && at + 1 <= e ? Math.min(1, Math.max(0, (tick - times[at]) / (times[at + 1] - times[at]))) : 0;
+	const own: Vec3 = b && at + 1 <= e ? [lerp(a.angles[0], b.angles[0], f), lerpAngle(a.angles[1], b.angles[1], f), lerp(a.angles[2], b.angles[2], f)] : a.angles;
+	const aim = cmdAim(track.seg.userCmds, tick);
+	return {
+		origin,
+		angles: aim ? [aim[0], aim[1], own[2]] : own,
+		speed: b && at + 1 <= e ? lerp(track.speeds[at], track.speeds[at + 1], f) : track.speeds[at],
+		viewIndex: at,
 	};
 }
 

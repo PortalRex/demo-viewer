@@ -4576,6 +4576,14 @@ export class View3D {
 		if (delayed && t !== this.followTrack) tick = Math.max(0, tick - this.interpDelay);
 		const i = keyIndexAt(t, Math.floor(tick));
 		const k = t.keys[Math.max(0, i)], n = t.keys[i + 1];
+		// (a co-op client's own player where its recording has it: its views,
+		// re-timed and fitted (playback's clientViewAt), are smoother than its
+		// snapshots, which come every few ticks; the eyes, and in Orbit the
+		// body, follow them)
+		if (t === this.entities?.player && this.track?.times) {
+			const v = viewAt(this.track, tick);
+			if (v) return {origin: new THREE.Vector3(v.origin[0], v.origin[1], v.origin[2]), angles: [k.angles[0], v.angles[1], k.angles[2]]};
+		}
 		const origin = new THREE.Vector3(k.origin[0], k.origin[1], k.origin[2]);
 		if (!joined(k, n)) return {origin, angles: k.angles};
 		const f = Math.min(1, Math.max(0, (tick - k.tick) / (n.tick - k.tick)));
