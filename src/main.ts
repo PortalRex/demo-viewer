@@ -82,7 +82,7 @@ if (import.meta.env.DEV) {
 	w.useKept = async (source: boolean) => {
 		const cache = await GameCache.open();
 		if (!cache) return;
-		offerKeepAll = source && !CM_MAPS.every(m => cache.hasMap(m));
+		offerKeepAll = source && !CM_MAPS.every(m => cache.hasMap(m)) ? 'start' : false;
 		useGameFolder(new CachedFS(cache, source ? new HttpFS('/__game/') : null));
 	};
 	// a shot from in front of a portal (network index), `dist` out and `side` across
@@ -366,15 +366,16 @@ function message3d(html: string | null) {
 	if (html !== null) el.innerHTML = `<div class="box">${html}</div>`;
 }
 
-async function connectGame(reuse?: FileSystemDirectoryHandle, upload = false) {
+// (keepEverything: the prompt's "Keep all challenge mode maps" ticked)
+async function connectGame(reuse?: FileSystemDirectoryHandle, upload = false, keepEverything = false) {
 	try {
 		const fs = reuse ? await reuseGameFolder(reuse) : await pickGameFolder(upload);
 		if (!fs) return;
-		// (an upload isn't remembered: what's read from it is kept instead)
+		// (an upload isn't remembered: what's read from it is kept instead,
+		// and every map with it, where that was ticked and they aren't all
+		// kept yet: started once this map shows)
 		const cache = fs instanceof FileListFS ? await GameCache.open() : null;
-		// (and keeping every map offered, once this one shows, where they
-		// aren't all kept yet)
-		offerKeepAll = !!cache && !CM_MAPS.every(m => cache.hasMap(m));
+		offerKeepAll = !!cache && keepEverything && !CM_MAPS.every(m => cache.hasMap(m)) ? 'start' : false;
 		useGameFolder(cache ? new CachedFS(cache, fs) : fs);
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') message3d(`<h2>Couldn't open the folder</h2>${(e as Error).message}`);
@@ -497,8 +498,9 @@ async function load3dMap() {
 		if (fs instanceof CachedFS && fs.source) {
 			keepWhenSettled(seg.map, fs.cache);
 			if (offerKeepAll) {
+				const ask = offerKeepAll === 'ask';
 				offerKeepAll = false;
-				void keepAll();
+				void keepAll(ask);
 			}
 		}
 		prepareNext(currentSeg);
@@ -530,10 +532,13 @@ function askForGame(remembered: FileSystemDirectoryHandle | null, unkept: boolea
 		<br>${reuse}<button class="${remembered ? '' : 'primary'}" id="connect-game">Choose ${remembered ? 'another' : 'Portal 2'} folder</button>
 		${picker ? `<p class="muted">If the browser says it can’t open the folder (it won’t open any under Program Files,
 		Steam’s default place for games), <button id="upload-game">pick it as an upload</button> instead.</p>` : ''}
+		<label class="keep-all-pick"><input type="checkbox" id="keep-all-pick" checked> Keep all challenge mode maps (about 5.4 GB in this browser),
+		so no map ever asks for the folder again: copied in the background while you watch</label>
 		<p class="muted">Tip: with Portal 2 in a Steam library outside Program Files (in Steam: the game’s Properties,
 		Installed Files, Move install folder), Chrome and Edge remember the folder itself and never ask again${picker ? '' : ' (Brave too, with brave://flags/#file-system-access-api turned on)'}.</p>`);
-	$('connect-game').onclick = () => connectGame(undefined, !picker);
-	document.getElementById('upload-game')?.addEventListener('click', () => connectGame(undefined, true));
+	const keepAllPicked = () => ($('keep-all-pick') as HTMLInputElement).checked;
+	$('connect-game').onclick = () => connectGame(undefined, !picker, keepAllPicked());
+	document.getElementById('upload-game')?.addEventListener('click', () => connectGame(undefined, true, keepAllPicked()));
 	if (remembered) $('reuse-game').onclick = () => connectGame(remembered);
 }
 
@@ -556,18 +561,21 @@ function keepWhenSettled(map: string, cache: GameCache) {
 const CM_MAPS = [...new Set(CHAMBERS.map(c => c.map))];
 // (copying: stopped from the button; only once it runs, not while its offer's open)
 let keeping: {stop: () => void; running: boolean} | null = null;
-// (set when a folder's picked as an upload: offered once its first map shows)
-let offerKeepAll = false;
+// (set when a folder's picked as an upload: every map kept once its first map
+// shows, started straight away where the prompt said so, else asked)
+let offerKeepAll: 'start' | 'ask' | false = false;
 function showKeepAll() {
 	const fs = gameFS;
 	const allKept = fs instanceof CachedFS && CM_MAPS.every(m => fs.cache.hasMap(m));
 	$('keep-all').hidden = !keeping && (!(fs instanceof CachedFS && fs.source) || allKept || viewMode !== '3d');
 }
 $('keep-all').onclick = () => {
-	if (!keeping) void keepAll();
+	if (!keeping) void keepAll(true);
 	else if (keeping.running) keeping.stop();
 };
-async function keepAll() {
+// (ask: the size shown and asked about first; else asked only where the
+// browser hasn't the room)
+async function keepAll(ask: boolean) {
 	const fs = gameFS;
 	if (!(fs instanceof CachedFS) || !fs.source || keeping) return;
 	const button = $('keep-all');
@@ -587,7 +595,7 @@ async function keepAll() {
 		const room = est?.quota !== undefined && est.usage !== undefined ? est.quota - est.usage : null;
 		const short = room !== null && room < plan.bytes;
 		button.textContent = label;
-		const go = await new Promise<boolean>(done => {
+		const go = !ask && !short ? true : await new Promise<boolean>(done => {
 			message3d(`<h2>Keep all challenge mode maps?</h2>
 				Every challenge mode map, with the textures, models and particles they use: <b>${gb(plan.bytes)} GB</b> kept in this browser,
 				so no map asks for the Portal 2 folder again. It copies in the background while you watch (a few minutes).
