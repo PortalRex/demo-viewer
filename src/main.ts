@@ -79,11 +79,13 @@ if (import.meta.env.DEV) {
 	w.seek = (t: number) => seekTo(t);
 	// the game files kept in the browser, as a picked upload makes them: read
 	// through from the dev server's game folder (source) or kept only
-	w.useKept = async (source: boolean) => {
+	// (source: true for this dev server's, or another one's /__game/ address:
+	// the viewer built into the boards site for a test reads the dev server's)
+	w.useKept = async (source: boolean | string) => {
 		const cache = await GameCache.open();
 		if (!cache) return;
 		offerKeepAll = source && !CM_MAPS.every(m => cache.hasMap(m)) ? 'start' : false;
-		useGameFolder(new CachedFS(cache, source ? new HttpFS('/__game/') : null));
+		useGameFolder(new CachedFS(cache, source ? new HttpFS(typeof source === 'string' ? source : '/__game/') : null));
 	};
 	// a shot from in front of a portal (network index), `dist` out and `side` across
 	w.facePortal = (name: string, index: number, tick: number, dist = 120, side = 0) => {

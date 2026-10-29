@@ -2,12 +2,16 @@
 // served there at /viewer/, reading the site's own API (/api/v1) for boards
 // and demos. Written into that checkout's frontend/public/viewer (git-ignored
 // there: the viewer stays out of the boards repo), which its build copies in.
-//   node tools/build-boards.mjs [boards checkout, default ../portal2-cm-boards-v2]
+//   node tools/build-boards.mjs [boards checkout, default ../portal2-cm-boards-v2] [--test]
+// --test: a development build, with the dev hooks (window.useKept, ...) for
+// testing in the site; build again without it afterwards
 import {build} from 'vite';
 import {resolve} from 'node:path';
 import {existsSync} from 'node:fs';
 
-const boards = resolve(process.argv[2] ?? '../portal2-cm-boards-v2');
+const args = process.argv.slice(2);
+const test = args.includes('--test');
+const boards = resolve(args.find(a => !a.startsWith('--')) ?? '../portal2-cm-boards-v2');
 if (!existsSync(resolve(boards, 'frontend/package.json'))) {
 	console.error(`No boards checkout at ${boards}`);
 	process.exit(1);
@@ -15,5 +19,6 @@ if (!existsSync(resolve(boards, 'frontend/package.json'))) {
 process.env.VITE_BOARDS_API = '/api/v1';
 await build({
 	base: '/viewer/',
+	mode: test ? 'development' : 'production',
 	build: {outDir: resolve(boards, 'frontend/public/viewer'), emptyOutDir: true},
 });

@@ -30,6 +30,8 @@ export class GameCache {
 	private db: IDBDatabase;
 	// what's kept, by file: byte ranges by offset, and the files kept whole
 	private ranges = new Map<string, Range[]>();
+	// (the longest range kept of each file: how far back a lookup looks)
+	private longest = new Map<string, number>();
 	private wholes = new Set<string>();
 	private maps = new Set<string>();
 	// writes go out together (a transaction a few hundred milliseconds)
@@ -78,6 +80,7 @@ export class GameCache {
 			let list = this.ranges.get(path);
 			if (!list) this.ranges.set(path, list = []);
 			list.push({offset: Number(offset), length: Number(length), key});
+			this.longest.set(path, Math.max(this.longest.get(path) ?? 0, Number(length)));
 		}
 	}
 
@@ -109,7 +112,10 @@ export class GameCache {
 		if (length === undefined) return undefined;
 		const list = this.ranges.get(path);
 		if (!list) return undefined;
-		// (the last kept range starting at or before the offset)
+		// (the last kept range starting at or before the offset, then back from
+		// it: ranges overlap, a part read on its own and the whole VPK entry
+		// it's in both kept, so the nearest may not cover it where one before
+		// does; none further back than the longest kept could reach)
 		let lo = 0, hi = list.length - 1, at = -1;
 		while (lo <= hi) {
 			const mid = (lo + hi) >> 1;
@@ -118,10 +124,14 @@ export class GameCache {
 				lo = mid + 1;
 			} else hi = mid - 1;
 		}
-		const r = list[at];
-		if (!r || offset + length > r.offset + r.length) return undefined;
-		const bytes = await this.load(r.key);
-		return bytes?.subarray(offset - r.offset, offset - r.offset + length);
+		const longest = this.longest.get(path) ?? 0;
+		for (let i = at; i >= 0 && list[i].offset + longest >= offset + length; i--) {
+			const r = list[i];
+			if (offset + length > r.offset + r.length) continue;
+			const bytes = await this.load(r.key);
+			if (bytes) return bytes.subarray(offset - r.offset, offset - r.offset + length);
+		}
+		return undefined;
 	}
 
 	private async load(key: string): Promise<Uint8Array | undefined> {
@@ -146,6 +156,7 @@ export class GameCache {
 			const list = this.ranges.get(path) ?? [];
 			const i = list.findIndex(r => r.offset > offset);
 			list.splice(i < 0 ? list.length : i, 0, {offset, length, key});
+			this.longest.set(path, Math.max(this.longest.get(path) ?? 0, length));
 			this.ranges.set(path, list);
 		}
 		// (a copy: a view's whole buffer would be stored otherwise)
@@ -191,6 +202,7 @@ export class GameCache {
 	async clear() {
 		this.pending = [];
 		this.ranges.clear();
+		this.longest.clear();
 		this.wholes.clear();
 		this.maps.clear();
 		const tx = this.db.transaction([DATA, META], 'readwrite');

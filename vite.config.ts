@@ -27,6 +27,18 @@ function devGameFiles(): Plugin {
 					res.end('ok');
 				});
 			});
+			// the game folder readable from other local dev servers too (the
+			// boards site's, testing the viewer built into it)
+			server.middlewares.use('/__game', (req, res, next) => {
+				res.setHeader('Access-Control-Allow-Origin', '*');
+				res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+				res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+				if (req.method === 'OPTIONS') {
+					res.statusCode = 204;
+					return res.end();
+				}
+				next();
+			});
 			// a game folder's loose asset files (so the viewer doesn't probe for each)
 			server.middlewares.use('/__game/__list', (req, res) => {
 				const dir = normalize(decodeURIComponent(/dir=([^&]*)/.exec(req.url ?? '')?.[1] ?? '')).replace(/^([/\\])+/, '');
