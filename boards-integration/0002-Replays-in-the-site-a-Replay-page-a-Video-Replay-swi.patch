@@ -1,0 +1,1561 @@
+From 8549f8b186b82ea3568ade8e831b106971135e83 Mon Sep 17 00:00:00 2001
+From: PortalRex <35444194+PortalRex@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 21:45:14 -0500
+Subject: [PATCH] Replays in the site: a Replay page, a Video/Replay switch in
+ run details, and Race Top 5 / WR History / Swarm / Pick Runs on map pages
+
+---
+ REWRITE_PROGRESS.md                           |   8 ++
+ frontend/README.md                            |  10 +-
+ frontend/security-headers.conf                |   5 +-
+ frontend/src/app/routeTree.gen.ts             |  21 ++++
+ frontend/src/app/routes/replay.tsx            |  12 ++
+ frontend/src/components/runs/replay-frame.tsx |  29 +++++
+ .../src/components/runs/run-media.test.tsx    |  18 +--
+ frontend/src/components/runs/run-media.tsx    |  29 +++--
+ frontend/src/components/runs/time-button.tsx  |   2 +-
+ .../features/leaderboards/api/map-board.ts    |  24 ++++
+ .../components/map-leaderboard.tsx            |  71 +++++++++++-
+ .../leaderboards/components/map-page.test.tsx |  87 +++++++++++++++
+ .../leaderboards/components/map-page.tsx      |  27 +++++
+ .../components/replay-actions.tsx             | 103 ++++++++++++++++++
+ .../leaderboards/utils/replay.test.ts         |  47 ++++++++
+ .../src/features/leaderboards/utils/replay.ts |  33 ++++++
+ .../profiles/components/profile-history.tsx   |   2 +-
+ .../profiles/components/score-tables.tsx      |   2 +-
+ .../runs/components/replay-page.test.tsx      |  53 +++++++++
+ .../features/runs/components/replay-page.tsx  |  89 +++++++++++++++
+ .../runs/components/run-details.test.tsx      |  30 +++++
+ .../features/runs/components/run-details.tsx  |  83 +++++++++++---
+ frontend/src/lib/query-keys.ts                |   1 +
+ frontend/src/lib/runs/viewer.test.ts          |  45 ++++++--
+ frontend/src/lib/runs/viewer.ts               |  89 +++++++++++++--
+ frontend/viewer-security-headers.conf         |   8 +-
+ frontend/vite.config.ts                       |  70 ++++++------
+ 27 files changed, 894 insertions(+), 104 deletions(-)
+ create mode 100644 frontend/src/app/routes/replay.tsx
+ create mode 100644 frontend/src/components/runs/replay-frame.tsx
+ create mode 100644 frontend/src/features/leaderboards/components/replay-actions.tsx
+ create mode 100644 frontend/src/features/leaderboards/utils/replay.test.ts
+ create mode 100644 frontend/src/features/leaderboards/utils/replay.ts
+ create mode 100644 frontend/src/features/runs/components/replay-page.test.tsx
+ create mode 100644 frontend/src/features/runs/components/replay-page.tsx
+
+diff --git a/REWRITE_PROGRESS.md b/REWRITE_PROGRESS.md
+index a8bf28f..9f074e1 100644
+--- a/REWRITE_PROGRESS.md
++++ b/REWRITE_PROGRESS.md
+@@ -69,6 +69,14 @@
+ 
+ ## Log
+ <!-- Newest first. One entry per finished item: date, what was done, commit, tests added. -->
++- 2026-10-29: Asked for (local only): the demo viewer inside the site. `/replay` (`features/runs/components/
++  replay-page.tsx`): the viewer embedded full size (`components/runs/replay-frame.tsx`, `?embed=full`) under a bar
++  naming the map and the run or what's raced; every Watch link goes there. Run Details: a Video / Replay switch
++  plays the demo in the row (`?embed=compact`), plus a Full Replay button. Map page (`replay-actions.tsx`): Race Top
++  5, Race WR History (`getWrDemos`: changelog wr_gain + has_demo, a co-op record once), Swarm Top 100, and Pick Runs
++  to Race (checkboxes on the board). Site CSP frame-src 'self'; the viewer may be framed by the site only. Tests:
++  `lib/runs/viewer.test.ts`, `features/leaderboards/utils/replay.test.ts`, `replay-page.test.tsx`, map page and
++  run details tests with the viewer on.
+ - 2026-10-29: Asked for (local only): the demo viewer (private PortalRex/demo-viewer) built into
+   `frontend/public/viewer` (git-ignored) is served at `/viewer/` with its own CSP (`viewer-security-headers.conf`);
+   where it's there (`VITE_VIEWER`, set by vite.config.ts), runs get a "Watch in the browser" link next to the demo
+diff --git a/frontend/README.md b/frontend/README.md
+index 91373a3..e56efab 100644
+--- a/frontend/README.md
++++ b/frontend/README.md
+@@ -26,12 +26,14 @@ Settings (`.env.local` or the environment, all optional):
+ ## Demo viewer
+ 
+ Where the demo viewer (a replay of a run's demo in the browser, from the private PortalRex/demo-viewer repo) is
+-built into `public/viewer/`, the site serves it at `/viewer/` and shows a **Watch in the browser** link next to each
+-run's demo. It reads the boards and demos from this site's API. Build it from the viewer's checkout:
++built into `public/viewer/`, the site serves it at `/viewer/` and plays runs in its own pages: a **Replay** page
++(`/replay`, the viewer under the site's header, linked next to each run's demo), a Video / Replay switch in a run's
++details, and Race Top 5 / Race WR History / Swarm Top 100 / Pick Runs to Race on a map's page. The viewer reads
++the boards and demos from this site's API. Build it from the viewer's checkout:
+ 
+ ```bash
+ node tools/build-boards.mjs <path to this repo>   # writes frontend/public/viewer (git-ignored)
+ ```
+ 
+-Without it, nothing links to it and `/viewer/` is a 404. nginx gives `/viewer/` its own security headers
+-(`viewer-security-headers.conf`).
++Without it, none of this shows and `/viewer/` is a 404. nginx gives `/viewer/` its own security headers
++(`viewer-security-headers.conf`: it may be framed by the site only).
+diff --git a/frontend/security-headers.conf b/frontend/security-headers.conf
+index 8025dbd..cbfb4a9 100644
+--- a/frontend/security-headers.conf
++++ b/frontend/security-headers.conf
+@@ -8,9 +8,10 @@
+ #   font-src    fonts.gstatic.com data:
+ #   img-src     https: data:      Steam avatars, flag images, map images, autorender thumbnails
+ #   media-src   https:            autorender videos (object storage and autorender.portal2.sr)
+-#   frame-src   youtube-nocookie.com
++#   frame-src   'self' youtube-nocookie.com   the demo viewer's replays (/viewer/, where it's built in)
++#                                 and YouTube
+ #   connect-src 'self' autorender.portal2.sr   the API (same origin) and autorender's "which videos exist" check
+-add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data:; media-src 'self' https:; frame-src https://www.youtube-nocookie.com https://www.youtube.com; connect-src 'self' https://autorender.portal2.sr; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
++add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' https: data:; media-src 'self' https:; frame-src 'self' https://www.youtube-nocookie.com https://www.youtube.com; connect-src 'self' https://autorender.portal2.sr; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+ add_header X-Content-Type-Options "nosniff" always;
+ add_header X-Frame-Options "DENY" always;
+ add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+diff --git a/frontend/src/app/routeTree.gen.ts b/frontend/src/app/routeTree.gen.ts
+index a74b517..adfd9c6 100644
+--- a/frontend/src/app/routeTree.gen.ts
++++ b/frontend/src/app/routeTree.gen.ts
+@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
+ import { Route as AdminRouteImport } from './routes/admin'
+ import { Route as CompareRouteImport } from './routes/compare'
+ import { Route as MapsRouteImport } from './routes/maps'
++import { Route as ReplayRouteImport } from './routes/replay'
+ import { Route as LeaderboardIndexRouteImport } from './routes/leaderboard.index'
+ import { Route as LeaderboardKindRouteImport } from './routes/leaderboard.$kind'
+ import { Route as MorePageRouteImport } from './routes/more.$page'
+@@ -57,6 +58,11 @@ const MapsRoute = MapsRouteImport.update({
+   path: '/maps',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const ReplayRoute = ReplayRouteImport.update({
++  id: '/replay',
++  path: '/replay',
++  getParentRoute: () => rootRouteImport,
++} as any)
+ const LeaderboardIndexRoute = LeaderboardIndexRouteImport.update({
+   id: '/leaderboard/',
+   path: '/leaderboard/',
+@@ -181,6 +187,7 @@ export interface FileRoutesByFullPath {
+   '/admin': typeof AdminRoute
+   '/compare': typeof CompareRoute
+   '/maps': typeof MapsRoute
++  '/replay': typeof ReplayRoute
+   '/leaderboard/$kind': typeof LeaderboardKindRoute
+   '/more/$page': typeof MorePageRoute
+   '/more/about': typeof MoreAboutRoute
+@@ -210,6 +217,7 @@ export interface FileRoutesByTo {
+   '/admin': typeof AdminRoute
+   '/compare': typeof CompareRoute
+   '/maps': typeof MapsRoute
++  '/replay': typeof ReplayRoute
+   '/leaderboard/$kind': typeof LeaderboardKindRoute
+   '/more/$page': typeof MorePageRoute
+   '/more/about': typeof MoreAboutRoute
+@@ -240,6 +248,7 @@ export interface FileRoutesById {
+   '/admin': typeof AdminRoute
+   '/compare': typeof CompareRoute
+   '/maps': typeof MapsRoute
++  '/replay': typeof ReplayRoute
+   '/leaderboard/$kind': typeof LeaderboardKindRoute
+   '/more/$page': typeof MorePageRoute
+   '/more/about': typeof MoreAboutRoute
+@@ -271,6 +280,7 @@ export interface FileRouteTypes {
+     | '/admin'
+     | '/compare'
+     | '/maps'
++    | '/replay'
+     | '/leaderboard/$kind'
+     | '/more/$page'
+     | '/more/about'
+@@ -300,6 +310,7 @@ export interface FileRouteTypes {
+     | '/admin'
+     | '/compare'
+     | '/maps'
++    | '/replay'
+     | '/leaderboard/$kind'
+     | '/more/$page'
+     | '/more/about'
+@@ -329,6 +340,7 @@ export interface FileRouteTypes {
+     | '/admin'
+     | '/compare'
+     | '/maps'
++    | '/replay'
+     | '/leaderboard/$kind'
+     | '/more/$page'
+     | '/more/about'
+@@ -359,6 +371,7 @@ export interface RootRouteChildren {
+   AdminRoute: typeof AdminRoute
+   CompareRoute: typeof CompareRoute
+   MapsRoute: typeof MapsRoute
++  ReplayRoute: typeof ReplayRoute
+   LeaderboardKindRoute: typeof LeaderboardKindRoute
+   MorePageRoute: typeof MorePageRoute
+   MoreAboutRoute: typeof MoreAboutRoute
+@@ -414,6 +427,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof MapsRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/replay': {
++      id: '/replay'
++      path: '/replay'
++      fullPath: '/replay'
++      preLoaderRoute: typeof ReplayRouteImport
++      parentRoute: typeof rootRouteImport
++    }
+     '/leaderboard/': {
+       id: '/leaderboard/'
+       path: '/leaderboard'
+@@ -583,6 +603,7 @@ const rootRouteChildren: RootRouteChildren = {
+   AdminRoute: AdminRoute,
+   CompareRoute: CompareRoute,
+   MapsRoute: MapsRoute,
++  ReplayRoute: ReplayRoute,
+   LeaderboardKindRoute: LeaderboardKindRoute,
+   MorePageRoute: MorePageRoute,
+   MoreAboutRoute: MoreAboutRoute,
+diff --git a/frontend/src/app/routes/replay.tsx b/frontend/src/app/routes/replay.tsx
+new file mode 100644
+index 0000000..ff57560
+--- /dev/null
++++ b/frontend/src/app/routes/replay.tsx
+@@ -0,0 +1,12 @@
++import { createFileRoute } from '@tanstack/react-router'
++import { ReplayPage } from '@/features/runs/components/replay-page'
++import { replaySearchSchema } from '@/lib/runs/viewer'
++
++export const Route = createFileRoute('/replay')({
++  validateSearch: replaySearchSchema,
++  component: ReplayRoute,
++})
++
++function ReplayRoute() {
++  return <ReplayPage search={Route.useSearch()} />
++}
+diff --git a/frontend/src/components/runs/replay-frame.tsx b/frontend/src/components/runs/replay-frame.tsx
+new file mode 100644
+index 0000000..0dfba62
+--- /dev/null
++++ b/frontend/src/components/runs/replay-frame.tsx
+@@ -0,0 +1,29 @@
++import { cn } from 'cn'
++import { viewerFrameSrc, type ReplayRuns } from '@/lib/runs/viewer'
++
++/**
++ * The demo viewer replaying runs in the page (its own header left out): full on the replay page,
++ * compact (without its side panels) in a run's details. A new set of runs loads it afresh.
++ */
++export function ReplayFrame({
++  runs,
++  embed,
++  title,
++  className,
++}: {
++  runs: ReplayRuns
++  embed: 'full' | 'compact'
++  title: string
++  className?: string
++}) {
++  const src = viewerFrameSrc(runs, embed)
++  return (
++    <iframe
++      key={src}
++      src={src}
++      title={title}
++      allow="fullscreen"
++      className={cn('block w-full rounded-lg border border-track bg-[#0f1115]', className)}
++    />
++  )
++}
+diff --git a/frontend/src/components/runs/run-media.test.tsx b/frontend/src/components/runs/run-media.test.tsx
+index e19ce30..dffb66f 100644
+--- a/frontend/src/components/runs/run-media.test.tsx
++++ b/frontend/src/components/runs/run-media.test.tsx
+@@ -75,20 +75,22 @@ describe('run media links', () => {
+ })
+ 
+ describe('ViewerLink', () => {
+-  it('opens the run in the demo viewer, a co-op partner with it', async () => {
+-    await renderWithProviders(<ViewerLink demoIds={[7, 9]} viewer />)
+-    expect(screen.getByRole('link', { name: 'Watch in the browser' })).toHaveAttribute(
+-      'href',
+-      '/viewer/#board=7&with=9',
+-    )
++  it("opens the run's replay page, a co-op partner's demo with it", async () => {
++    await renderWithProviders(<ViewerLink demoIds={[7, 9]} runId={55} mapId="47458" viewer />)
++    const link = screen.getByRole('link', { name: 'Watch the replay' })
++    const url = new URL(link.getAttribute('href')!, 'http://x')
++    expect(url.pathname).toBe('/replay')
++    expect(url.searchParams.get('demo')).toBe('7')
++    expect(url.searchParams.get('with')).toContain('9')
++    expect(url.searchParams.get('run')).toBe('55')
+   })
+ 
+   it("shows nothing without a demo, or where the viewer isn't built in", async () => {
+     const { unmount } = await renderWithProviders(<ViewerLink demoIds={[null]} viewer />)
+-    expect(screen.queryByRole('link', { name: 'Watch in the browser' })).not.toBeInTheDocument()
++    expect(screen.queryByRole('link', { name: 'Watch the replay' })).not.toBeInTheDocument()
+     unmount()
+     await renderWithProviders(<ViewerLink demoIds={[7]} viewer={false} />)
+-    expect(screen.queryByRole('link', { name: 'Watch in the browser' })).not.toBeInTheDocument()
++    expect(screen.queryByRole('link', { name: 'Watch the replay' })).not.toBeInTheDocument()
+   })
+ })
+ 
+diff --git a/frontend/src/components/runs/run-media.tsx b/frontend/src/components/runs/run-media.tsx
+index 6926d87..3754fd9 100644
+--- a/frontend/src/components/runs/run-media.tsx
++++ b/frontend/src/components/runs/run-media.tsx
+@@ -1,3 +1,4 @@
++import { Link } from '@tanstack/react-router'
+ import { cn } from 'cn'
+ import { useEffect, useRef, useState } from 'react'
+ import {
+@@ -14,7 +15,7 @@ import { bubbleAnchor } from '@/lib/bubble'
+ import { runVideo, type VideoRun } from '@/lib/runs/video'
+ import { apiUrl } from '@/lib/api-client'
+ import { env } from '@/config/env'
+-import { viewerUrl } from '@/lib/runs/viewer'
++import { replayOf, replaySearch } from '@/lib/runs/viewer'
+ 
+ const off = 'opacity-[0.18]'
+ // Drawn a little under the requested slot size, filled rather than outlined.
+@@ -103,33 +104,37 @@ export function DemoLink({
+ }
+ 
+ /**
+- * Opens the run's demo (and a co-op partner's) in the demo viewer, a replay in the browser. Only
+- * where the viewer is built in (env.VITE_VIEWER); nothing without a demo.
++ * Opens the run's replay page (its demo, and a co-op partner's, played in the site). Only where
++ * the demo viewer is built in (env.VITE_VIEWER); nothing without a demo.
+  */
+ export function ViewerLink({
+   demoIds,
++  runId,
++  mapId,
+   size = 22,
+   viewer = env.VITE_VIEWER,
+ }: {
+   demoIds: readonly (number | null | undefined)[]
++  /** The run's changelog id and map, which the replay page names. */
++  runId?: number | null
++  mapId?: string
+   size?: number
+   viewer?: boolean
+ }) {
+-  const url = viewerUrl(demoIds)
+-  if (!viewer || !url) return null
++  const runs = replayOf(demoIds)
++  if (!viewer || !runs) return null
+   const icon = { width: size - shrink, height: size - shrink }
+   return (
+-    <a
+-      href={url}
+-      target="_blank"
+-      rel="noreferrer"
++    <Link
++      to="/replay"
++      search={replaySearch(runs, { run: runId, map: mapId })}
+       className={iconLink}
+-      title="Watch in the browser"
++      title="Watch the replay"
+       onClick={(e) => e.stopPropagation()}
+     >
+       <ViewerIcon style={icon} aria-hidden />
+-      <span className="sr-only">Watch in the browser</span>
+-    </a>
++      <span className="sr-only">Watch the replay</span>
++    </Link>
+   )
+ }
+ 
+diff --git a/frontend/src/components/runs/time-button.tsx b/frontend/src/components/runs/time-button.tsx
+index 8580f1d..c0f34a7 100644
+--- a/frontend/src/components/runs/time-button.tsx
++++ b/frontend/src/components/runs/time-button.tsx
+@@ -290,7 +290,7 @@ function HistoryTable({
+             <AutorenderLink run={r} game={game} size={20} />
+             <YouTubeLink id={r.youtubeId} size={22} />
+             <DemoLink demoId={r.demoId} size={20} />
+-            <ViewerLink demoIds={[r.demoId]} size={20} />
++            <ViewerLink demoIds={[r.demoId]} runId={r.id} mapId={r.map.id} size={20} />
+             <BanToggle run={r} />
+           </span>
+         </div>
+diff --git a/frontend/src/features/leaderboards/api/map-board.ts b/frontend/src/features/leaderboards/api/map-board.ts
+index 5187459..1291428 100644
+--- a/frontend/src/features/leaderboards/api/map-board.ts
++++ b/frontend/src/features/leaderboards/api/map-board.ts
+@@ -74,6 +74,30 @@ export const wrHistoryQueryOptions = (map: MapInfo, c: Catalog) =>
+     queryFn: ({ signal }) => getWrHistory(map, c, signal),
+   })
+ 
++/**
++ * The demos of the map's world records, newest first (banned ones left out; a co-op record's
++ * two players' entries once): for racing its WR history in the replay.
++ */
++export async function getWrDemos(map: MapInfo, c: Catalog, signal?: AbortSignal): Promise<number[]> {
++  const rows = await api.get<ChangelogRaw[]>('/changelog', {
++    params: { chamber: map.id, wr_gain: true, has_demo: true, ...gameIdParam(c, map.game) },
++    signal,
++  })
++  const seen = new Set<string>()
++  const time = (t: string | null) => (t ? Date.parse(`${t}Z`) : 0)
++  return rows
++    .filter((r) => r.demo_id && !r.banned)
++    .sort((a, b) => time(b.timestamp) - time(a.timestamp))
++    .filter((r) => {
++      // (a co-op record's two players' entries share their co-op run)
++      const key = r.coop_id != null ? `coop:${r.coop_id}` : `${r.score}:${r.timestamp}`
++      if (seen.has(key)) return false
++      seen.add(key)
++      return true
++    })
++    .map((r) => r.demo_id!)
++}
++
+ /** Staff: every world record on the map, including runs removed from the history. */
+ export async function getStaffWrHistory(map: MapInfo, c: Catalog, signal?: AbortSignal): Promise<Run[]> {
+   const rows = await api.get<ChangelogRaw[]>('/changelog', {
+diff --git a/frontend/src/features/leaderboards/components/map-leaderboard.tsx b/frontend/src/features/leaderboards/components/map-leaderboard.tsx
+index 385d5c0..1aaa938 100644
+--- a/frontend/src/features/leaderboards/components/map-leaderboard.tsx
++++ b/frontend/src/features/leaderboards/components/map-leaderboard.tsx
+@@ -36,12 +36,19 @@ export function MapLeaderboard({
+   at,
+   onClearAt,
+   renderRunDetails,
++  picking = false,
++  onRacePicked,
++  onStopPicking,
+ }: {
+   map: MapInfo
+   board: UseQueryResult<RankedRun[]>
+   at: string | null
+   onClearAt: () => void
+   renderRunDetails?: RenderRunDetails
++  /** Ticking runs (with demos) to race in the replay, instead of opening them. */
++  picking?: boolean
++  onRacePicked?: (runs: RankedRun[]) => void
++  onStopPicking?: () => void
+ }) {
+   const catalog = useCatalog()
+   const me = useCurrentUser()
+@@ -64,6 +71,14 @@ export function MapLeaderboard({
+   const [pbStyle] = useCoopPbStyle()
+   const rowKey = (e: RankedRun) =>
+     e.changelogId ?? `${e.rank}-${e.players.map((p) => p.profileNumber).join('-')}`
++  const [picked, setPicked] = useState<ReadonlySet<string | number>>(new Set())
++  const togglePick = (e: RankedRun) =>
++    setPicked((cur) => {
++      const next = new Set(cur)
++      if (!next.delete(rowKey(e))) next.add(rowKey(e))
++      return next
++    })
++  const pickedRuns = all.filter((e) => picked.has(rowKey(e)))
+ 
+   // Jump to a board entry: clear the search, go to its page and open its details.
+   const showEntry = (entry: RankedRun) => {
+@@ -103,6 +118,33 @@ export function MapLeaderboard({
+       ) : (
+         <YourBest map={map} board={board.data} onShow={showEntry} />
+       )}
++      {picking && (
++        <div className="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md border border-brand bg-[color-mix(in_srgb,var(--brand)_10%,transparent)] px-3.5 py-2.5">
++          <span>
++            Tick the runs to race: <strong className="num">{pickedRuns.length}</strong> picked
++          </span>
++          <span className="flex gap-4">
++            <button
++              type="button"
++              disabled={!pickedRuns.length}
++              onClick={() => onRacePicked?.(pickedRuns)}
++              className="cursor-pointer border-0 bg-transparent p-0 font-semibold text-brand hover:underline disabled:cursor-default disabled:opacity-50 disabled:no-underline"
++            >
++              Race them
++            </button>
++            <button
++              type="button"
++              onClick={() => {
++                setPicked(new Set())
++                onStopPicking?.()
++              }}
++              className="cursor-pointer border-0 bg-transparent p-0 text-text-2 hover:underline"
++            >
++              Cancel
++            </button>
++          </span>
++        </div>
++      )}
+       <div className="mb-[18px] flex items-center justify-between gap-4 upto900:flex-col upto900:items-stretch">
+         <SearchBox
+           value={search}
+@@ -135,7 +177,8 @@ export function MapLeaderboard({
+         ) : visible.length ? (
+           visible.map((e) => {
+             const key = rowKey(e)
+-            const open = openKey === key
++            const open = !picking && openKey === key
++            const pickable = Boolean(e.demoId || e.demoIds?.some(Boolean))
+             const { players, rolesKnown } = coopRoles(e, overrides)
+             // Unpaired co-op runs have no partner on record; the cell keeps the columns lined up.
+             const cells = coop && players.length < 2 ? [...players, null] : players
+@@ -149,7 +192,10 @@ export function MapLeaderboard({
+                 <div
+                   role="row"
+                   aria-expanded={open}
+-                  onClick={toggleOnRowClick(() => setOpenKey(open ? null : key))}
++                  onClick={toggleOnRowClick(() => {
++                    if (!picking) setOpenKey(open ? null : key)
++                    else if (pickable) togglePick(e)
++                  })}
+                   className={cn(
+                     rowBase,
+                     'cursor-pointer hover:brightness-[1.15]',
+@@ -159,9 +205,22 @@ export function MapLeaderboard({
+                   )}
+                 >
+                   <span role="cell" className="num flex justify-center text-[15px]">
+-                    <RankPoints points={e.points}>
+-                      <RankTag rank={e.rank} className={BOARD_TAG} />
+-                    </RankPoints>
++                    {picking ? (
++                      <input
++                        type="checkbox"
++                        checked={picked.has(key)}
++                        disabled={!pickable}
++                        onChange={() => togglePick(e)}
++                        onClick={(ev) => ev.stopPropagation()}
++                        aria-label={pickable ? `Pick #${e.rank}` : `#${e.rank} has no demo`}
++                        title={pickable ? undefined : 'No demo'}
++                        className="size-[18px] cursor-pointer accent-[var(--brand)] disabled:cursor-default"
++                      />
++                    ) : (
++                      <RankPoints points={e.points}>
++                        <RankTag rank={e.rank} className={BOARD_TAG} />
++                      </RankPoints>
++                    )}
+                   </span>
+                   {cells.map((p, j) => {
+                     if (!p) {
+@@ -240,7 +299,7 @@ export function MapLeaderboard({
+                     <AutorenderLink run={e} game={map.game} rendered={rendered} />
+                     <YouTubeLink id={e.youtubeId} />
+                     <DemoLink demoId={e.demoId} />
+-                    <ViewerLink demoIds={e.demoIds ?? [e.demoId]} />
++                    <ViewerLink demoIds={e.demoIds ?? [e.demoId]} runId={e.changelogId} mapId={map.id} />
+                   </span>
+                 </div>
+                 {open && renderRunDetails?.(e, map, rendered)}
+diff --git a/frontend/src/features/leaderboards/components/map-page.test.tsx b/frontend/src/features/leaderboards/components/map-page.test.tsx
+index 80fef41..8b49bf3 100644
+--- a/frontend/src/features/leaderboards/components/map-page.test.tsx
++++ b/frontend/src/features/leaderboards/components/map-page.test.tsx
+@@ -6,6 +6,8 @@ import changelog from '@/testing/fixtures/changelog.json'
+ import coopBoard from '@/testing/fixtures/map-coop-board.json'
+ import spBoard from '@/testing/fixtures/map-sp-board.json'
+ import { users } from '@/testing/data/users'
++import { env } from '@/config/env'
++import { replaySearchSchema } from '@/lib/runs/viewer'
+ import { API } from '@/testing/mocks/handlers'
+ import { server } from '@/testing/mocks/server'
+ import { renderRoute } from '@/testing/test-utils'
+@@ -414,4 +416,89 @@ describe('Map page', () => {
+       },
+     )
+   })
++
++  describe('with the demo viewer built in', () => {
++    // (env.VITE_VIEWER is read when rendering)
++    const withViewer = async (test: () => Promise<void>) => {
++      const was = env.VITE_VIEWER
++      env.VITE_VIEWER = true
++      try {
++        await test()
++      } finally {
++        env.VITE_VIEWER = was
++      }
++    }
++    const demos = spBoard.map((r) => r.map_data.demo_id)
++    // Where the page went: the replay page, with these runs.
++    const replayed = async (router: Awaited<ReturnType<typeof renderRoute>>['router']) => {
++      await waitFor(() => expect(router.state.location.pathname).toBe('/replay'))
++      return replaySearchSchema.parse(router.state.location.search)
++    }
++    const boardLoaded = () => within(board()).findAllByRole('link', { name: 'Watch the replay' })
++
++    it('races the top runs in the replay page', () =>
++      withViewer(async () => {
++        serveMap()
++        const { router } = await renderRoute('/map/sp/47759')
++        await boardLoaded()
++        fireEvent.click(screen.getByRole('button', { name: 'Race Top 5' }))
++        expect(await replayed(router)).toMatchObject({
++          demo: demos[0],
++          race: demos.slice(1).join(','),
++          map: '47759',
++          what: 'top',
++        })
++      }))
++
++    it('swarms the top runs', () =>
++      withViewer(async () => {
++        serveMap()
++        const { router } = await renderRoute('/map/sp/47759')
++        await boardLoaded()
++        fireEvent.click(screen.getByRole('button', { name: 'Swarm Top 100' }))
++        expect(await replayed(router)).toMatchObject({
++          demo: demos[0],
++          swarm: demos.join(','),
++          what: 'swarm',
++        })
++      }))
++
++    it('races the world records with demos, the newest shown', () =>
++      withViewer(async () => {
++        // (one without a demo, and the newest banned: both left out)
++        const wrs: ChangelogRaw[] = records([3000, 2900, 2800, 2700]).map((r, i) => ({
++          ...r,
++          demo_id: [11, null, 33, 44][i]!,
++          banned: i === 3,
++          coop_id: null,
++        }))
++        // (a co-op record's partner entry, a moment apart: raced once)
++        wrs.push({ ...wrs[2]!, demo_id: 34, coop_id: 7, timestamp: '2021-12-31T23:59:59' })
++        wrs[2] = { ...wrs[2]!, coop_id: 7 }
++        const { changelogAsked } = serveMap({ wrs })
++        const { router } = await renderRoute('/map/sp/47759')
++        fireEvent.click(await screen.findByRole('button', { name: 'Race WR History' }))
++        expect(await replayed(router)).toMatchObject({ demo: 33, race: '11', what: 'wr' })
++        expect(changelogAsked.some((q) => q.get('wr_gain') && q.get('has_demo'))).toBe(true)
++      }))
++
++    it('races runs ticked on the board', () =>
++      withViewer(async () => {
++        serveMap()
++        const { router } = await renderRoute('/map/sp/47759')
++        await boardLoaded()
++        fireEvent.click(screen.getByRole('button', { name: 'Pick Runs to Race' }))
++        const race = screen.getByRole('button', { name: 'Race them' })
++        expect(race).toBeDisabled()
++        fireEvent.click(within(board()).getByRole('checkbox', { name: 'Pick #2' }))
++        fireEvent.click(within(board()).getByRole('checkbox', { name: 'Pick #4' }))
++        expect(screen.getByText('2', { selector: 'strong' })).toBeInTheDocument()
++        fireEvent.click(race)
++        expect(await replayed(router)).toMatchObject({
++          demo: demos[1],
++          race: String(demos[3]),
++          what: 'picked',
++        })
++      }))
++  })
+ })
+diff --git a/frontend/src/features/leaderboards/components/map-page.tsx b/frontend/src/features/leaderboards/components/map-page.tsx
+index 6d0daa9..dc98da8 100644
+--- a/frontend/src/features/leaderboards/components/map-page.tsx
++++ b/frontend/src/features/leaderboards/components/map-page.tsx
+@@ -12,6 +12,7 @@ import { Select } from '@/components/select'
+ import { useCurrentUser } from '@/hooks/use-current-user'
+ import { useRenderedSet } from '@/hooks/use-rendered-set'
+ import { useSeason } from '@/hooks/use-season'
++import { env } from '@/config/env'
+ import { isStaff } from '@/lib/auth'
+ import {
+   findMap,
+@@ -28,9 +29,13 @@ import {
+ import { mapBoardQueryOptions, wrHistoryQueryOptions } from '../api/map-board'
+ import { ChamberHistory } from './chamber-history'
+ import { MapLeaderboard, type RenderRunDetails } from './map-leaderboard'
++import { ReplayActions } from './replay-actions'
+ import { WrHistoryEditor } from './wr-history-editor'
+ import { WrHistoryChart } from './wr-history-chart'
+ import { toSecond } from '@/lib/charts/history'
++import { replaySearch } from '@/lib/runs/viewer'
++import type { RankedRun } from '@/types/runs'
++import { raceReplay } from '../utils/replay'
+ 
+ const CATEGORIES = [{ value: 'main', label: 'Main Challenge Mode' }]
+ const MEL_CATEGORIES = [{ value: 'main', label: 'Challenge Mode' }]
+@@ -103,6 +108,13 @@ function MapPageContent({
+   const board = useQuery(mapBoardQueryOptions(data, catalog, at))
+   const history = useQuery(wrHistoryQueryOptions(data, catalog))
+   const [view, setView] = useState<View>('board')
++  // Ticking runs on the board to race in the replay (where the demo viewer is built in).
++  const [picking, setPicking] = useState(false)
++  const racePicked = (runs: RankedRun[]) => {
++    const replay = raceReplay(runs)
++    if (replay)
++      void navigate({ to: '/replay', search: replaySearch(replay, { map: data.id, what: 'picked' }) })
++  }
+   // ?at=: the board as it stood then (picked on the WR history chart). Keeps ?season= and the rest.
+   const pickMoment = (t: number | null) => {
+     void navigate({
+@@ -182,6 +194,18 @@ function MapPageContent({
+                 </button>
+               )}
+             </div>
++            {env.VITE_VIEWER && (
++              <ReplayActions
++                map={data}
++                board={board.data}
++                picking={picking}
++                onPicking={(on) => {
++                  setPicking(on)
++                  if (on) setView('board')
++                }}
++                buttonClassName={cn(outlineButton, 'disabled:cursor-default disabled:opacity-50')}
++              />
++            )}
+           </div>
+         </div>
+ 
+@@ -193,6 +217,9 @@ function MapPageContent({
+               at={at}
+               onClearAt={() => pickMoment(null)}
+               renderRunDetails={renderRunDetails}
++              picking={picking}
++              onRacePicked={racePicked}
++              onStopPicking={() => setPicking(false)}
+             />
+           ) : view === 'wr' ? (
+             <WrHistoryEditor map={data} />
+diff --git a/frontend/src/features/leaderboards/components/replay-actions.tsx b/frontend/src/features/leaderboards/components/replay-actions.tsx
+new file mode 100644
+index 0000000..394ed17
+--- /dev/null
++++ b/frontend/src/features/leaderboards/components/replay-actions.tsx
+@@ -0,0 +1,103 @@
++import { useQueryClient } from '@tanstack/react-query'
++import { useNavigate } from '@tanstack/react-router'
++import { cn } from 'cn'
++import { useState } from 'react'
++import { useCatalog, type MapInfo } from '@/lib/catalog'
++import { queryKeys } from '@/lib/query-keys'
++import { replaySearch, type ReplayRuns, type ReplayWhat } from '@/lib/runs/viewer'
++import type { RankedRun } from '@/types/runs'
++import { getWrDemos } from '../api/map-board'
++import { swarmReplay, topReplay, wrReplay } from '../utils/replay'
++
++const TOP = 5
++const SWARM = 100
++// World records raced at most (newest first): an old map's whole history is many demos to download.
++const WR_RACED = 40
++
++/**
++ * The map's runs in the replay page: the top runs raced, the WR history raced, the top 100 as a
++ * swarm, or runs picked on the board (`picking` turns picking on there). Where the demo viewer is
++ * built in.
++ */
++export function ReplayActions({
++  map,
++  board,
++  picking,
++  onPicking,
++  buttonClassName,
++}: {
++  map: MapInfo
++  board: readonly RankedRun[] | undefined
++  picking: boolean
++  onPicking: (on: boolean) => void
++  buttonClassName: string
++}) {
++  const catalog = useCatalog()
++  const queryClient = useQueryClient()
++  const navigate = useNavigate()
++  const [wrState, setWrState] = useState<'idle' | 'loading' | 'none' | 'error'>('idle')
++  const open = (runs: ReplayRuns | null, what: ReplayWhat) => {
++    if (runs) void navigate({ to: '/replay', search: replaySearch(runs, { map: map.id, what }) })
++  }
++  const raceWrs = async () => {
++    setWrState('loading')
++    try {
++      const demos = await queryClient.fetchQuery({
++        queryKey: queryKeys.wrDemos(map.game, map.id),
++        queryFn: ({ signal }) => getWrDemos(map, catalog, signal),
++      })
++      const runs = wrReplay(demos, WR_RACED)
++      setWrState(runs ? 'idle' : 'none')
++      open(runs, 'wr')
++    } catch {
++      setWrState('error')
++    }
++  }
++  const top = board ? topReplay(board, TOP) : null
++
++  return (
++    <div className="flex flex-col gap-2">
++      <div className="grid grid-cols-2 gap-3 upto900:gap-2">
++        <button
++          type="button"
++          disabled={!top}
++          onClick={() => open(top, 'top')}
++          title="Race the board's top 5 runs against each other in the replay"
++          className={buttonClassName}
++        >
++          Race Top {TOP}
++        </button>
++        <button
++          type="button"
++          disabled={wrState === 'loading'}
++          onClick={() => void raceWrs()}
++          title="Race the map's world records (those with demos) against each other in the replay"
++          className={buttonClassName}
++        >
++          {wrState === 'loading' ? 'Loading…' : 'Race WR History'}
++        </button>
++        <button
++          type="button"
++          disabled={!top}
++          onClick={() => open(board ? swarmReplay(board, SWARM) : null, 'swarm')}
++          title="The board's top 100 runs as a swarm of dots moving through the map with the best"
++          className={buttonClassName}
++        >
++          Swarm Top {SWARM}
++        </button>
++        <button
++          type="button"
++          aria-pressed={picking}
++          disabled={!top}
++          onClick={() => onPicking(!picking)}
++          title="Tick runs on the board, then race them in the replay"
++          className={cn(buttonClassName, picking && 'border-brand')}
++        >
++          {picking ? 'Stop Picking' : 'Pick Runs to Race'}
++        </button>
++      </div>
++      {wrState === 'none' && <p className="m-0 text-text-muted">No world record here has a demo.</p>}
++      {wrState === 'error' && <p className="m-0 text-text-muted">Couldn’t load the world records.</p>}
++    </div>
++  )
++}
+diff --git a/frontend/src/features/leaderboards/utils/replay.test.ts b/frontend/src/features/leaderboards/utils/replay.test.ts
+new file mode 100644
+index 0000000..40a2972
+--- /dev/null
++++ b/frontend/src/features/leaderboards/utils/replay.test.ts
+@@ -0,0 +1,47 @@
++import { describe, expect, it } from 'vitest'
++import type { RankedRun } from '@/types/runs'
++import { demosOf, raceReplay, swarmReplay, topReplay, wrReplay } from './replay'
++
++const run = (rank: number, demoId: number | null, demoIds?: [number | null, number | null]): RankedRun => ({
++  changelogId: rank,
++  rank,
++  score: 1000 + rank,
++  points: 0,
++  timestamp: null,
++  youtubeId: null,
++  autorenderId: null,
++  demoId,
++  demoIds,
++  note: null,
++  portals: null,
++  sarVersion: null,
++  players: [],
++})
++
++describe('board replays', () => {
++  const board = [run(1, 10, [11, 10]), run(2, null), run(3, 30), run(4, 40, [null, 40]), run(5, 50)]
++
++  it("takes a run's demos, a co-op run's host first", () => {
++    expect(demosOf(board[0]!)).toEqual([11, 10])
++    expect(demosOf(board[1]!)).toEqual([])
++    expect(demosOf(board[3]!)).toEqual([40])
++  })
++
++  it('races the top runs with demos, the best shown with its partner', () => {
++    expect(topReplay(board, 3)).toEqual({ open: [11, 10], race: [30, 40] })
++    expect(topReplay([run(1, null)], 5)).toBeNull()
++  })
++
++  it('races picked runs in board order', () => {
++    expect(raceReplay([board[2]!, board[4]!])).toEqual({ open: [30], race: [50] })
++  })
++
++  it('swarms the top runs, the best shown', () => {
++    expect(swarmReplay(board, 3)).toEqual({ open: [11, 10], swarm: [11, 30, 40] })
++  })
++
++  it('races the world records, the newest shown', () => {
++    expect(wrReplay([9, 8, 7, 6], 3)).toEqual({ open: [9], race: [8, 7] })
++    expect(wrReplay([], 3)).toBeNull()
++  })
++})
+diff --git a/frontend/src/features/leaderboards/utils/replay.ts b/frontend/src/features/leaderboards/utils/replay.ts
+new file mode 100644
+index 0000000..a737e65
+--- /dev/null
++++ b/frontend/src/features/leaderboards/utils/replay.ts
+@@ -0,0 +1,33 @@
++import type { ReplayRuns } from '@/lib/runs/viewer'
++import type { RankedRun } from '@/types/runs'
++
++/** A board run's demos: a co-op run's both (the host's first), else its one. */
++export const demosOf = (run: RankedRun): number[] =>
++  (run.demoIds ?? [run.demoId]).filter((id): id is number => Boolean(id))
++
++/**
++ * Board runs raced in the replay (in board order): the first shown, with its co-op partner's demo,
++ * and each of the others raced by one demo (a co-op demo shows both players). Null without demos.
++ */
++export function raceReplay(runs: readonly RankedRun[]): ReplayRuns | null {
++  const [first, ...rest] = runs.filter((r) => demosOf(r).length)
++  if (!first) return null
++  return { open: demosOf(first), race: rest.map((r) => demosOf(r)[0]!) }
++}
++
++/** The board's top `count` runs with demos, raced. */
++export const topReplay = (board: readonly RankedRun[], count: number) =>
++  raceReplay(board.filter((r) => demosOf(r).length).slice(0, count))
++
++/** The board's top `count` runs with demos as a swarm, the best of them shown. */
++export function swarmReplay(board: readonly RankedRun[], count: number): ReplayRuns | null {
++  const runs = board.filter((r) => demosOf(r).length).slice(0, count)
++  if (!runs.length) return null
++  return { open: demosOf(runs[0]!), swarm: runs.map((r) => demosOf(r)[0]!) }
++}
++
++/** World records' demos (newest first): the newest shown, the older ones (up to `count` in all) raced. */
++export function wrReplay(demos: readonly number[], count: number): ReplayRuns | null {
++  if (!demos.length) return null
++  return { open: [demos[0]!], race: demos.slice(1, count) }
++}
+diff --git a/frontend/src/features/profiles/components/profile-history.tsx b/frontend/src/features/profiles/components/profile-history.tsx
+index f485384..b6b073e 100644
+--- a/frontend/src/features/profiles/components/profile-history.tsx
++++ b/frontend/src/features/profiles/components/profile-history.tsx
+@@ -83,7 +83,7 @@ export function ProfileHistory({
+               <AutorenderLink run={h} game={game} rendered={rendered} size={22} />
+               {h.youtubeId && <YouTubeLink id={h.youtubeId} size={22} />}
+               <DemoLink demoId={h.demoId} hideMissing />
+-              <ViewerLink demoIds={[h.demoId]} />
++              <ViewerLink demoIds={[h.demoId]} runId={h.id} mapId={h.map.id} />
+             </span>
+           </div>
+         ))
+diff --git a/frontend/src/features/profiles/components/score-tables.tsx b/frontend/src/features/profiles/components/score-tables.tsx
+index 5e0206d..ce94453 100644
+--- a/frontend/src/features/profiles/components/score-tables.tsx
++++ b/frontend/src/features/profiles/components/score-tables.tsx
+@@ -361,7 +361,7 @@ function ChapterRow({
+             {s ? <AutorenderLink run={s} game={game} rendered={rendered} size={24} /> : iconGap}
+             <YouTubeLink id={s?.youtubeId} size={24} />
+             <DemoLink demoId={s?.demoId} size={24} />
+-            <ViewerLink demoIds={[s?.demoId]} size={24} />
++            <ViewerLink demoIds={[s?.demoId]} runId={s?.changelogId} mapId={m.id} size={24} />
+           </span>
+           {s ? (
+             <button
+diff --git a/frontend/src/features/runs/components/replay-page.test.tsx b/frontend/src/features/runs/components/replay-page.test.tsx
+new file mode 100644
+index 0000000..17e6628
+--- /dev/null
++++ b/frontend/src/features/runs/components/replay-page.test.tsx
+@@ -0,0 +1,53 @@
++import { screen } from '@testing-library/react'
++import { http, HttpResponse } from 'msw'
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++import { env } from '@/config/env'
++import changelog from '@/testing/fixtures/changelog.json'
++import { API } from '@/testing/mocks/handlers'
++import { server } from '@/testing/mocks/server'
++import { renderRoute } from '@/testing/test-utils'
++import type { ChangelogRaw } from '@/types/runs'
++
++// Laser Relays is 47759.
++describe('Replay page', () => {
++  let was = false
++  beforeEach(() => {
++    was = env.VITE_VIEWER
++    env.VITE_VIEWER = true
++  })
++  afterEach(() => {
++    env.VITE_VIEWER = was
++  })
++
++  it('plays the runs in the demo viewer under the map and what is raced', async () => {
++    await renderRoute('/replay?demo=7&with=9&race=1,2&map=47759&what=top')
++    expect(await screen.findByRole('heading', { name: 'Laser Relays', level: 1 })).toBeInTheDocument()
++    expect(screen.getByRole('link', { name: 'Laser Relays' })).toHaveAttribute('href', '/map/sp/47759')
++    expect(screen.getByText('The top 3 raced')).toBeInTheDocument()
++    expect(screen.getByTitle('Laser Relays replay')).toHaveAttribute(
++      'src',
++      '/viewer/?embed=full#board=7&with=9&race=1,2',
++    )
++  })
++
++  it("names a run's players and time, linking to its details", async () => {
++    const run = { ...(changelog as ChangelogRaw[])[0]!, score: 1234, post_rank: 2 }
++    server.use(http.get(`${API}/changelog/:id`, () => HttpResponse.json(run)))
++    await renderRoute(`/replay?demo=7&run=${run.id}`)
++    expect(await screen.findByText('12.34 · rank 2')).toBeInTheDocument()
++    expect(screen.getByRole('link', { name: run.user_name })).toHaveAttribute(
++      'href',
++      `/profile/${run.profile_number}`,
++    )
++    expect(screen.getByRole('link', { name: 'Run details' })).toHaveAttribute('href', `/run/${run.id}`)
++  })
++
++  it('says so without a run, or without the demo viewer', async () => {
++    const { unmount } = await renderRoute('/replay')
++    expect(await screen.findByText('No run to replay.')).toBeInTheDocument()
++    unmount()
++    env.VITE_VIEWER = false
++    await renderRoute('/replay?demo=7')
++    expect(await screen.findByText('Replays aren’t available on this site.')).toBeInTheDocument()
++  })
++})
+diff --git a/frontend/src/features/runs/components/replay-page.tsx b/frontend/src/features/runs/components/replay-page.tsx
+new file mode 100644
+index 0000000..a0b493a
+--- /dev/null
++++ b/frontend/src/features/runs/components/replay-page.tsx
+@@ -0,0 +1,89 @@
++import { useQuery } from '@tanstack/react-query'
++import { AppLink } from '@/components/app-link'
++import { ViewerIcon } from '@/components/icons'
++import { siteBackground } from '@/components/layouts/backgrounds'
++import { Page } from '@/components/layouts/page'
++import { Panel } from '@/components/panel'
++import { PlayerLink } from '@/components/player-link'
++import { ReplayFrame } from '@/components/runs/replay-frame'
++import { EmptyState } from '@/components/status'
++import { env } from '@/config/env'
++import { findMap, mapPath, useCatalog } from '@/lib/catalog'
++import { formatScore } from '@/lib/format'
++import { replayRunsOf, type ReplayRuns, type ReplaySearch } from '@/lib/runs/viewer'
++import type { Run } from '@/types/runs'
++import { runQueryOptions } from '../api/run'
++
++/**
++ * Runs replayed from their demos in the site (`/replay`): the demo viewer, full size, under a bar
++ * naming the map and the run (its players, time and rank, linking to its details) or what's raced.
++ */
++export function ReplayPage({ search, viewer = env.VITE_VIEWER }: { search: ReplaySearch; viewer?: boolean }) {
++  const catalog = useCatalog()
++  const runs = replayRunsOf(search)
++  const run = useQuery({ ...runQueryOptions(search.run ?? 0, catalog), enabled: search.run != null })
++  const map = run.data?.map ?? (search.map ? findMap(catalog, search.map) : undefined)
++
++  return (
++    <Page background={map?.image ?? siteBackground} blur={Boolean(map?.image)} tint="mono">
++      <Panel icon={ViewerIcon} title="Replay" bodyClassName="p-0">
++        {!viewer ? (
++          <EmptyState>Replays aren’t available on this site.</EmptyState>
++        ) : !runs ? (
++          <EmptyState>No run to replay.</EmptyState>
++        ) : (
++          <>
++            <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 px-5 pt-4 pb-3">
++              {map && (
++                <h1 className="m-0 text-[28px] font-semibold">
++                  <AppLink href={mapPath(map)} className="hover:underline">
++                    {map.title}
++                  </AppLink>
++                </h1>
++              )}
++              <ReplayAbout runs={runs} what={search.what} run={run.data} />
++            </div>
++            <ReplayFrame
++              runs={runs}
++              embed="full"
++              title={map ? `${map.title} replay` : 'Replay'}
++              className="h-[calc(100dvh-210px)] min-h-[460px] rounded-none border-x-0 border-b-0"
++            />
++          </>
++        )}
++      </Panel>
++    </Page>
++  )
++}
++
++/** What's replayed: the run (its players, time, rank) or the board's runs raced. */
++function ReplayAbout({ runs, what, run }: { runs: ReplayRuns; what?: ReplaySearch['what']; run?: Run }) {
++  const raced = 1 + (runs.race?.length ?? 0)
++  const text =
++    what === 'top'
++      ? `The top ${raced} raced`
++      : what === 'wr'
++        ? `World record history: ${raced} records raced`
++        : what === 'swarm'
++          ? `The top ${runs.swarm?.length ?? 0} as a swarm`
++          : what === 'picked'
++            ? `${raced} picked runs raced`
++            : null
++  if (text) return <span className="text-lg text-text-2">{text}</span>
++  if (!run) return null
++  const rank = run.postRank
++  return (
++    <span className="flex flex-wrap items-baseline gap-x-3 text-lg text-text-2">
++      {run.players.map((p, i) => (
++        <PlayerLink key={i} player={p} className="hover:underline" />
++      ))}
++      <span className="num">
++        {formatScore(run.score)}
++        {rank != null ? ` · rank ${rank}` : ''}
++      </span>
++      <AppLink href={`/run/${run.id}`} className="text-base text-brand hover:underline">
++        Run details
++      </AppLink>
++    </span>
++  )
++}
+diff --git a/frontend/src/features/runs/components/run-details.test.tsx b/frontend/src/features/runs/components/run-details.test.tsx
+index 77f3c56..09b3d8d 100644
+--- a/frontend/src/features/runs/components/run-details.test.tsx
++++ b/frontend/src/features/runs/components/run-details.test.tsx
+@@ -4,6 +4,7 @@ import { http, HttpResponse } from 'msw'
+ import { describe, expect, it } from 'vitest'
+ import changelog from '@/testing/fixtures/changelog.json'
+ import coopHalves from '@/testing/fixtures/coop-halves.json'
++import { env } from '@/config/env'
+ import { users } from '@/testing/data/users'
+ import { API, AUTORENDER } from '@/testing/mocks/handlers'
+ import { server } from '@/testing/mocks/server'
+@@ -199,4 +200,33 @@ describe('timerNote', () => {
+     expect(timerNote(null, 1201)).toBeNull()
+     expect(timerNote(2000, null)).toBeNull()
+   })
++
++  it('plays the demo in the row instead of the video, where the demo viewer is built in', async () => {
++    noSegments()
++    const was = env.VITE_VIEWER
++    env.VITE_VIEWER = true
++    try {
++      await renderWithProviders(<RunDetails run={spRun} map={map} />)
++      const tabs = within(screen.getByRole('tablist', { name: 'Media' }))
++      expect(tabs.getByRole('tab', { name: 'Video' })).toHaveAttribute('aria-selected', 'true')
++      expect(screen.queryByTitle('Doors replay')).not.toBeInTheDocument()
++      await userEvent.click(tabs.getByRole('tab', { name: 'Replay' }))
++      expect(screen.getByTitle('Doors replay')).toHaveAttribute('src', '/viewer/?embed=compact#board=55')
++      const full = new URL(
++        screen.getByRole('link', { name: /Full Replay/ }).getAttribute('href')!,
++        'http://x',
++      )
++      expect(full.pathname).toBe('/replay')
++      expect(full.searchParams.get('demo')).toBe('55')
++    } finally {
++      env.VITE_VIEWER = was
++    }
++  })
++
++  it('offers no replay without the demo viewer', async () => {
++    noSegments()
++    await renderWithProviders(<RunDetails run={spRun} map={map} />)
++    expect(screen.queryByRole('tablist', { name: 'Media' })).not.toBeInTheDocument()
++    expect(screen.queryByRole('link', { name: /Full Replay/ })).not.toBeInTheDocument()
++  })
+ })
+diff --git a/frontend/src/features/runs/components/run-details.tsx b/frontend/src/features/runs/components/run-details.tsx
+index 0d4c576..d95cbf6 100644
+--- a/frontend/src/features/runs/components/run-details.tsx
++++ b/frontend/src/features/runs/components/run-details.tsx
+@@ -1,8 +1,10 @@
+ import { useQuery } from '@tanstack/react-query'
++import { Link } from '@tanstack/react-router'
+ import { cn } from 'cn'
+ import { useState, type ReactNode } from 'react'
+ import { DownloadIcon, PlayIcon, VideocamIcon, ViewerIcon, YouTubeIcon } from '@/components/icons'
+ import { PlayerLink } from '@/components/player-link'
++import { ReplayFrame } from '@/components/runs/replay-frame'
+ import { RunVideo } from '@/components/runs/run-media'
+ import { apiUrl } from '@/lib/api-client'
+ import { env } from '@/config/env'
+@@ -10,7 +12,7 @@ import type { FormattedSegment } from '@/lib/autorender'
+ import { useCatalog } from '@/lib/catalog'
+ import { formatDate, formatDateTime, formatScore, formatSeconds, ordinalSuffix } from '@/lib/format'
+ import { runVideo } from '@/lib/runs/video'
+-import { viewerUrl } from '@/lib/runs/viewer'
++import { replayOf, replaySearch } from '@/lib/runs/viewer'
+ import type { CoopHalf, Player, RunMap } from '@/types/runs'
+ import { coopHalvesQueryOptions, segmentsQueryOptions } from '../api/details'
+ import { runQueryOptions } from '../api/run'
+@@ -115,8 +117,12 @@ export function RunDetails({
+   )
+   const segments = useQuery({ ...segmentsQueryOptions(ids, map.title), enabled: ids.length > 0 })
+   const video = runVideo(view, game, rendered)
+-  // (the shown player's demo opened, a co-op partner's with it)
+-  const viewer = env.VITE_VIEWER ? viewerUrl([view.demoId, ...(list?.map((h) => h.demoId) ?? [])]) : null
++  // The demo replayed in the row instead of the video, where the demo viewer is built in: the
++  // shown player's demo, a co-op partner's with it.
++  const replay = env.VITE_VIEWER ? replayOf([view.demoId, ...(list?.map((h) => h.demoId) ?? [])]) : null
++  const [media, setMedia] = useState<'video' | 'replay'>('video')
++  const replaying = media === 'replay' && replay != null
++  const fullReplay = replay && replaySearch(replay, { run: own, map: map.id })
+   const rank = run.postRank ?? run.rank
+   // A board or profile row has the rank now; the rank it got when set comes with the run itself.
+   const catalog = useCatalog()
+@@ -132,15 +138,30 @@ export function RunDetails({
+ 
+   return (
+     <div className="@container/run-details">
++      {replaying && (
++        <div className="border-t-2 border-row bg-panel px-5 pt-5 rd-upto640:px-3 rd-upto640:pt-3">
++          <ReplayFrame
++            runs={replay}
++            embed="compact"
++            title={`${map.title} replay`}
++            className="aspect-video max-h-[70vh]"
++          />
++        </div>
++      )}
+       <div className="grid grid-cols-[minmax(240px,345px)_minmax(0,1fr)_minmax(260px,380px)] gap-5 border-t-2 border-row bg-panel p-5 rd-upto1150:grid-cols-[minmax(220px,320px)_minmax(0,1fr)] rd-upto640:grid-cols-1 rd-upto640:p-3">
+         <div>
+-          <RunVideo
+-            key={view.changelogId ?? view.id ?? `partner-${view.demoId}`}
+-            run={view}
+-            game={game}
+-            rendered={rendered}
+-            title={`${map.title} run`}
+-          />
++          {replay && <MediaToggle media={media} onPick={setMedia} />}
++          {replaying ? (
++            <p className="m-0 text-text-2">The replay plays above. Pick a camera or the 3D view in it.</p>
++          ) : (
++            <RunVideo
++              key={view.changelogId ?? view.id ?? `partner-${view.demoId}`}
++              run={view}
++              game={game}
++              rendered={rendered}
++              title={`${map.title} run`}
++            />
++          )}
+           {list && <CoopToggle halves={list} index={index} onPick={setPicked} />}
+         </div>
+ 
+@@ -214,7 +235,7 @@ export function RunDetails({
+           {own != null && <StaffTools run={{ ...run, changelogId: own }} map={map} game={game} />}
+           {children}
+           {/* Only what the run has: a dimmed button for a missing demo or video read as available. */}
+-          {(view.demoId || youtube || video.ready || canRender || viewer) && (
++          {(view.demoId || youtube || video.ready || canRender || fullReplay) && (
+             <div className="mt-3.5 grid grid-cols-2 gap-[18px] rd-upto640:grid-cols-1">
+               {view.demoId ? (
+                 <a
+@@ -226,10 +247,10 @@ export function RunDetails({
+                   Download Demo <DownloadIcon />
+                 </a>
+               ) : null}
+-              {viewer && (
+-                <a href={viewer} target="_blank" rel="noreferrer" className={outlineButton}>
+-                  Watch in Browser <ViewerIcon />
+-                </a>
++              {fullReplay && (
++                <Link to="/replay" search={fullReplay} className={outlineButton}>
++                  Full Replay <ViewerIcon />
++                </Link>
+               )}
+               {youtube && (
+                 <a href={youtube} target="_blank" rel="noreferrer" className={outlineButton}>
+@@ -327,6 +348,38 @@ function TimerNote({
+ }
+ 
+ /** Switches the panel between the two players' halves of a co-op run (blue first when known). */
++/** Video or replay (the demo played in the row): where the demo viewer is built in. */
++function MediaToggle({
++  media,
++  onPick,
++}: {
++  media: 'video' | 'replay'
++  onPick: (m: 'video' | 'replay') => void
++}) {
++  const options = [
++    ['video', 'Video', 'The autorender or YouTube video'],
++    ['replay', 'Replay', 'Play the demo here: any camera, the 2D map or 3D'],
++  ] as const
++  return (
++    <div className="mb-2.5 flex gap-1.5" role="tablist" aria-label="Media">
++      {options.map(([value, label, title]) => (
++        <button
++          key={value}
++          type="button"
++          role="tab"
++          aria-selected={media === value}
++          data-active={media === value || undefined}
++          title={title}
++          onClick={() => onPick(value)}
++          className="h-8 flex-1 cursor-pointer rounded-[4px] border border-line-strong bg-control text-base hover:bg-control-raised data-[active]:border-brand data-[active]:bg-[color-mix(in_srgb,var(--brand)_18%,transparent)]"
++        >
++          {label}
++        </button>
++      ))}
++    </div>
++  )
++}
++
+ function CoopToggle({
+   halves,
+   index,
+diff --git a/frontend/src/lib/query-keys.ts b/frontend/src/lib/query-keys.ts
+index 8717791..cb85385 100644
+--- a/frontend/src/lib/query-keys.ts
++++ b/frontend/src/lib/query-keys.ts
+@@ -21,6 +21,7 @@ export const queryKeys = {
+   mapBoard: (game: string, mapId: string, at: string | null = null) =>
+     ['map-board', game, mapId, at] as const,
+   wrHistory: (game: string, mapId: string, staff = false) => ['wr-history', game, mapId, staff] as const,
++  wrDemos: (game: string, mapId: string) => ['wr-demos', game, mapId] as const,
+   wallOfShame: () => ['wall-of-shame'] as const,
+ 
+   aggregated: (game: string, board: string) => ['aggregated', game, board] as const,
+diff --git a/frontend/src/lib/runs/viewer.test.ts b/frontend/src/lib/runs/viewer.test.ts
+index a9d4ac2..78359e1 100644
+--- a/frontend/src/lib/runs/viewer.test.ts
++++ b/frontend/src/lib/runs/viewer.test.ts
+@@ -1,21 +1,44 @@
+ import { describe, expect, it } from 'vitest'
+-import { viewerUrl } from './viewer'
++import { replayOf, replayRunsOf, replaySearch, replaySearchSchema, viewerFrameSrc } from './viewer'
+ 
+-describe('viewerUrl', () => {
+-  it('opens a single demo', () => {
+-    expect(viewerUrl([42])).toBe('/viewer/#board=42')
++describe('replayOf', () => {
++  it("is a run's demos, missing ones and repeats left out", () => {
++    expect(replayOf([7, null, 9, 9])).toEqual({ open: [7, 9] })
+   })
+ 
+-  it('opens the first demo with the partner', () => {
+-    expect(viewerUrl([7, 9])).toBe('/viewer/#board=7&with=9')
++  it('is null without a demo', () => {
++    expect(replayOf([null, undefined])).toBeNull()
++    expect(replayOf([])).toBeNull()
++  })
++})
++
++describe('viewerFrameSrc', () => {
++  it('names the run, its partner, the raced runs and the swarm', () => {
++    expect(viewerFrameSrc({ open: [7, 9], race: [1, 2], swarm: [3] }, 'full')).toBe(
++      '/viewer/?embed=full#board=7&with=9&race=1,2&swarm=3',
++    )
++    expect(viewerFrameSrc({ open: [7] }, 'compact')).toBe('/viewer/?embed=compact#board=7')
+   })
++})
+ 
+-  it('skips missing demos and repeats', () => {
+-    expect(viewerUrl([null, 9, undefined, 9])).toBe('/viewer/#board=9')
++describe('replay search', () => {
++  it('goes there and back', () => {
++    const search = replaySearch({ open: [7, 9], race: [1, 2] }, { run: 55, map: '47458', what: 'top' })
++    expect(search).toEqual({
++      demo: 7,
++      with: '9',
++      race: '1,2',
++      swarm: undefined,
++      run: 55,
++      map: '47458',
++      what: 'top',
++    })
++    expect(replayRunsOf(search)).toEqual({ open: [7, 9], race: [1, 2], swarm: [] })
+   })
+ 
+-  it('is null without a demo', () => {
+-    expect(viewerUrl([null, undefined])).toBeNull()
+-    expect(viewerUrl([])).toBeNull()
++  it('drops what it cannot read', () => {
++    const search = replaySearchSchema.parse({ demo: 'x', race: '1,a', what: 'nope', with: '4,5' })
++    expect(search).toEqual({ with: '4,5' })
++    expect(replayRunsOf(search)).toBeNull()
+   })
+ })
+diff --git a/frontend/src/lib/runs/viewer.ts b/frontend/src/lib/runs/viewer.ts
+index c294172..b29663c 100644
+--- a/frontend/src/lib/runs/viewer.ts
++++ b/frontend/src/lib/runs/viewer.ts
+@@ -1,10 +1,85 @@
++import { z } from 'zod'
++
+ /**
+- * The demo viewer's link for a run: its first demo opened, the rest (a co-op partner's) with it.
+- * The viewer downloads them from /demos/{id}/file by these ids. Null without a demo.
++ * The demo viewer (served at /viewer/ where it's built in: env.VITE_VIEWER) replays runs from their
++ * demos, which it downloads from /demos/{id}/file by these ids: a run shown (its demo and a co-op
++ * partner's), others raced against it, and others as a swarm of dots.
+  */
+-export function viewerUrl(demoIds: readonly (number | null | undefined)[]): string | null {
+-  const ids = [...new Set(demoIds.filter((id): id is number => Boolean(id)))]
+-  if (!ids.length) return null
+-  const [first, ...rest] = ids
+-  return `/viewer/#board=${first}${rest.length ? `&with=${rest.join(',')}` : ''}`
++export interface ReplayRuns {
++  /** The run shown: its demo first, then a co-op partner's. */
++  open: number[]
++  race?: number[]
++  swarm?: number[]
++}
++
++/** What the replay page shows besides one run: a board's top, its WR history, its swarm or picked runs. */
++export const REPLAY_WHATS = ['top', 'wr', 'swarm', 'picked'] as const
++export type ReplayWhat = (typeof REPLAY_WHATS)[number]
++
++const ids = (list: readonly (number | null | undefined)[]) => [
++  ...new Set(list.filter((id): id is number => Boolean(id))),
++]
++
++/** A run's replay from its demos (a co-op run's both, the host's first); null without one. */
++export function replayOf(demoIds: readonly (number | null | undefined)[]): ReplayRuns | null {
++  const open = ids(demoIds)
++  return open.length ? { open } : null
++}
++
++/** The viewer's address for some runs, embedded in a full page or compact (a run's details). */
++export function viewerFrameSrc(runs: ReplayRuns, embed: 'full' | 'compact'): string {
++  const [first, ...partners] = runs.open
++  const q = [`board=${first}`]
++  if (partners.length) q.push(`with=${partners.join(',')}`)
++  if (runs.race?.length) q.push(`race=${runs.race.join(',')}`)
++  if (runs.swarm?.length) q.push(`swarm=${runs.swarm.join(',')}`)
++  return `/viewer/?embed=${embed}#${q.join('&')}`
++}
++
++// The replay page's search params: the runs as comma lists, the run (changelog id) or map it's
++// for, and what it shows.
++const idList = z
++  .string()
++  .regex(/^\d+(,\d+)*$/)
++  .optional()
++  .catch(undefined)
++export const replaySearchSchema = z.object({
++  demo: z.coerce.number().int().positive().optional().catch(undefined),
++  with: idList,
++  race: idList,
++  swarm: idList,
++  run: z.coerce.number().int().positive().optional().catch(undefined),
++  map: z.string().optional().catch(undefined),
++  what: z.enum(REPLAY_WHATS).optional().catch(undefined),
++})
++export type ReplaySearch = z.infer<typeof replaySearchSchema>
++
++const list = (ids?: number[]) => (ids?.length ? ids.join(',') : undefined)
++const numbers = (s?: string) => (s ? s.split(',').map(Number) : [])
++
++/** The replay page's search for some runs. */
++export function replaySearch(
++  runs: ReplayRuns,
++  about: { run?: number | null; map?: string; what?: ReplayWhat } = {},
++): ReplaySearch {
++  const [demo, ...partners] = runs.open
++  return {
++    demo,
++    with: list(partners),
++    race: list(runs.race),
++    swarm: list(runs.swarm),
++    run: about.run ?? undefined,
++    map: about.map,
++    what: about.what,
++  }
++}
++
++/** The runs a replay page's search names; null without a run to show. */
++export function replayRunsOf(search: ReplaySearch): ReplayRuns | null {
++  if (!search.demo) return null
++  return {
++    open: [search.demo, ...numbers(search.with)],
++    race: numbers(search.race),
++    swarm: numbers(search.swarm),
++  }
+ }
+diff --git a/frontend/viewer-security-headers.conf b/frontend/viewer-security-headers.conf
+index 7d29ce0..482779b 100644
+--- a/frontend/viewer-security-headers.conf
++++ b/frontend/viewer-security-headers.conf
+@@ -4,10 +4,12 @@
+ #   img-src     blob:            textures made from the game's files in the page
+ #   media-src   blob:            exported videos previewed in the page
+ #   font-src    blob:            the game's own fonts, read from the visitor's game folder
+-# The visitor's Portal 2 files are read in the page (folder picker) and never fetched.
+-add_header Content-Security-Policy "default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
++# The visitor's Portal 2 files are read in the page (folder picker) and never fetched. The site's own
++# pages show it in a frame (replays), so it may be framed by this site only (frame-ancestors 'self',
++# X-Frame-Options SAMEORIGIN).
++add_header Content-Security-Policy "default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'" always;
+ add_header X-Content-Type-Options "nosniff" always;
+-add_header X-Frame-Options "DENY" always;
++add_header X-Frame-Options "SAMEORIGIN" always;
+ add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+ add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+ add_header Strict-Transport-Security $p2cm_hsts always;
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index 85234b7..adb5d18 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -7,10 +7,10 @@ import { existsSync } from 'node:fs'
+ import { defineConfig, loadEnv, type Plugin } from 'vite'
+ 
+ // The demo viewer is built into public/viewer only on machines that have it (it lives in a separate,
+-// private repo): its "Watch in browser" links are shown only when it's there.
+-process.env.VITE_VIEWER ??= existsSync(fileURLToPath(new URL('./public/viewer/index.html', import.meta.url)))
+-  ? 'true'
+-  : 'false'
++// private repo): its links and replays are shown only when it's there. Tests run without it, as on
++// any other machine.
++const viewerBuiltIn = (mode: string) =>
++  mode !== 'test' && existsSync(fileURLToPath(new URL('./public/viewer/index.html', import.meta.url)))
+ 
+ // The dev server serves public/ files only by their full path: /viewer/ (as nginx serves it) would
+ // get the site instead of the viewer's page.
+@@ -19,9 +19,8 @@ const viewerIndex = (): Plugin => ({
+   apply: 'serve',
+   configureServer(server) {
+     server.middlewares.use((req, _res, next) => {
+-      if (req.url === '/viewer' || req.url === '/viewer/') {
+-        req.url = '/viewer/index.html'
+-      }
++      const [path, query] = (req.url ?? '').split('?')
++      if (path === '/viewer' || path === '/viewer/') req.url = `/viewer/index.html${query ? `?${query}` : ''}`
+       next()
+     })
+   },
+@@ -31,30 +30,35 @@ const viewerIndex = (): Plugin => ({
+ // same-origin /api/v1 base as production and work from other devices without CORS changes.
+ const apiProxy = process.env.DEV_API_PROXY ?? 'http://localhost:8080'
+ 
+-export default defineConfig(({ mode }) => ({
+-  plugins: [
+-    // Must come before react(): it generates src/app/routeTree.gen.ts from src/app/routes/.
+-    tanstackRouter({
+-      target: 'react',
+-      autoCodeSplitting: true,
+-      routesDirectory: './src/app/routes',
+-      generatedRouteTree: './src/app/routeTree.gen.ts',
+-    }),
+-    react(),
+-    tailwindcss(),
+-    viewerIndex(),
+-    // Sample-data mode (VITE_USE_MOCK=true) serves MSW's worker script; normal builds leave it out.
+-    ...(loadEnv(mode, process.cwd(), 'VITE_').VITE_USE_MOCK === 'true' ? [msw({ mode: 'worker-only' })] : []),
+-  ],
+-  resolve: {
+-    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+-  },
+-  server: {
+-    host: true,
+-    proxy: {
+-      // xfwd passes the browser's host along (X-Forwarded-Host): Steam sign-in compares it with
+-      // SERVER.PUBLIC_URL.
+-      '/api': { target: apiProxy, changeOrigin: true, xfwd: true },
++export default defineConfig(({ mode }) => {
++  process.env.VITE_VIEWER ??= viewerBuiltIn(mode) ? 'true' : 'false'
++  return {
++    plugins: [
++      // Must come before react(): it generates src/app/routeTree.gen.ts from src/app/routes/.
++      tanstackRouter({
++        target: 'react',
++        autoCodeSplitting: true,
++        routesDirectory: './src/app/routes',
++        generatedRouteTree: './src/app/routeTree.gen.ts',
++      }),
++      react(),
++      tailwindcss(),
++      viewerIndex(),
++      // Sample-data mode (VITE_USE_MOCK=true) serves MSW's worker script; normal builds leave it out.
++      ...(loadEnv(mode, process.cwd(), 'VITE_').VITE_USE_MOCK === 'true'
++        ? [msw({ mode: 'worker-only' })]
++        : []),
++    ],
++    resolve: {
++      alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+     },
+-  },
+-}))
++    server: {
++      host: true,
++      proxy: {
++        // xfwd passes the browser's host along (X-Forwarded-Host): Steam sign-in compares it with
++        // SERVER.PUBLIC_URL.
++        '/api': { target: apiProxy, changeOrigin: true, xfwd: true },
++      },
++    },
++  }
++})
+-- 
+2.43.0.windows.1
+
