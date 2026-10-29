@@ -12,7 +12,7 @@ import type {DemoFile} from './board.ts';
 
 // what the page does for the quiz (main.ts)
 export interface QuizHost {
-	// the run opened, loaded and played from its start; false where it
+	// the run opened and loaded, in 3D and paused at its start; false where it
 	// can't be (too old to read)
 	open(file: DemoFile): Promise<boolean>;
 	// the quiz over: the page as it was (the last run left open)

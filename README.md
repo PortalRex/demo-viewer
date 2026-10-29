@@ -215,8 +215,8 @@ computer.
   with everything that would tell its time or whose it is hidden (the clock,
   the challenge mode timer, names, the file and the panels); watch it as you
   like, then guess its whole time. Five rounds, up to 1000 points each (none
-  at 20% off), your best game remembered. Each run starts playing once it
-  has loaded (in 3D, its map and models).
+  at 20% off), your best game remembered. Each run shows once it
+  has loaded, opening in 3D and paused until you play it.
 - **Guess the runner:** the same, but pick whose run it is out of four
   runners from that chamber's board (1000 points for the right one).
 - **Video export:** save any segment, or the whole run, as an MP4 (720p to

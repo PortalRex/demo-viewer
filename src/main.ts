@@ -1979,15 +1979,16 @@ function compareSection(table: RaceTable, s: Sections, j: number, ref: number) {
 // and the split screen's, the file and the panels (the page's quiz style))
 const quizHidden = () => quiz.active && !quiz.revealed;
 const quiz = new Quiz($('quiz'), {
-	async open(file) {
+	async open(file): Promise<boolean> {
 		if (pb) closeRun();
 		await open([file]);
 		if (!pb || pb.run.fileName !== file.name) return false;
-		// (played once all of it's here: in 3D, the map and what's in it)
+		// (in 3D, paused at the start until the player plays it; the round
+		// shown once its map and what's in it are here)
+		setPlaying(false);
+		if (viewMode !== '3d') $('view-mode').querySelector<HTMLButtonElement>('button[data-mode="3d"]')?.click();
 		await loadSettled();
-		if (!quiz.active || pb?.run.fileName !== file.name) return false;
-		setPlaying(true);
-		return true;
+		return quiz.active && pb?.run.fileName === file.name;
 	},
 	end() {
 		if (pb) document.title = `${pb.run.fileName} · SAR Run Viewer`;
