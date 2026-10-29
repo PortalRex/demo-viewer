@@ -194,10 +194,12 @@ export class FileListFS implements GameFS {
 // The folder to pick is "Portal 2" (the one with portal2.exe); accept the
 // game folder inside it too. Where the browser can't open folders (Brave
 // turns folder access off), its files are picked as a folder upload
-// instead: read in the page all the same, but picked again on each visit
-export async function pickGameFolder(): Promise<GameFS | null> {
+// instead: read in the page all the same, but picked again on each visit.
+// (upload: that way regardless, for a folder the browser won't open: under
+// Program Files, where Steam installs games by default)
+export async function pickGameFolder(upload = false): Promise<GameFS | null> {
 	const picker = (window as unknown as {showDirectoryPicker?: (o?: object) => Promise<FileSystemDirectoryHandle>}).showDirectoryPicker;
-	if (!picker) {
+	if (!picker || upload) {
 		const files = await pickFolderFiles();
 		return files?.length ? new FileListFS(files) : null;
 	}
@@ -258,10 +260,16 @@ export async function reuseGameFolder(dir: FileSystemDirectoryHandle): Promise<G
 	return allowed ? new DirectoryFS(dir) : null;
 }
 
+// The local install served at /__game/: by the dev server, or, built for the
+// boards site (VITE_BOARDS_API), by that site's dev server where it passes
+// /__game through to one (DEV_GAME_PROXY). A deployed site has nothing
+// there (its pages answer /__game/ with the site): only a listing of the
+// game folder's files counts
 export async function devGameFS(): Promise<GameFS | null> {
-	if (!import.meta.env?.DEV) return null;
+	if (!import.meta.env?.DEV && !import.meta.env?.VITE_BOARDS_API) return null;
 	const fs = new HttpFS('/__game/');
-	return (await fs.size('portal2/gameinfo.txt')) ? fs : null;
+	const listed = await fs.list('portal2').catch(() => null);
+	return listed?.size ? fs : null;
 }
 
 // Where a map's BSP can be: the run's game folder first, then Portal 2's,

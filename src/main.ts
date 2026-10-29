@@ -5,7 +5,7 @@ import {alignedTick, boardRun, finishNear, finishOf, gapAt, sameBoardRun, trackO
 import {routes, sections, sectionTimes} from './player/sections.ts';
 import {rankColor, swarmAt, swarmRun} from './player/swarm.ts';
 import {drawRouteMap} from './ui/routemap.ts';
-import {chamberFor} from './core/chambers.ts';
+import {CHAMBERS, chamberFor} from './core/chambers.ts';
 import type {SwarmRun} from './player/swarm.ts';
 import type {RunPath, Sections} from './player/sections.ts';
 import type {Run, Segment, Vec3} from './core/model.ts';
@@ -31,7 +31,8 @@ import {background} from './ui/background.ts';
 import type {EntityTimeline, EntityTrack} from './net/entities.ts';
 import {loadBspOffThread} from './game/bsppool.ts';
 import type {BspMap} from './game/bsp.ts';
-import {devGameFS, pickGameFolder, mapPaths, rememberedGameFolder, reuseGameFolder} from './game/gamefs.ts';
+import {devGameFS, FileListFS, HttpFS, pickGameFolder, mapPaths, rememberedGameFolder, reuseGameFolder} from './game/gamefs.ts';
+import {CachedFS, GameCache, planKeepEverything} from './game/gamecache.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
 import {recordMp4, canExportVideo} from './ui/export.ts';
@@ -76,6 +77,12 @@ if (import.meta.env.DEV) {
 	// debugging: seek, look from a game position (eye origin + pitch/yaw), save the 3D view to fixtures/shots
 	const w = window as unknown as Record<string, unknown>;
 	w.seek = (t: number) => seekTo(t);
+	// the game files kept in the browser, as a picked upload makes them: read
+	// through from the dev server's game folder (source) or kept only
+	w.useKept = async (source: boolean) => {
+		const cache = await GameCache.open();
+		if (cache) useGameFolder(new CachedFS(cache, source ? new HttpFS('/__game/') : null));
+	};
 	// a shot from in front of a portal (network index), `dist` out and `side` across
 	w.facePortal = (name: string, index: number, tick: number, dist = 120, side = 0) => {
 		const t = pb && view3d.debugTrack(index, 'CProp_Portal');
@@ -291,7 +298,10 @@ const mapPaks = new Map<string, Zip | null>();
 // textures and models arrive in bursts: one redraw a frame for all of them
 // (or after a moment, where frames don't come: a hidden tab)
 let loadedPending = false;
+// (when the 3D view last got something: a map is kept once it's gone quiet)
+let lastLoaded = 0;
 view3d.onLoaded = () => {
+	lastLoaded = performance.now();
 	if (playing || loadedPending) return;
 	loadedPending = true;
 	const redraw = () => {
@@ -354,10 +364,13 @@ function message3d(html: string | null) {
 	if (html !== null) el.innerHTML = `<div class="box">${html}</div>`;
 }
 
-async function connectGame(reuse?: FileSystemDirectoryHandle) {
+async function connectGame(reuse?: FileSystemDirectoryHandle, upload = false) {
 	try {
-		const fs = reuse ? await reuseGameFolder(reuse) : await pickGameFolder();
-		if (fs) useGameFolder(fs);
+		const fs = reuse ? await reuseGameFolder(reuse) : await pickGameFolder(upload);
+		if (!fs) return;
+		// (an upload isn't remembered: what's read from it is kept instead)
+		const cache = fs instanceof FileListFS ? await GameCache.open() : null;
+		useGameFolder(cache ? new CachedFS(cache, fs) : fs);
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') message3d(`<h2>Couldn't open the folder</h2>${(e as Error).message}`);
 	}
@@ -432,18 +445,19 @@ async function load3dMap() {
 	// still allows reading it, else offered again, a click to allow it)
 	const remembered = gameFS ? null : await rememberedGameFolder();
 	if (remembered?.allowed) gameFS = await reuseGameFolder(remembered.dir);
+	// (else the files kept from a folder picked before: maps seen then open
+	// without it)
 	if (!gameFS) {
+		const cache = await GameCache.open();
+		if (cache && !cache.empty) gameFS = new CachedFS(cache, null);
+	}
+	const unkept = gameFS instanceof CachedFS && !gameFS.source && !gameFS.cache.hasMap(seg.map);
+	if (!gameFS || unkept) {
 		if (background) return;
-		const again = remembered ? `<br><button class="primary" id="reuse-game">Use ${remembered.dir.name.replace(/[&<>"]/g, '')} again</button> ` : '<br>';
-		message3d(`<h2>The 3D view uses your own copy of the game</h2>
-			Pick your <b>Portal 2</b> folder (the one with portal2.exe, usually in steamapps/common).
-			The map is read from it in this page; nothing is uploaded.
-			${'showDirectoryPicker' in window ? '' : '<br>This browser (Brave, Firefox) asks to "upload" the folder\'s files: they stay in this page all the same, and it asks again on each visit.'}
-			${again}<button class="${remembered ? '' : 'primary'}" id="connect-game">Choose ${remembered ? 'another' : 'Portal 2'} folder</button>`);
-		$('connect-game').onclick = () => connectGame();
-		if (remembered) $('reuse-game').onclick = () => connectGame(remembered.dir);
+		askForGame(remembered?.dir ?? null, unkept);
 		return;
 	}
+	showKeepAll();
 	const token = ++mapToken;
 	const fs = gameFS;
 	segLoading = currentSeg;
@@ -475,6 +489,7 @@ async function load3dMap() {
 		timing('setSegment', t);
 		segIn3d = currentSeg;
 		segLoading = -1;
+		if (fs instanceof CachedFS && fs.source) keepWhenSettled(seg.map, fs.cache);
 		prepareNext(currentSeg);
 		if (viewMode === '3d') showViewAs();
 		message3d(null);
@@ -487,6 +502,96 @@ async function load3dMap() {
 	}
 }
 
+
+// The 3D view's ask for the game: the folder picked before (where the
+// browser lets it be used again), or a folder to pick: by the browser's
+// folder picker where it has one (remembered then), or as an upload (Brave,
+// Firefox, and any folder under Program Files, which Chromium won't open),
+// whose files read are kept in the browser instead
+function askForGame(remembered: FileSystemDirectoryHandle | null, unkept: boolean) {
+	const picker = 'showDirectoryPicker' in window;
+	const title = unkept ? 'This map isn’t kept in the browser yet' : 'The 3D view uses your own copy of the game';
+	const reuse = remembered ? `<button class="primary" id="reuse-game">Use ${remembered.name.replace(/[&<>"]/g, '')} again</button> ` : '';
+	message3d(`<h2>${title}</h2>
+		Pick your <b>Portal 2</b> folder (the one with portal2.exe, usually in steamapps/common).
+		It’s read in this page; nothing is uploaded${picker ? '' : ', though the browser calls it an upload'}.
+		What’s read is kept in this browser, so maps you’ve seen open without it next time.
+		<br>${reuse}<button class="${remembered ? '' : 'primary'}" id="connect-game">Choose ${remembered ? 'another' : 'Portal 2'} folder</button>
+		${picker ? `<p class="muted">If the browser says it can’t open the folder (it won’t open any under Program Files,
+		Steam’s default place for games), <button id="upload-game">pick it as an upload</button> instead.</p>` : ''}
+		<p class="muted">Tip: with Portal 2 in a Steam library outside Program Files (in Steam: the game’s Properties,
+		Installed Files, Move install folder), Chrome and Edge remember the folder itself and never ask again${picker ? '' : ' (Brave too, with brave://flags/#file-system-access-api turned on)'}.</p>`);
+	$('connect-game').onclick = () => connectGame(undefined, !picker);
+	document.getElementById('upload-game')?.addEventListener('click', () => connectGame(undefined, true));
+	if (remembered) $('reuse-game').onclick = () => connectGame(remembered);
+}
+
+// A map read from a picked folder marked kept, once the 3D view has gone a
+// few seconds without loading anything more for it (its textures and models
+// all read)
+function keepWhenSettled(map: string, cache: GameCache) {
+	const check = () => {
+		if (!pb || segIn3d < 0 || pb.tracks[segIn3d].seg.map !== map) return;
+		if (performance.now() - lastLoaded < 3000) return void setTimeout(check, 1000);
+		cache.markMap(map);
+	};
+	setTimeout(check, 1000);
+}
+
+// Every challenge mode map kept at once (from a picked upload), so no map
+// ever asks for the folder again; its size shown first
+function showKeepAll() {
+	$('keep-all').hidden = !(gameFS instanceof CachedFS && gameFS.source) || viewMode !== '3d';
+}
+let keeping = false;
+$('keep-all').onclick = async () => {
+	const fs = gameFS;
+	if (!(fs instanceof CachedFS) || !fs.source || keeping) return;
+	keeping = true;
+	setPlaying(false);
+	message3d('Working out what challenge mode needs…');
+	let cancelled = false;
+	try {
+		const maps = [...new Set(CHAMBERS.map(c => c.map))];
+		const pathOf = async (map: string) => {
+			for (const path of mapPaths(map, 'portal2')) if ((await fs.size(path)) !== null) return path;
+			return null;
+		};
+		const plan = await planKeepEverything(fs, maps, pathOf);
+		const gb = (n: number) => (n / 2 ** 30).toFixed(1);
+		const est = await navigator.storage?.estimate?.().catch(() => null);
+		const room = est?.quota !== undefined && est.usage !== undefined ? est.quota - est.usage : null;
+		const go = await new Promise<boolean>(done => {
+			message3d(`<h2>Keep all challenge mode maps</h2>
+				Every challenge mode map, and the textures, models and particles they use: <b>${gb(plan.bytes)} GB</b> kept in this browser,
+				so no map asks for the Portal 2 folder again. It takes a few minutes.
+				${room !== null && room < plan.bytes ? `<p class="muted">The browser offers this page ${gb(room)} GB: free some disk space first.</p>` : ''}
+				<br><button class="primary" id="keep-go">Keep them</button> <button id="keep-no">Not now</button>
+				<p class="muted">Kept files can be let go of in the browser’s settings for this site, or here: <button id="keep-forget">Forget kept game files</button></p>`);
+			$('keep-go').onclick = () => done(true);
+			$('keep-no').onclick = () => done(false);
+			$('keep-forget').onclick = async () => {
+				await fs.cache.clear();
+				done(false);
+			};
+		});
+		if (!go) return;
+		const started = performance.now();
+		await plan.run(done => {
+			const left = (performance.now() - started) / Math.max(1, done) * (plan.bytes - done) / 1000;
+			message3d(`<h2>Keeping all challenge mode maps</h2>${gb(done)} of ${gb(plan.bytes)} GB, about ${Math.max(1, Math.ceil(left / 60))} min left
+				<br><button id="keep-stop">Stop</button>`);
+			$('keep-stop').onclick = () => (cancelled = true);
+		}, () => cancelled);
+	} catch (e) {
+		showError(`Couldn’t keep the maps: ${(e as Error).message}`);
+	} finally {
+		keeping = false;
+		message3d(null);
+		segIn3d = segLoading = -1;
+		load3dMap();
+	}
+};
 
 // (what a link wants shown, once a run's open: see links)
 let afterOpen = () => {};
@@ -1067,6 +1172,7 @@ $('view-mode').onclick = e => {
 	showHeatToggle();
 	$('quality').hidden = !is3d;
 	$('export').hidden = !is3d || !canExportVideo();
+	showKeepAll();
 	if (is3d) {
 		if (segIn3d === currentSeg) showViewAs();
 		load3dMap();

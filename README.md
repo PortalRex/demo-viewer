@@ -275,8 +275,15 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 
 `npm run build` makes a static site in `dist/` for any static host (Cloudflare
 Pages, GitHub Pages, Netlify). Nothing from the game is hosted: each viewer
-picks their own Portal 2 folder, and the browser remembers it, so later
-visits only ask to allow it again.
+picks their own Portal 2 folder. Where the browser can open it (Chrome or
+Edge, with the game outside Program Files), it remembers the folder, so later
+visits only ask to allow it again. Where it can't (Steam's default library is
+under Program Files, which Chromium refuses; Brave and Firefox have no folder
+access), the folder is picked as an upload, and what the 3D view reads from it
+is kept in the browser (IndexedDB): a map seen once opens without the folder
+afterwards, and **Keep all maps** keeps every challenge mode map at once
+(about 5.4 GB). The kept files live in the visitor's browser, by site address:
+redeploying the site doesn't touch them.
 
 The leaderboard's demos need a pass-through, as the board doesn't serve them
 to other sites: `deploy/board-proxy` is a Cloudflare Worker that does it
