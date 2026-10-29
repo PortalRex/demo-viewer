@@ -81,7 +81,9 @@ if (import.meta.env.DEV) {
 	// through from the dev server's game folder (source) or kept only
 	w.useKept = async (source: boolean) => {
 		const cache = await GameCache.open();
-		if (cache) useGameFolder(new CachedFS(cache, source ? new HttpFS('/__game/') : null));
+		if (!cache) return;
+		offerKeepAll = source && !CM_MAPS.every(m => cache.hasMap(m));
+		useGameFolder(new CachedFS(cache, source ? new HttpFS('/__game/') : null));
 	};
 	// a shot from in front of a portal (network index), `dist` out and `side` across
 	w.facePortal = (name: string, index: number, tick: number, dist = 120, side = 0) => {
@@ -370,6 +372,9 @@ async function connectGame(reuse?: FileSystemDirectoryHandle, upload = false) {
 		if (!fs) return;
 		// (an upload isn't remembered: what's read from it is kept instead)
 		const cache = fs instanceof FileListFS ? await GameCache.open() : null;
+		// (and keeping every map offered, once this one shows, where they
+		// aren't all kept yet)
+		offerKeepAll = !!cache && !CM_MAPS.every(m => cache.hasMap(m));
 		useGameFolder(cache ? new CachedFS(cache, fs) : fs);
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') message3d(`<h2>Couldn't open the folder</h2>${(e as Error).message}`);
@@ -489,7 +494,13 @@ async function load3dMap() {
 		timing('setSegment', t);
 		segIn3d = currentSeg;
 		segLoading = -1;
-		if (fs instanceof CachedFS && fs.source) keepWhenSettled(seg.map, fs.cache);
+		if (fs instanceof CachedFS && fs.source) {
+			keepWhenSettled(seg.map, fs.cache);
+			if (offerKeepAll) {
+				offerKeepAll = false;
+				void keepAll();
+			}
+		}
 		prepareNext(currentSeg);
 		if (viewMode === '3d') showViewAs();
 		message3d(null);
@@ -539,34 +550,49 @@ function keepWhenSettled(map: string, cache: GameCache) {
 }
 
 // Every challenge mode map kept at once (from a picked upload), so no map
-// ever asks for the folder again; its size shown first
+// ever asks for the folder again: offered as soon as a folder is picked (its
+// size shown first), then copied in the background while the run plays, the
+// button showing how far it's got (and stopping it)
+const CM_MAPS = [...new Set(CHAMBERS.map(c => c.map))];
+// (copying: stopped from the button; only once it runs, not while its offer's open)
+let keeping: {stop: () => void; running: boolean} | null = null;
+// (set when a folder's picked as an upload: offered once its first map shows)
+let offerKeepAll = false;
 function showKeepAll() {
-	$('keep-all').hidden = !(gameFS instanceof CachedFS && gameFS.source) || viewMode !== '3d';
+	const fs = gameFS;
+	const allKept = fs instanceof CachedFS && CM_MAPS.every(m => fs.cache.hasMap(m));
+	$('keep-all').hidden = !keeping && (!(fs instanceof CachedFS && fs.source) || allKept || viewMode !== '3d');
 }
-let keeping = false;
-$('keep-all').onclick = async () => {
+$('keep-all').onclick = () => {
+	if (!keeping) void keepAll();
+	else if (keeping.running) keeping.stop();
+};
+async function keepAll() {
 	const fs = gameFS;
 	if (!(fs instanceof CachedFS) || !fs.source || keeping) return;
-	keeping = true;
-	setPlaying(false);
-	message3d('Working out what challenge mode needs…');
-	let cancelled = false;
+	const button = $('keep-all');
+	const label = button.textContent;
+	let stopped = false;
+	const job: {stop: () => void; running: boolean} = {stop: () => (stopped = true), running: false};
+	keeping = job;
+	button.textContent = 'Working out the size…';
+	const gb = (n: number) => (n / 2 ** 30).toFixed(1);
 	try {
-		const maps = [...new Set(CHAMBERS.map(c => c.map))];
 		const pathOf = async (map: string) => {
 			for (const path of mapPaths(map, 'portal2')) if ((await fs.size(path)) !== null) return path;
 			return null;
 		};
-		const plan = await planKeepEverything(fs, maps, pathOf);
-		const gb = (n: number) => (n / 2 ** 30).toFixed(1);
+		const plan = await planKeepEverything(fs, CM_MAPS, pathOf);
 		const est = await navigator.storage?.estimate?.().catch(() => null);
 		const room = est?.quota !== undefined && est.usage !== undefined ? est.quota - est.usage : null;
+		const short = room !== null && room < plan.bytes;
+		button.textContent = label;
 		const go = await new Promise<boolean>(done => {
-			message3d(`<h2>Keep all challenge mode maps</h2>
-				Every challenge mode map, and the textures, models and particles they use: <b>${gb(plan.bytes)} GB</b> kept in this browser,
-				so no map asks for the Portal 2 folder again. It takes a few minutes.
-				${room !== null && room < plan.bytes ? `<p class="muted">The browser offers this page ${gb(room)} GB: free some disk space first.</p>` : ''}
-				<br><button class="primary" id="keep-go">Keep them</button> <button id="keep-no">Not now</button>
+			message3d(`<h2>Keep all challenge mode maps?</h2>
+				Every challenge mode map, with the textures, models and particles they use: <b>${gb(plan.bytes)} GB</b> kept in this browser,
+				so no map asks for the Portal 2 folder again. It copies in the background while you watch (a few minutes).
+				${short ? `<p class="muted">The browser offers this site only ${gb(room!)} GB: free some disk space first.</p>` : ''}
+				<br><button class="primary" id="keep-go" ${short ? 'disabled' : ''}>Keep them all</button> <button id="keep-no">Only the maps I watch</button>
 				<p class="muted">Kept files can be let go of in the browser’s settings for this site, or here: <button id="keep-forget">Forget kept game files</button></p>`);
 			$('keep-go').onclick = () => done(true);
 			$('keep-no').onclick = () => done(false);
@@ -575,23 +601,36 @@ $('keep-all').onclick = async () => {
 				done(false);
 			};
 		});
+		message3d(null);
 		if (!go) return;
+		job.running = true;
+		button.hidden = false;
+		button.classList.add('keeping');
 		const started = performance.now();
+		let shown = 0;
 		await plan.run(done => {
-			const left = (performance.now() - started) / Math.max(1, done) * (plan.bytes - done) / 1000;
-			message3d(`<h2>Keeping all challenge mode maps</h2>${gb(done)} of ${gb(plan.bytes)} GB, about ${Math.max(1, Math.ceil(left / 60))} min left
-				<br><button id="keep-stop">Stop</button>`);
-			$('keep-stop').onclick = () => (cancelled = true);
-		}, () => cancelled);
+			// (the button a progress bar: filled as far as it's got, with the
+			// amount and the time left; redrawn a few times a second)
+			const now = performance.now();
+			if (now - shown < 250 && done < plan.bytes) return;
+			shown = now;
+			const left = Math.max(1, Math.ceil((now - started) / Math.max(1, done) * (plan.bytes - done) / 60000));
+			button.style.setProperty('--kept', `${(100 * done / plan.bytes).toFixed(1)}%`);
+			button.textContent = `Keeping maps ${gb(done)} / ${gb(plan.bytes)} GB · ${left} min · Stop`;
+			button.title = 'Copying every challenge mode map into this browser. Click to stop (what’s kept so far stays kept)';
+		}, () => stopped);
 	} catch (e) {
+		message3d(null);
 		showError(`Couldn’t keep the maps: ${(e as Error).message}`);
 	} finally {
-		keeping = false;
-		message3d(null);
-		segIn3d = segLoading = -1;
-		load3dMap();
+		keeping = null;
+		button.classList.remove('keeping');
+		button.style.removeProperty('--kept');
+		button.textContent = label;
+		button.title = 'Keep every challenge mode map in this browser, so none asks for the Portal 2 folder again';
+		showKeepAll();
 	}
-};
+}
 
 // (what a link wants shown, once a run's open: see links)
 let afterOpen = () => {};
