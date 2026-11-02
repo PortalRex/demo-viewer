@@ -15,7 +15,7 @@ export interface VtfImage {
 	hasAlpha: boolean;
 }
 
-function bytesFor(format: number, w: number, h: number): number {
+export function bytesFor(format: number, w: number, h: number): number {
 	const F = VtfFormat;
 	switch (format) {
 	case F.DXT1: case F.DXT1_ONEBITALPHA: return Math.max(1, Math.ceil(w / 4)) * Math.max(1, Math.ceil(h / 4)) * 8;
