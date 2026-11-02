@@ -252,7 +252,3 @@ body.embed header.bar, body.embed #share, body.embed #quiz, body.embed .drop-inn
 body.embed .drop-file { font-size: 15px; }
 body.embed-compact .viewer { grid-template-columns: minmax(0, 1fr); }
 body.embed-compact .segments, body.embed-compact .side { display: none; }
-/* "Keep all maps" while copying: a progress bar, filled as far as it's got (see main.ts keepAll) */
-#keep-all.keeping { background-image: linear-gradient(90deg, rgba(90, 169, 255, 0.4) var(--kept, 0%), transparent var(--kept, 0%)); border-color: var(--accent); font-variant-numeric: tabular-nums; }
-.keep-all-pick { display: block; margin: 12px auto 0; max-width: 420px; font-size: 13px; text-align: left; cursor: pointer; }
-.keep-all-pick input { margin-right: 6px; vertical-align: -2px; }

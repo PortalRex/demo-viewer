@@ -274,16 +274,23 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 ### Hosting
 
 `npm run build` makes a static site in `dist/` for any static host (Cloudflare
-Pages, GitHub Pages, Netlify). Nothing from the game is hosted: each viewer
-picks their own Portal 2 folder. Where the browser can open it (Chrome or
-Edge, with the game outside Program Files), it remembers the folder, so later
-visits only ask to allow it again. Where it can't (Steam's default library is
-under Program Files, which Chromium refuses; Brave and Firefox have no folder
-access), the folder is picked as an upload, and what the 3D view reads from it
-is kept in the browser (IndexedDB): a map seen once opens without the folder
-afterwards, and **Keep all maps** keeps every challenge mode map at once
-(about 5.4 GB). The kept files live in the visitor's browser, by site address:
-redeploying the site doesn't touch them.
+Pages, GitHub Pages, Netlify). The 3D view reads the game's files from
+`/game/v1/` on the same site (or `VITE_GAME_ASSETS`): the campaign and
+challenge mode maps and what they use, textures cut to 512 px, each file
+gzipped under its content hash (~1.3 GB). Build that folder with a Portal 2
+install, then serve `build/gameassets` at `/game/` with each `.gz` sent as
+the file itself, gzip-encoded (nginx: `gzip_static always; gunzip on;`):
+
+```bash
+node --experimental-strip-types tools/assetplan.ts     # build/assetplan.json: what the maps use
+node --experimental-strip-types tools/build-assets.ts  # writes build/gameassets/v1
+```
+
+Where the files aren't there, the 3D view asks for the visitor's own Portal 2
+folder instead (Chrome and Edge, with the game outside Program Files; the
+folder is remembered, so later visits only ask to allow it again). The dev
+server serves both: the local install at `/__game/` and the build at `/game/`
+(`?game=hosted` uses the hosted files even with the install there).
 
 The leaderboard's demos need a pass-through, as the board doesn't serve them
 to other sites: `deploy/board-proxy` is a Cloudflare Worker that does it
