@@ -195,9 +195,8 @@ export async function devGameFS(): Promise<GameFS | null> {
 	return listed?.size ? fs : null;
 }
 
-// Where a map's BSP can be: the run's game folder first, then Portal 2's,
-// then maps/ directly (a folder picked one level down, like "portal2").
+// Where a map's BSP can be: the run's game folder first, then Portal 2's
 export function mapPaths(map: string, gameDir: string): string[] {
 	const dirs = [...new Set([gameDir, 'portal2_dlc2', 'portal2_dlc1', 'update', 'portal2'].filter(Boolean))];
-	return [...dirs.map(d => `${d}/maps/${map}.bsp`), `maps/${map}.bsp`];
+	return dirs.map(d => `${d}/maps/${map}.bsp`);
 }

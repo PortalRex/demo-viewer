@@ -419,11 +419,13 @@ const hostedGame = () => (hostedGameOpen ??= HostedFS.open(import.meta.env.VITE_
 async function load3dMap() {
 	if (!pb || currentSeg < 0 || segIn3d === currentSeg || segLoading === currentSeg) return;  // render() calls back once a segment is shown
 	const seg = pb.tracks[currentSeg].seg;
-	// (?game=hosted: the hosted files even where a local install is served,
-	// to try them)
-	if (!FORCE_HOSTED) gameFS ??= await devGameFS();
-	// (else the game's files as the site hosts them)
+	// The viewer's own dev server: its local install (?game=hosted: the
+	// hosted files even so, to try them). Else the hosted files, and where
+	// there are none, a local install a dev server hands out (the boards
+	// site's, testing the viewer built into it)
+	if (import.meta.env.DEV && !FORCE_HOSTED) gameFS ??= await devGameFS();
 	gameFS ??= await hostedGame();
+	if (!FORCE_HOSTED) gameFS ??= await devGameFS();
 	if (!gameFS) {
 		if (viewMode === '3d') message3d(`<h2>The game’s files aren’t available</h2>
 			The 3D view couldn’t load the Portal 2 files this site hosts. Try again later.`);
