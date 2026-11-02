@@ -31,7 +31,7 @@ import {background} from './ui/background.ts';
 import type {EntityTimeline, EntityTrack} from './net/entities.ts';
 import {loadBspOffThread} from './game/bsppool.ts';
 import type {BspMap} from './game/bsp.ts';
-import {devGameFS, forgetKeptGameFiles, HostedFS, pickGameFolder, mapPaths, rememberedGameFolder, reuseGameFolder} from './game/gamefs.ts';
+import {devGameFS, forgetKeptGameFiles, HostedFS, mapPaths} from './game/gamefs.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
 import {recordMp4, canExportVideo} from './ui/export.ts';
@@ -354,22 +354,6 @@ function message3d(html: string | null) {
 	if (html !== null) el.innerHTML = `<div class="box">${html}</div>`;
 }
 
-async function connectGame(reuse?: FileSystemDirectoryHandle) {
-	try {
-		const fs = reuse ? await reuseGameFolder(reuse) : await pickGameFolder();
-		if (!fs) return;
-		useGameFolder(fs);
-	} catch (e) {
-		if ((e as Error).name !== 'AbortError') message3d(`<h2>Couldn't open the folder</h2>${(e as Error).message}`);
-	}
-}
-function useGameFolder(fs: GameFS) {
-	gameFS = fs;
-	gameFiles = null;
-	mapCache.clear();
-	segIn3d = segLoading = -1;
-	load3dMap();
-}
 
 // A map's BSP, loaded once (in a worker) and kept while it's one of the last
 // three asked for: the one before, the one shown and the one after. Its
@@ -427,28 +411,22 @@ function prepareNext(index: number) {
 // them (VITE_GAME_ASSETS, /game/v1/ by default)
 const FORCE_HOSTED = new URLSearchParams(location.search).get('game') === 'hosted';
 let hostedGameOpen: Promise<HostedFS | null> | null = null;
-// (game files an earlier version kept in the browser, up to several GB: let go
-// of, as the site hosts them now)
+// (game files and the picked game folder an earlier version kept in the
+// browser, up to several GB: let go of, as the site hosts them now)
 forgetKeptGameFiles();
 const hostedGame = () => (hostedGameOpen ??= HostedFS.open(import.meta.env.VITE_GAME_ASSETS || '/game/v1/'));
 
 async function load3dMap() {
 	if (!pb || currentSeg < 0 || segIn3d === currentSeg || segLoading === currentSeg) return;  // render() calls back once a segment is shown
 	const seg = pb.tracks[currentSeg].seg;
-	// (out of the 3D view, only with a game folder that needs no asking for)
-	const background = viewMode !== '3d';
 	// (?game=hosted: the hosted files even where a local install is served,
 	// to try them)
 	if (!FORCE_HOSTED) gameFS ??= await devGameFS();
-	// (the folder picked on an earlier visit: straight away where the browser
-	// still allows reading it, else offered again, a click to allow it)
-	const remembered = gameFS || FORCE_HOSTED ? null : await rememberedGameFolder();
-	if (remembered?.allowed) gameFS = await reuseGameFolder(remembered.dir);
-	// (else the game's files as the site hosts them: nothing to pick)
-	if (!gameFS) gameFS = await hostedGame();
+	// (else the game's files as the site hosts them)
+	gameFS ??= await hostedGame();
 	if (!gameFS) {
-		if (background) return;
-		askForGame(remembered?.dir ?? null);
+		if (viewMode === '3d') message3d(`<h2>The game’s files aren’t available</h2>
+			The 3D view couldn’t load the Portal 2 files this site hosts. Try again later.`);
 		return;
 	}
 	const token = ++mapToken;
@@ -488,33 +466,10 @@ async function load3dMap() {
 		render();
 	} catch (e) {
 		if (token === mapToken) segLoading = -1;
-		if (token === mapToken) message3d(`<h2>Couldn't load the map</h2>${(e as Error).message}<br><button class="primary" id="connect-game">Choose another folder</button>`);
-		const b = document.getElementById('connect-game');
-		if (b) b.onclick = () => connectGame();
+		if (token === mapToken) message3d(`<h2>Couldn't load the map</h2>${(e as Error).message}`);
 	}
 }
 
-
-// The 3D view's ask for the game, where the site's hosted files aren't
-// there: the folder picked before (where the browser lets it be used again),
-// or a folder to pick with the browser's folder picker (remembered then)
-function askForGame(remembered: FileSystemDirectoryHandle | null) {
-	const picker = 'showDirectoryPicker' in window;
-	const reuse = remembered ? `<button class="primary" id="reuse-game">Use ${remembered.name.replace(/[&<>"]/g, '')} again</button> ` : '';
-	if (!picker) {
-		message3d(`<h2>The game’s files aren’t available</h2>
-			The 3D view needs the Portal 2 files this site hosts, and they couldn’t be loaded. Try again later.`);
-		return;
-	}
-	message3d(`<h2>The 3D view uses your own copy of the game</h2>
-		Pick your <b>Portal 2</b> folder (the one with portal2.exe, usually in steamapps/common).
-		It’s read in this page; nothing is uploaded.
-		<br>${reuse}<button class="${remembered ? '' : 'primary'}" id="connect-game">Choose ${remembered ? 'another' : 'Portal 2'} folder</button>
-		<p class="muted">The browser won’t open folders under Program Files (Steam’s default place for games): move the
-		install elsewhere first (in Steam: the game’s Properties, Installed Files, Move install folder).</p>`);
-	$('connect-game').onclick = () => connectGame();
-	if (remembered) $('reuse-game').onclick = () => connectGame(remembered);
-}
 
 // (what a link wants shown, once a run's open: see links)
 let afterOpen = () => {};

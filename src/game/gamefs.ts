@@ -1,6 +1,5 @@
-// Read access to the viewer's own Portal 2 install. Nothing is uploaded: the
-// browser reads the files from the folder the user picks (File System Access
-// API), or in development from the dev server's /__game/ route.
+// Read access to Portal 2's files: as the site hosts them (HostedFS), or in
+// development the local install through the dev server's /__game/ route.
 
 import {soon} from '../core/later.ts';
 
@@ -16,72 +15,6 @@ export interface GameFS {
 
 // the folders loose asset files are looked for in (anything else is probed)
 export const LOOSE_DIRS = ['materials', 'models', 'particles', 'scripts', 'maps'];
-
-export class DirectoryFS implements GameFS {
-	readonly root: FileSystemDirectoryHandle;
-	label: string;
-
-	constructor(root: FileSystemDirectoryHandle) {
-		this.root = root;
-		this.label = root.name;
-	}
-
-	// File objects by path (looking one up walks the folders: many reads hit
-	// the same few archives)
-	private files = new Map<string, Promise<File | null>>();
-
-	private file(path: string): Promise<File | null> {
-		let f = this.files.get(path);
-		if (!f) {
-			f = this.lookup(path);
-			this.files.set(path, f);
-		}
-		return f;
-	}
-
-	private async lookup(path: string): Promise<File | null> {
-		const parts = path.split('/').filter(Boolean);
-		let dir = this.root;
-		try {
-			for (const p of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(p);
-			return await (await dir.getFileHandle(parts[parts.length - 1])).getFile();
-		} catch {
-			return null;
-		}
-	}
-
-	async read(path: string, offset = 0, length?: number) {
-		const f = await this.file(path);
-		if (!f) return null;
-		const blob = f.slice(offset, length === undefined ? undefined : offset + length);
-		return new Uint8Array(await blob.arrayBuffer());
-	}
-
-	async size(path: string) {
-		return (await this.file(path))?.size ?? null;
-	}
-
-	async list(dir: string) {
-		const out = new Set<string>();
-		const walk = async (h: FileSystemDirectoryHandle, prefix: string) => {
-			for await (const [name, e] of (h as unknown as {entries(): AsyncIterable<[string, FileSystemHandle]>}).entries()) {
-				const p = prefix + name.toLowerCase();
-				if (e.kind === 'directory') await walk(e as FileSystemDirectoryHandle, p + '/');
-				else out.add(p);
-			}
-		};
-		try {
-			const d = await this.root.getDirectoryHandle(dir);
-			for (const sub of LOOSE_DIRS) {
-				const s = await d.getDirectoryHandle(sub).catch(() => null);
-				if (s) await walk(s, sub + '/');
-			}
-		} catch {
-			return null;
-		}
-		return out;
-	}
-}
 
 export class HttpFS implements GameFS {
 	readonly base: string;
@@ -153,65 +86,16 @@ export class HttpFS implements GameFS {
 	}
 }
 
-// The folder to pick is "Portal 2" (the one with portal2.exe); accept the
-// game folder inside it too. Null where the browser can't open folders
-// (Brave and Firefox: the site's hosted files are used there)
-export async function pickGameFolder(): Promise<GameFS | null> {
-	const picker = (window as unknown as {showDirectoryPicker?: (o?: object) => Promise<FileSystemDirectoryHandle>}).showDirectoryPicker;
-	if (!picker) return null;
-	const dir = await picker({id: 'portal2', mode: 'read'});
-	rememberFolder(dir);
-	return new DirectoryFS(dir);
-}
-
-// The game files earlier versions kept in the browser (IndexedDB
-// "sar-game-cache"), deleted
+// What earlier versions kept in the browser, deleted: the game files read
+// from a picked folder (IndexedDB "sar-game-cache") and the picked folder
+// itself ("sar-viewer")
 export function forgetKeptGameFiles() {
 	try {
 		indexedDB.deleteDatabase('sar-game-cache');
+		indexedDB.deleteDatabase('sar-viewer');
 	} catch {
 		// no IndexedDB (a private window): nothing kept
 	}
-}
-
-// The picked folder remembered (the browser keeps its handle in IndexedDB),
-// so a later visit only asks to allow reading it again rather than picking
-// it: the browser grants that again on a click, or by itself where it was
-// allowed for good
-type Permission = {queryPermission(o: object): Promise<PermissionState>; requestPermission(o: object): Promise<PermissionState>};
-const FOLDER_DB = 'sar-viewer', FOLDER_STORE = 'folders', FOLDER_KEY = 'portal2';
-function folderStore(mode: IDBTransactionMode): Promise<IDBObjectStore> {
-	return new Promise((done, fail) => {
-		const open = indexedDB.open(FOLDER_DB, 1);
-		open.onupgradeneeded = () => open.result.createObjectStore(FOLDER_STORE);
-		open.onsuccess = () => done(open.result.transaction(FOLDER_STORE, mode).objectStore(FOLDER_STORE));
-		open.onerror = () => fail(open.error);
-	});
-}
-function rememberFolder(dir: FileSystemDirectoryHandle) {
-	folderStore('readwrite').then(s => s.put(dir, FOLDER_KEY)).catch(() => {});
-}
-// the folder picked before, and whether reading it is allowed now (else it
-// needs reuseGameFolder, on a click); null where there's none
-export async function rememberedGameFolder(): Promise<{dir: FileSystemDirectoryHandle; allowed: boolean} | null> {
-	try {
-		const store = await folderStore('readonly');
-		const dir = await new Promise<FileSystemDirectoryHandle | undefined>((done, fail) => {
-			const get = store.get(FOLDER_KEY);
-			get.onsuccess = () => done(get.result);
-			get.onerror = () => fail(get.error);
-		});
-		if (!dir) return null;
-		return {dir, allowed: await (dir as unknown as Permission).queryPermission({mode: 'read'}) === 'granted'};
-	} catch {
-		return null;  // (no IndexedDB, or a browser without folder handles)
-	}
-}
-// (called from a click: the browser asks the user to allow it)
-export async function reuseGameFolder(dir: FileSystemDirectoryHandle): Promise<GameFS | null> {
-	const allowed = await (dir as unknown as Permission).queryPermission({mode: 'read'}) === 'granted'
-		|| await (dir as unknown as Permission).requestPermission({mode: 'read'}) === 'granted';
-	return allowed ? new DirectoryFS(dir) : null;
 }
 
 // The game's files as the boards site hosts them (tools/build-assets.ts): an

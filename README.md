@@ -22,11 +22,10 @@ run replayed in 3D inside the real level.**
 Drop in a SAR proof (`.sarp`) or a run's demos (`.dem`) and watch it. You can
 see the route on a map with every input, split and console command, or replay
 it from the runner's eyes inside the actual map. The 3D view reads the map,
-models and textures from your own copy of Portal 2 and draws them the way the
+models and textures from the Portal 2 files the site hosts and draws them the way the
 game does: lightmaps, portals, lasers, funnels, gel and particle effects.
 
-Everything happens in the page. Recordings and game files never leave your
-computer.
+Everything happens in the page. Recordings never leave your computer.
 
 ## Gallery
 
@@ -241,15 +240,13 @@ npm run dev
 ```
 
 Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
-**3D**. The first time, pick your `Portal 2` folder: the one with
-`portal2.exe`, usually under `steamapps/common`.
+**3D**: the dev server serves your local Portal 2 install to it.
 
 <details>
 <summary><b>Development conveniences</b></summary>
 
-- **No folder picking.** In dev, the server serves your Portal 2 install at
-  `/__game/`, so the 3D view works after each reload without picking the
-  folder. It defaults to the Steam path; point it elsewhere with `P2_DIR`:
+- **Your own install.** In dev, the server serves your Portal 2 install at
+  `/__game/`, and the 3D view reads it rather than the hosted files. It defaults to the Steam path; point it elsewhere with `P2_DIR`:
 
   ```bash
   P2_DIR="D:/Games/Portal 2" npm run dev
@@ -286,10 +283,8 @@ node --experimental-strip-types tools/assetplan.ts     # build/assetplan.json: w
 node --experimental-strip-types tools/build-assets.ts  # writes build/gameassets/v1
 ```
 
-Where the files aren't there, the 3D view asks for the visitor's own Portal 2
-folder instead (Chrome and Edge, with the game outside Program Files; the
-folder is remembered, so later visits only ask to allow it again). The dev
-server serves both: the local install at `/__game/` and the build at `/game/`
+Without them the 3D view has nothing to draw and says so. The dev server
+serves both: the local install at `/__game/` and the build at `/game/`
 (`?game=hosted` uses the hosted files even with the install there).
 
 The leaderboard's demos need a pass-through, as the board doesn't serve them
