@@ -85,6 +85,47 @@ export function vtfLevel(bytes: Uint8Array, maxSize = 1024, frame = 0): (Omit<Vt
 	return {width: w, height: h, format, offset, size, hasAlpha};
 }
 
+// A texture cut down to levels no larger than `maxSize` (for the hosted game
+// files: the 3D view loads no larger ones). The levels are stored smallest
+// first, so the larger ones are the end of the image data: cut off, and the
+// header made to say the new size and level count. Left as it is where it's
+// already small enough, a volume texture, or laid out otherwise (image data
+// that isn't the end of the file)
+export function trimVtf(bytes: Uint8Array, maxSize: number): Uint8Array {
+	const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (bytes.length < 64 || v.getUint32(0, true) !== 0x00465456) return bytes;
+	const minor = v.getUint32(8, true);
+	const headerSize = v.getUint32(12, true);
+	const width = v.getUint16(16, true), height = v.getUint16(18, true);
+	const flags = v.getUint32(20, true), frames = v.getUint16(24, true);
+	const format = v.getInt32(52, true), mipCount = v.getUint8(56);
+	const lowFormat = v.getInt32(57, true), lowW = v.getUint8(61), lowH = v.getUint8(62);
+	const depth = minor >= 2 ? Math.max(1, v.getUint16(63, true)) : 1;
+	const faces = flags & 0x4000 ? (minor < 5 ? 7 : 6) : 1;
+	if (depth > 1 || bytesFor(format, 1, 1) < 0) return bytes;
+	let drop = 0;
+	while (drop < mipCount - 1 && Math.max(width >> drop, height >> drop) > maxSize) drop++;
+	if (!drop) return bytes;
+	let dataStart = headerSize + (lowFormat >= 0 ? bytesFor(lowFormat, lowW, lowH) : 0);
+	if (minor >= 3) {
+		dataStart = -1;
+		for (let i = 0; i < v.getUint32(68, true); i++) if ((v.getUint32(80 + i * 8, true) & 0xffffff) === 0x30) dataStart = v.getUint32(84 + i * 8, true);
+		if (dataStart < 0) return bytes;
+	}
+	const level = (m: number) => bytesFor(format, Math.max(1, width >> m), Math.max(1, height >> m)) * frames * faces;
+	let total = 0;
+	for (let m = 0; m < mipCount; m++) total += level(m);
+	if (dataStart + total !== bytes.length) return bytes;
+	let cut = 0;
+	for (let m = 0; m < drop; m++) cut += level(m);
+	const out = bytes.slice(0, bytes.length - cut);
+	const o = new DataView(out.buffer);
+	o.setUint16(16, Math.max(1, width >> drop), true);
+	o.setUint16(18, Math.max(1, height >> drop), true);
+	o.setUint8(56, mipCount - drop);
+	return out;
+}
+
 // the drawn level (as vtfLevel picks it) and every smaller one, largest
 // first: where each level's first frame is in the file
 export function vtfMips(bytes: Uint8Array, maxSize = 1024, frame = 0): {width: number; height: number; offset: number; size: number}[] | null {

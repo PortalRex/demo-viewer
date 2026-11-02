@@ -31,7 +31,7 @@ import {background} from './ui/background.ts';
 import type {EntityTimeline, EntityTrack} from './net/entities.ts';
 import {loadBspOffThread} from './game/bsppool.ts';
 import type {BspMap} from './game/bsp.ts';
-import {devGameFS, FileListFS, HttpFS, pickGameFolder, mapPaths, rememberedGameFolder, reuseGameFolder} from './game/gamefs.ts';
+import {devGameFS, FileListFS, HostedFS, HttpFS, pickGameFolder, mapPaths, rememberedGameFolder, reuseGameFolder} from './game/gamefs.ts';
 import {CachedFS, GameCache, planKeepEverything} from './game/gamecache.ts';
 import {GameFiles} from './game/files.ts';
 import {HudText} from './ui/hudtext.ts';
@@ -443,16 +443,26 @@ function prepareNext(index: number) {
 	}).catch(() => {});
 }
 
+// The hosted game files (HostedFS), looked for once: where the site serves
+// them (VITE_GAME_ASSETS, /game/v1/ by default)
+const FORCE_HOSTED = new URLSearchParams(location.search).get('game') === 'hosted';
+let hostedGameOpen: Promise<HostedFS | null> | null = null;
+const hostedGame = () => (hostedGameOpen ??= HostedFS.open(import.meta.env.VITE_GAME_ASSETS || '/game/v1/'));
+
 async function load3dMap() {
 	if (!pb || currentSeg < 0 || segIn3d === currentSeg || segLoading === currentSeg) return;  // render() calls back once a segment is shown
 	const seg = pb.tracks[currentSeg].seg;
 	// (out of the 3D view, only with a game folder that needs no asking for)
 	const background = viewMode !== '3d';
-	gameFS ??= await devGameFS();
+	// (?game=hosted: the hosted files even where a local install is served,
+	// to try them)
+	if (!FORCE_HOSTED) gameFS ??= await devGameFS();
 	// (the folder picked on an earlier visit: straight away where the browser
 	// still allows reading it, else offered again, a click to allow it)
-	const remembered = gameFS ? null : await rememberedGameFolder();
+	const remembered = gameFS || FORCE_HOSTED ? null : await rememberedGameFolder();
 	if (remembered?.allowed) gameFS = await reuseGameFolder(remembered.dir);
+	// (else the game's files as the site hosts them: nothing to pick)
+	if (!gameFS) gameFS = await hostedGame();
 	// (else the files kept from a folder picked before: maps seen then open
 	// without it)
 	if (!gameFS) {

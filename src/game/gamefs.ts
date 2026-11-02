@@ -260,6 +260,91 @@ export async function reuseGameFolder(dir: FileSystemDirectoryHandle): Promise<G
 	return allowed ? new DirectoryFS(dir) : null;
 }
 
+// The game's files as the boards site hosts them (tools/build-assets.ts): an
+// index of every path the 3D view reads, each to the hash of its bytes, and
+// the files under their hashes (sent gzipped; the browser undoes that). A
+// file is fetched whole the first time it's read and kept while it's among
+// the most recently read (a map's file is read a piece at a time), up to a
+// limit; the browser's own cache keeps them between visits (they never change
+// under a hash)
+const HOSTED_KEPT = 256 * 2 ** 20;  // bytes of files kept in memory
+export class HostedFS implements GameFS {
+	readonly label = 'hosted game files';
+	readonly base: string;
+	private index: Map<string, [string, number]>;
+	private kept = new Map<string, Promise<Uint8Array | null>>();
+	private keptSizes = new Map<string, number>();
+	private keptBytes = 0;
+
+	private constructor(base: string, index: Map<string, [string, number]>) {
+		this.base = base;
+		this.index = index;
+	}
+
+	// the hosted files at `base` (e.g. /game/v1/), or null where there are none
+	static async open(base: string): Promise<HostedFS | null> {
+		try {
+			const r = await fetch(`${base}index.json`);
+			if (!r.ok || !(r.headers.get('content-type') ?? '').includes('json')) return null;
+			const {files} = await r.json() as {files: Record<string, [string, number]>};
+			return new HostedFS(base, new Map(Object.entries(files)));
+		} catch {
+			return null;
+		}
+	}
+
+	private file(hash: string, size: number): Promise<Uint8Array | null> {
+		let p = this.kept.get(hash);
+		if (p) {
+			// (most recently read last)
+			this.kept.delete(hash);
+			this.kept.set(hash, p);
+			return p;
+		}
+		p = fetch(`${this.base}files/${hash.slice(0, 2)}/${hash}`)
+			.then(r => (r.ok ? r.arrayBuffer() : null))
+			.then(b => (b ? new Uint8Array(b) : null))
+			.catch(() => null);
+		this.kept.set(hash, p);
+		this.keptSizes.set(hash, size);
+		this.keptBytes += size;
+		// (the least recently read let go past the limit; the browser's cache
+		// still has them)
+		for (const [h] of this.kept) {
+			if (this.keptBytes <= HOSTED_KEPT || h === hash) break;
+			this.kept.delete(h);
+			this.keptBytes -= this.keptSizes.get(h) ?? 0;
+			this.keptSizes.delete(h);
+		}
+		return p;
+	}
+
+	private entry(path: string) {
+		return this.index.get(path.toLowerCase().replace(/\\/g, '/'));
+	}
+
+	async read(path: string, offset = 0, length?: number): Promise<Uint8Array | null> {
+		const entry = this.entry(path);
+		if (!entry) return null;
+		const bytes = await this.file(entry[0], entry[1]);
+		if (!bytes) return null;
+		return length === undefined && !offset ? bytes : bytes.subarray(offset, length === undefined ? undefined : offset + length);
+	}
+
+	async size(path: string): Promise<number | null> {
+		return this.entry(path)?.[1] ?? null;
+	}
+
+	async list(dir: string): Promise<Set<string>> {
+		const base = `${dir.toLowerCase()}/`;
+		const out = new Set<string>();
+		for (const p of this.index.keys()) {
+			if (p.startsWith(base) && LOOSE_DIRS.some(d => p.startsWith(`${base}${d}/`))) out.add(p.slice(base.length));
+		}
+		return out;
+	}
+}
+
 // The local install served at /__game/: by the dev server, or, built for the
 // boards site (VITE_BOARDS_API), by that site's dev server where it passes
 // /__game through to one (DEV_GAME_PROXY). A deployed site has nothing

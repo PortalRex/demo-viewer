@@ -27,6 +27,25 @@ function devGameFiles(): Plugin {
 					res.end('ok');
 				});
 			});
+			// the hosted game files as tools/build-assets.ts builds them
+			// (build/gameassets), served at /game/ as the boards site's nginx
+			// serves them: each file's .gz sent gzipped, with CORS for the
+			// boards site's dev server
+			server.middlewares.use('/game/', (req, res, next) => {
+				const rel = normalize(decodeURIComponent((req.url ?? '').split('?')[0])).replace(/^([/\\])+/, '');
+				if (!rel || rel.startsWith('..')) return next();
+				const file = join('build/gameassets', `${rel}.gz`);
+				try {
+					statSync(file);
+				} catch {
+					res.statusCode = 404;
+					return res.end();
+				}
+				res.setHeader('Access-Control-Allow-Origin', '*');
+				res.setHeader('Content-Encoding', 'gzip');
+				res.setHeader('Content-Type', rel.endsWith('.json') ? 'application/json' : 'application/octet-stream');
+				createReadStream(file).pipe(res);
+			});
 			// the game folder readable from other local dev servers too (the
 			// boards site's, testing the viewer built into it)
 			server.middlewares.use('/__game', (req, res, next) => {
