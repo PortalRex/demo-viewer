@@ -187,9 +187,10 @@ export class HostedFS implements GameFS {
 // boards site (VITE_BOARDS_API), by that site's dev server where it passes
 // /__game through to one (DEV_GAME_PROXY). A deployed site has nothing
 // there (its pages answer /__game/ with the site): only a listing of the
-// game folder's files counts
+// game folder's files counts. The desktop app (VITE_DESKTOP) serves the
+// install it found there too
 export async function devGameFS(): Promise<GameFS | null> {
-	if (!import.meta.env?.DEV && !import.meta.env?.VITE_BOARDS_API) return null;
+	if (!import.meta.env?.DEV && !import.meta.env?.VITE_BOARDS_API && !import.meta.env?.VITE_DESKTOP) return null;
 	const fs = new HttpFS('/__game/');
 	const listed = await fs.list('portal2').catch(() => null);
 	return listed?.size ? fs : null;

@@ -268,6 +268,30 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 
 </details>
 
+### Desktop app
+
+The viewer as a Windows app, with no server to start: it reads your Portal 2
+install straight from disk (found through Steam's libraries, or picked once
+under **File › Game folder…**) and passes the leaderboard through itself.
+
+```bash
+npm run package:desktop
+```
+
+That writes `release/win-unpacked/SAR Run Viewer.exe` (keep the folder
+together; it's Electron, ~320 MB). Open demos by dropping them on the
+window, with **File › Open demo…** (Ctrl+O), or from Explorer: drop a demo
+on the exe, or **Open with** it. A demo opened while the app runs goes to
+the open window. `npm run desktop` builds the page and runs the app without
+packaging it.
+
+The app (`electron/main.mjs`) serves the built page (`dist/`, built with
+`VITE_DESKTOP`) from a server of its own on a private loopback port, which
+answers only its own page, along with `/__game/` and `/__board/` as the dev
+server does (`server/local.mjs`, shared with `vite.config.ts`).
+`SAR_VIEWER_BACKGROUND=1` runs it with no window, printing the page's
+address, for testing beside a game being played.
+
 ### Hosting
 
 `npm run build` makes a static site in `dist/` for any static host (Cloudflare

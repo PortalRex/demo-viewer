@@ -422,12 +422,16 @@ async function load3dMap() {
 	// The viewer's own dev server: its local install (?game=hosted: the
 	// hosted files even so, to try them). Else the hosted files, and where
 	// there are none, a local install a dev server hands out (the boards
-	// site's, testing the viewer built into it)
-	if (import.meta.env.DEV && !FORCE_HOSTED) gameFS ??= await devGameFS();
-	gameFS ??= await hostedGame();
-	if (!FORCE_HOSTED) gameFS ??= await devGameFS();
+	// site's, testing the viewer built into it). The desktop app: only the
+	// install it found
+	const desktop = !!import.meta.env.VITE_DESKTOP;
+	if ((import.meta.env.DEV || desktop) && !FORCE_HOSTED) gameFS ??= await devGameFS();
+	if (!desktop) gameFS ??= await hostedGame();
+	if (!FORCE_HOSTED && !desktop) gameFS ??= await devGameFS();
 	if (!gameFS) {
-		if (viewMode === '3d') message3d(`<h2>The game’s files aren’t available</h2>
+		if (viewMode === '3d') message3d(desktop ? `<h2>The game’s files aren’t available</h2>
+			The 3D view couldn’t read your Portal 2 install. Pick its folder with <b>Game folder…</b> in the app’s menu.`
+			: `<h2>The game’s files aren’t available</h2>
 			The 3D view couldn’t load the Portal 2 files this site hosts. Try again later.`);
 		return;
 	}

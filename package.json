@@ -1,12 +1,18 @@
 {
   "name": "sar-web",
+  "productName": "SAR Run Viewer",
+  "description": "Watch Portal 2 runs (SAR proofs and demos) in 2D and 3D",
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "electron/main.mjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:boards": "tsc --noEmit && node tools/build-boards.mjs",
+    "build:desktop": "tsc --noEmit && node tools/build-desktop.mjs",
+    "desktop": "npm run build:desktop && electron .",
+    "package:desktop": "npm run build:desktop && electron-builder --win dir",
     "check": "tsc --noEmit",
     "test": "node --test --experimental-strip-types --no-warnings=ExperimentalWarning \"tests/*.test.ts\"",
     "probe": "node --experimental-strip-types tools/probe.ts"
@@ -14,6 +20,8 @@
   "devDependencies": {
     "@types/node": "^22.15.21",
     "@types/three": "^0.169.0",
+    "electron": "44.9.3",
+    "electron-builder": "26.18.0",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
   },
@@ -21,5 +29,25 @@
     "mp4-muxer": "^5.2.2",
     "three": "^0.169.0",
     "three-mesh-bvh": "^0.8.3"
+  },
+  "build": {
+    "appId": "sr.portal2.sar-run-viewer",
+    "productName": "SAR Run Viewer",
+    "directories": {
+      "output": "release"
+    },
+    "electronLanguages": [
+      "en-US"
+    ],
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server/**/*",
+      "package.json",
+      "!node_modules/**/*"
+    ],
+    "win": {
+      "target": "dir"
+    }
   }
 }

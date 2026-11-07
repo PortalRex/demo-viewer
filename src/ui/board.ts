@@ -12,7 +12,8 @@ const BOARD = 'https://board.portal2.sr';
 // (the dev server passes the board through, as its demos can't be read by
 // another site; a built page asks its proxy (VITE_BOARD_PROXY: see
 // deploy/board-proxy), else the board itself, whose demos it then can't read)
-const BASE: string = import.meta.env.DEV ? '/__board' : (import.meta.env.VITE_BOARD_PROXY || BOARD).replace(/\/$/, '');
+// (the desktop app passes it through as the dev server does)
+const BASE: string = import.meta.env.DEV || import.meta.env.VITE_DESKTOP ? '/__board' : (import.meta.env.VITE_BOARD_PROXY || BOARD).replace(/\/$/, '');
 // Served by the boards v2 site (core/boardsv2.ts): its own API, on the same
 // site, instead of board.portal2.sr
 const V2: string | null = import.meta.env.VITE_BOARDS_API ? import.meta.env.VITE_BOARDS_API.replace(/\/$/, '') : null;
