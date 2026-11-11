@@ -1120,7 +1120,7 @@ $<HTMLInputElement>('folder-input').onchange = async e => {
 	const list = [...(input.files ?? [])].filter(x => isRunFile(x.name));
 	input.value = '';
 	if (list.length) open(await readFiles(list));
-	else showError('No demos (.dem) or proofs (.sarp) in that folder.');
+	else showError('No demos (.dem) in that folder.');
 };
 async function folderFiles(dir: FileSystemDirectoryEntry): Promise<File[]> {
 	const reader = dir.createReader(), out: File[] = [];
@@ -1154,7 +1154,7 @@ window.addEventListener('drop', async e => {
 			else if (isRunFile(x.name)) found.push(await new Promise<File>((done, fail) => (x as FileSystemFileEntry).file(done, fail)));
 		}
 		if (found.length) open(await readFiles(found));
-		else showError('No demos (.dem) or proofs (.sarp) in that folder.');
+		else showError('No demos (.dem) in that folder.');
 		return;
 	}
 	const list = [...(e.dataTransfer?.files ?? [])].filter(x => isRunFile(x.name));

@@ -19,7 +19,7 @@ run replayed in 3D inside the real level.**
 
 ---
 
-Drop in a SAR proof (`.sarp`) or a run's demos (`.dem`) and watch it. You can
+Drop in a run's demos (`.dem`) and watch it. You can
 see the route on a map with every input, split and console command, or replay
 it from the runner's eyes inside the actual map. The 3D view reads the map,
 models and textures from the Portal 2 files the site hosts and draws them the way the
@@ -67,8 +67,6 @@ Everything happens in the page. Recordings never leave your computer.
 ## Features
 
 **Reading runs**
-- SAR proofs (`.sarp`), with the hash chain, signature and whether the
-  recording stopped cleanly.
 - Demos (`.dem`). Open all of a run's demos at once and they play as one run.
 - A whole folder (**Open folder**, or drop it on the page): a full-game run's
   demos played back to back as one timeline. The timeline names each chamber
@@ -240,7 +238,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
+Open http://localhost:5173, drop a `.dem` on the page, and press
 **3D**: the dev server serves your local Portal 2 install to it.
 
 <details>
@@ -265,7 +263,7 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 | `npm run build` | Typecheck and build a static site into `dist/` |
 | `npm run check` | Typecheck only |
 | `npm test` | The tests (`tests/`): playback and the view between views, race lining up, sections, tricks, air strafing, the leaderboards' runs, links, the hosted files and texture trimming, on small made-up runs |
-| `npm run probe -- <files>` | Print what the readers get from a `.sarp` or `.dem` |
+| `npm run probe -- <files>` | Print what the reader gets from a `.dem` |
 
 </details>
 
@@ -353,9 +351,9 @@ engine function each piece follows.
 
 ```
 src/
-  core/    file readers: .dem and .sarp into one format-independent Run
-  net/     network data: data tables, string tables, packet entities,
-           proofs' entity records → per-entity timelines; paint messages
+  core/    the file reader: a .dem into a Run
+  net/     network data: data tables, string tables, packet entities
+           → per-entity timelines; paint messages
   game/    the game's files: VPK, BSP (lightmaps, vis, ambient light), VMT/VTF,
            MDL/VVD/VTX models and animation, PCF particle systems, Bink
   player/  a run turned into one timeline across its segments
