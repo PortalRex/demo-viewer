@@ -1,6 +1,6 @@
 <div align="center">
 
-# SAR Run Viewer
+# Demo Viewer
 
 **Watch Portal 2 speedruns in your browser: the route on a map, or the whole
 run replayed in 3D inside the real level.**
@@ -59,7 +59,7 @@ Everything happens in the page. Recordings never leave your computer.
 <td width="50%"><img src="docs/images/orbit.jpg" alt="Orbit camera above a co-op chamber with the route drawn through it"></td>
 </tr>
 <tr>
-<td><b>On the map (Top / Side).</b> The route coloured by speed, portal placements, teleports, the view cone, inputs and a speed graph. It works without the game installed.</td>
+<td><b>On the map (Top / Side).</b> The route coloured by speed, portal placements, teleports, the view cone, inputs and a speed graph. It needs none of the game's files.</td>
 <td><b>In 3D (Eyes / Orbit / Chase / Free).</b> Through the runner's eyes, orbiting them, following behind them, or flying freely. Walls between the camera and the player dissolve so you never lose sight of them.</td>
 </tr>
 </table>
@@ -157,8 +157,9 @@ Everything happens in the page. Recordings never leave your computer.
 - **Off the page's thread:** maps and models are parsed in workers, and the
   next level of a multi-map run is loaded while the current one plays, so
   level changes don't stop.
-- **Remembered between visits:** the game folder's file listings are kept in
-  the browser, so opening the viewer again is quicker.
+- **Remembered between visits:** each hosted game file is served under the
+  hash of its contents, so the browser's cache keeps it and a map opens
+  quicker the second time.
 - **Quality setting:** High, Medium or Low (resolution, antialiasing, bloom
   and shadow detail) for slower machines.
 
@@ -263,7 +264,7 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 | `npm run dev` | Dev server with hot reload |
 | `npm run build` | Typecheck and build a static site into `dist/` |
 | `npm run check` | Typecheck only |
-| `npm test` | The tests (`tests/`): race lining up, tricks, the leaderboard's runs, links and the view between views, on small made-up runs |
+| `npm test` | The tests (`tests/`): playback and the view between views, race lining up, sections, tricks, air strafing, the leaderboards' runs, links, the hosted files and texture trimming, on small made-up runs |
 | `npm run probe -- <files>` | Print what the readers get from a `.sarp` or `.dem` |
 
 </details>
@@ -407,14 +408,14 @@ In dev, the page has hooks on `window`:
 
 ## Limitations
 
-- **Browser:** the 3D view needs Chrome or Edge, because it reads the game
-  folder through the File System Access API. The map views work in any modern
-  browser.
-- **Maps:** the 3D view finds maps in the game's own map folders. A map that
-  isn't there (a mod's, or a workshop map you haven't downloaded) can't be
-  shown.
+- **Browser:** the 3D view is built for and tested in Chrome and Edge. The
+  map views work in any modern browser.
+- **Maps:** the hosted files cover the campaign and challenge mode maps. A
+  map that isn't among them (a mod's, or a workshop map) can't be shown in
+  3D; its map views still work. In development the 3D view reads your own
+  install, so any map in it can be shown.
 - **Not every effect is matched yet.** Some particle systems and shaders are
   close approximations. Where the viewer and the game differ, the game is
   right.
 
-<div align="center"><sub>Portal 2 and its content belong to Valve. Nothing from the game is included here: the viewer reads your own install.</sub></div>
+<div align="center"><sub>Portal 2 and its content belong to Valve. Nothing from the game is in this repository: the 3D view reads the game's files from the site hosting it, built from that site's own install (in development, from yours).</sub></div>

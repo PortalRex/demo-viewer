@@ -25,7 +25,7 @@ export default {
 			const hit = await cache.match(request);
 			if (hit) return hit;
 		}
-		const up = await fetch(BOARD + path, {headers: {'User-Agent': 'SAR Run Viewer (board proxy)'}});
+		const up = await fetch(BOARD + path, {headers: {'User-Agent': 'Demo Viewer (board proxy)'}});
 		const headers = new Headers(CORS);
 		headers.set('Content-Type', up.headers.get('Content-Type') ?? 'application/octet-stream');
 		headers.set('X-File-Name', decodeURIComponent(new URL(up.url).pathname.split('/').pop() ?? ''));

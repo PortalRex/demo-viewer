@@ -182,7 +182,7 @@ function boardProxy(): Plugin {
 					return;
 				}
 				try {
-					const up = await fetch(BOARD + path, {headers: {'User-Agent': 'SAR Run Viewer (dev)'}});
+					const up = await fetch(BOARD + path, {headers: {'User-Agent': 'Demo Viewer (dev)'}});
 					res.statusCode = up.status;
 					res.setHeader('Content-Type', up.headers.get('content-type') ?? 'application/octet-stream');
 					res.setHeader('X-File-Name', decodeURIComponent(new URL(up.url).pathname.split('/').pop() ?? ''));

@@ -221,6 +221,6 @@ export function drawRouteMap(map: RouteMap, width = 1920, height = 1080): HTMLCa
 	g.textAlign = 'right';
 	g.textBaseline = 'alphabetic';
 	g.fillStyle = '#5d6573';
-	g.fillText('SAR Run Viewer', width - side, 70 * s);
+	g.fillText('Demo Viewer', width - side, 70 * s);
 	return c;
 }
