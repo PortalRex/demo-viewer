@@ -2,7 +2,7 @@
 // to work out again on every page load. Everything here is best effort: no
 // storage (a private window, storage blocked) just means nothing's kept.
 
-const DB = 'sar-run-viewer';
+const DB = 'demo-viewer';
 const STORE = 'cache';
 
 let opening: Promise<IDBDatabase | null> | null = null;

@@ -294,7 +294,7 @@ to other sites: `deploy/board-proxy` is a Cloudflare Worker that does it
 that folder, then build the viewer with its address:
 
 ```bash
-VITE_BOARD_PROXY=https://sar-viewer-board.<you>.workers.dev npm run build
+VITE_BOARD_PROXY=https://demo-viewer-board.<you>.workers.dev npm run build
 ```
 
 ## Controls

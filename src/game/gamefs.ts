@@ -87,12 +87,14 @@ export class HttpFS implements GameFS {
 }
 
 // What earlier versions kept in the browser, deleted: the game files read
-// from a picked folder (IndexedDB "sar-game-cache") and the picked folder
-// itself ("sar-viewer")
+// from a picked folder (IndexedDB "sar-game-cache"), the picked folder itself
+// ("sar-viewer"), and the small cache under the viewer's old name
+// ("sar-run-viewer": core/idbcache.ts keeps it as "demo-viewer" now)
 export function forgetKeptGameFiles() {
 	try {
 		indexedDB.deleteDatabase('sar-game-cache');
 		indexedDB.deleteDatabase('sar-viewer');
+		indexedDB.deleteDatabase('sar-run-viewer');
 	} catch {
 		// no IndexedDB (a private window): nothing kept
 	}
