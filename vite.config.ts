@@ -71,7 +71,7 @@ function boardProxy(): Plugin {
 		name: 'board-proxy',
 		apply: 'serve',
 		configureServer(server) {
-			server.middlewares.use('/__board', (req, res) => serveBoard('SAR Run Viewer (dev)', req, res, req.url ?? ''));
+			server.middlewares.use('/__board', (req, res) => serveBoard('Demo Viewer (dev)', req, res, req.url ?? ''));
 		},
 	};
 }

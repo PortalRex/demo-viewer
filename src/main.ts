@@ -516,7 +516,7 @@ function showRun(playback: Playback) {
 	segIn3d = segLoading = -1;
 	t = 0;
 	setPlaying(false);
-	document.title = quiz.active ? `${quiz.mode === 'runner' ? 'Guess the runner' : 'Guess the time'} · SAR Run Viewer` : `${run.fileName} · SAR Run Viewer`;
+	document.title = quiz.active ? `${quiz.mode === 'runner' ? 'Guess the runner' : 'Guess the time'} · Demo Viewer` : `${run.fileName} · Demo Viewer`;
 	requestAnimationFrame(() => render());
 }
 
@@ -550,7 +550,7 @@ function closeRun() {
 	$('run-title').textContent = '';
 	$('badges').textContent = '';
 	$('drop-file').textContent = '';
-	document.title = 'SAR Run Viewer';
+	document.title = 'Demo Viewer';
 	if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 }
 $('close-run').onclick = closeRun;
@@ -1124,7 +1124,7 @@ $<HTMLInputElement>('folder-input').onchange = async e => {
 	const list = [...(input.files ?? [])].filter(x => isRunFile(x.name));
 	input.value = '';
 	if (list.length) open(await readFiles(list));
-	else showError('No demos (.dem) or proofs (.sarp) in that folder.');
+	else showError('No demos (.dem) in that folder.');
 };
 async function folderFiles(dir: FileSystemDirectoryEntry): Promise<File[]> {
 	const reader = dir.createReader(), out: File[] = [];
@@ -1158,7 +1158,7 @@ window.addEventListener('drop', async e => {
 			else if (isRunFile(x.name)) found.push(await new Promise<File>((done, fail) => (x as FileSystemFileEntry).file(done, fail)));
 		}
 		if (found.length) open(await readFiles(found));
-		else showError('No demos (.dem) or proofs (.sarp) in that folder.');
+		else showError('No demos (.dem) in that folder.');
 		return;
 	}
 	const list = [...(e.dataTransfer?.files ?? [])].filter(x => isRunFile(x.name));
@@ -1987,7 +1987,7 @@ const quiz = new Quiz($('quiz'), {
 		return quiz.active && pb?.run.fileName === file.name;
 	},
 	end() {
-		if (pb) document.title = `${pb.run.fileName} · SAR Run Viewer`;
+		if (pb) document.title = `${pb.run.fileName} · Demo Viewer`;
 		render();
 	},
 });

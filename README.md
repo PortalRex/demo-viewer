@@ -1,6 +1,6 @@
 <div align="center">
 
-# SAR Run Viewer
+# Demo Viewer
 
 **Watch Portal 2 speedruns in your browser: the route on a map, or the whole
 run replayed in 3D inside the real level.**
@@ -19,7 +19,7 @@ run replayed in 3D inside the real level.**
 
 ---
 
-Drop in a SAR proof (`.sarp`) or a run's demos (`.dem`) and watch it. You can
+Drop in a run's demos (`.dem`) and watch it. You can
 see the route on a map with every input, split and console command, or replay
 it from the runner's eyes inside the actual map. The 3D view reads the map,
 models and textures from the Portal 2 files the site hosts and draws them the way the
@@ -59,7 +59,7 @@ Everything happens in the page. Recordings never leave your computer.
 <td width="50%"><img src="docs/images/orbit.jpg" alt="Orbit camera above a co-op chamber with the route drawn through it"></td>
 </tr>
 <tr>
-<td><b>On the map (Top / Side).</b> The route coloured by speed, portal placements, teleports, the view cone, inputs and a speed graph. It works without the game installed.</td>
+<td><b>On the map (Top / Side).</b> The route coloured by speed, portal placements, teleports, the view cone, inputs and a speed graph. It needs none of the game's files.</td>
 <td><b>In 3D (Eyes / Orbit / Chase / Free).</b> Through the runner's eyes, orbiting them, following behind them, or flying freely. Walls between the camera and the player dissolve so you never lose sight of them.</td>
 </tr>
 </table>
@@ -67,8 +67,6 @@ Everything happens in the page. Recordings never leave your computer.
 ## Features
 
 **Reading runs**
-- SAR proofs (`.sarp`), with the hash chain, signature and whether the
-  recording stopped cleanly.
 - Demos (`.dem`). Open all of a run's demos at once and they play as one run.
 - A whole folder (**Open folder**, or drop it on the page): a full-game run's
   demos played back to back as one timeline. The timeline names each chamber
@@ -157,8 +155,9 @@ Everything happens in the page. Recordings never leave your computer.
 - **Off the page's thread:** maps and models are parsed in workers, and the
   next level of a multi-map run is loaded while the current one plays, so
   level changes don't stop.
-- **Remembered between visits:** the game folder's file listings are kept in
-  the browser, so opening the viewer again is quicker.
+- **Remembered between visits:** each hosted game file is served under the
+  hash of its contents, so the browser's cache keeps it and a map opens
+  quicker the second time.
 - **Quality setting:** High, Medium or Low (resolution, antialiasing, bloom
   and shadow detail) for slower machines.
 
@@ -239,7 +238,7 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
+Open http://localhost:5173, drop a `.dem` on the page, and press
 **3D**: the dev server serves your local Portal 2 install to it.
 
 <details>
@@ -263,8 +262,8 @@ Open http://localhost:5173, drop a `.sarp` or `.dem` on the page, and press
 | `npm run dev` | Dev server with hot reload |
 | `npm run build` | Typecheck and build a static site into `dist/` |
 | `npm run check` | Typecheck only |
-| `npm test` | The tests (`tests/`): race lining up, tricks, the leaderboard's runs, links and the view between views, on small made-up runs |
-| `npm run probe -- <files>` | Print what the readers get from a `.sarp` or `.dem` |
+| `npm test` | The tests (`tests/`): playback and the view between views, race lining up, sections, tricks, air strafing, the leaderboards' runs, links, the hosted files and texture trimming, on small made-up runs |
+| `npm run probe -- <files>` | Print what the reader gets from a `.dem` |
 
 </details>
 
@@ -278,7 +277,7 @@ under **File › Game folder…**) and passes the leaderboard through itself.
 npm run package:desktop
 ```
 
-That writes `release/win-unpacked/SAR Run Viewer.exe` (keep the folder
+That writes `release/win-unpacked/Demo Viewer.exe` (keep the folder
 together; it's Electron, ~320 MB). Open demos by dropping them on the
 window, with **File › Open demo…** (Ctrl+O), or from Explorer: drop a demo
 on the exe, or **Open with** it. A demo opened while the app runs goes to
@@ -289,7 +288,7 @@ The app (`electron/main.mjs`) serves the built page (`dist/`, built with
 `VITE_DESKTOP`) from a server of its own on a private loopback port, which
 answers only its own page, along with `/__game/` and `/__board/` as the dev
 server does (`server/local.mjs`, shared with `vite.config.ts`).
-`SAR_VIEWER_BACKGROUND=1` runs it with no window, printing the page's
+`DEMO_VIEWER_BACKGROUND=1` runs it with no window, printing the page's
 address, for testing beside a game being played.
 
 ### Hosting
@@ -317,7 +316,7 @@ to other sites: `deploy/board-proxy` is a Cloudflare Worker that does it
 that folder, then build the viewer with its address:
 
 ```bash
-VITE_BOARD_PROXY=https://sar-viewer-board.<you>.workers.dev npm run build
+VITE_BOARD_PROXY=https://demo-viewer-board.<you>.workers.dev npm run build
 ```
 
 ## Controls
@@ -376,9 +375,9 @@ engine function each piece follows.
 
 ```
 src/
-  core/    file readers: .dem and .sarp into one format-independent Run
-  net/     network data: data tables, string tables, packet entities,
-           proofs' entity records → per-entity timelines; paint messages
+  core/    the file reader: a .dem into a Run
+  net/     network data: data tables, string tables, packet entities
+           → per-entity timelines; paint messages
   game/    the game's files: VPK, BSP (lightmaps, vis, ambient light), VMT/VTF,
            MDL/VVD/VTX models and animation, PCF particle systems, Bink
   player/  a run turned into one timeline across its segments
@@ -431,14 +430,14 @@ In dev, the page has hooks on `window`:
 
 ## Limitations
 
-- **Browser:** the 3D view needs Chrome or Edge, because it reads the game
-  folder through the File System Access API. The map views work in any modern
-  browser.
-- **Maps:** the 3D view finds maps in the game's own map folders. A map that
-  isn't there (a mod's, or a workshop map you haven't downloaded) can't be
-  shown.
+- **Browser:** the 3D view is built for and tested in Chrome and Edge. The
+  map views work in any modern browser.
+- **Maps:** the hosted files cover the campaign and challenge mode maps. A
+  map that isn't among them (a mod's, or a workshop map) can't be shown in
+  3D; its map views still work. In development the 3D view reads your own
+  install, so any map in it can be shown.
 - **Not every effect is matched yet.** Some particle systems and shaders are
   close approximations. Where the viewer and the game differ, the game is
   right.
 
-<div align="center"><sub>Portal 2 and its content belong to Valve. Nothing from the game is included here: the viewer reads your own install.</sub></div>
+<div align="center"><sub>Portal 2 and its content belong to Valve. Nothing from the game is in this repository: the 3D view reads the game's files from the site hosting it, built from that site's own install (in development, from yours).</sub></div>

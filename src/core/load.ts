@@ -49,5 +49,5 @@ export function groupRunFiles<T extends {name: string}>(files: T[]): T[][] {
 export async function loadRun(bytes: Uint8Array, fileName: string): Promise<Run> {
 	if (isSarp(bytes)) return readSarp(bytes, fileName);
 	if (isDem(bytes)) return readDem(bytes, fileName);
-	throw new Error('Not a SAR proof (.sarp) or Source demo (.dem).');
+	throw new Error('Not a Source demo (.dem).');
 }

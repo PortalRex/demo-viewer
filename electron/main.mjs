@@ -13,7 +13,7 @@ import {serveBoard, serveGame} from '../server/local.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'dist');
-const USER_AGENT = `SAR Run Viewer (desktop ${app.getVersion()})`;
+const USER_AGENT = `Demo Viewer (desktop ${app.getVersion()})`;
 
 // ---- settings (the game folder), kept in the app's user data folder ----
 const settingsFile = () => join(app.getPath('userData'), 'settings.json');
@@ -149,9 +149,9 @@ function startServer() {
 
 // ---- the window ----
 let win = null;
-// SAR_VIEWER_BACKGROUND=1: no window shown and no questions asked, the page's
+// DEMO_VIEWER_BACKGROUND=1: no window shown and no questions asked, the page's
 // address printed instead (for testing the app beside a game being played)
-const background = process.env.SAR_VIEWER_BACKGROUND === '1';
+const background = process.env.DEMO_VIEWER_BACKGROUND === '1';
 
 // the demos named on a command line (the app's own arguments left out)
 const demosIn = argv => argv.slice(app.isPackaged ? 1 : 2).filter(a => /\.(dem|sarp)$/i.test(a) && existsSync(a));
@@ -207,7 +207,7 @@ async function createWindow(demo) {
 		width: 1500,
 		height: 950,
 		backgroundColor: '#0f1217',
-		title: 'SAR Run Viewer',
+		title: 'Demo Viewer',
 		show: !background,
 		webPreferences: {contextIsolation: true, nodeIntegration: false, sandbox: true},
 	});
@@ -225,7 +225,7 @@ async function createWindow(demo) {
 	win.on('closed', () => (win = null));
 	await win.loadURL(pageUrl(demo));
 	if (background) {
-		console.log(`SAR Run Viewer at ${origin}/ (game folder: ${gameDir ?? 'not found'})`);
+		console.log(`Demo Viewer at ${origin}/ (game folder: ${gameDir ?? 'not found'})`);
 		return;
 	}
 	if (!gameDir) {
